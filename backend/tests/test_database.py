@@ -39,6 +39,7 @@ def _job(
     tenant_id: str = "tenant-1",
     payload: str = '{"kind":"ping"}',
     idempotency_key: str | None = "idem-1",
+    job_type: str = "system.noop",
 ) -> Job:
     return Job(
         id=job_id,
@@ -54,6 +55,7 @@ def _job(
         fence_token=0,
         created_at="2026-07-13T00:00:00Z",
         updated_at="2026-07-13T00:00:00Z",
+        job_type=job_type,
     )
 
 
