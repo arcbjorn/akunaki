@@ -1,12 +1,12 @@
 # Akunaki documentation
 
-**Status:** Proposed
+**Status:** Proposed architecture + **partial Phase Zero implementation**
 
 **Last reviewed:** 2026-07-13
 
-This repository is **documentation-only**. No application code, infrastructure code, or runtime configuration is present. Everything in this tree describes a **proposed** architecture for Akunaki, a personal health intelligence product that unifies wearable signals into deterministic daily health context and optional model-assisted guidance.
+This repository is **primarily documentation**, with a **first backend foundation** under `backend/` (model-free FastAPI + local libSQL / Turso-compatible storage + Alembic). **Turso Cloud / remote** is intentionally deferred by product decision (not wired). Most product surfaces (connectors, auth, scoring, frontend, agent) are **not** implemented. See [implementation-status.md](implementation-status.md) for an honest implemented / tested / pending table.
 
-Nothing in these pages implies that services, databases, connectors, or UI already exist.
+Nothing outside the documented foundation should be assumed to exist at runtime.
 
 ---
 
@@ -14,6 +14,8 @@ Nothing in these pages implies that services, databases, connectors, or UI alrea
 
 | Area | Document |
 |------|----------|
+| **Implementation status** | [implementation-status.md](implementation-status.md) |
+| **Phase Zero evidence (local libSQL foundation)** | [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md) |
 | Product principles | [product-principles.md](product-principles.md) |
 | Glossary | [glossary.md](glossary.md) |
 | Architecture overview | [architecture/overview.md](architecture/overview.md) |
@@ -29,6 +31,13 @@ Nothing in these pages implies that services, databases, connectors, or UI alrea
 | Roadmap | [roadmap.md](roadmap.md) |
 | References | [references.md](references.md) |
 | Architecture decision records | [adr/README.md](adr/README.md) |
+
+### Backend code
+
+| Path | Notes |
+|------|-------|
+| [`backend/`](../backend/) | Core package, Alembic, tests |
+| [`backend/README.md`](../backend/README.md) | Setup, test, run, migrate, audit commands |
 
 ### ADR index
 
@@ -75,15 +84,16 @@ Every decision the architecture must settle maps to an authoritative page. Secon
 
 1. Start with [product-principles.md](product-principles.md) and [glossary.md](glossary.md).
 2. Read [architecture/overview.md](architecture/overview.md) for the end-to-end shape.
-3. Drill into domain docs as needed; use ADRs for decision history and reversal conditions.
-4. Treat [roadmap.md](roadmap.md) as the implementation sequence **after** documentation is accepted, not as evidence of existing code.
+3. Check [implementation-status.md](implementation-status.md) before assuming code exists.
+4. Drill into domain docs as needed; use ADRs for decision history and reversal conditions.
+5. Treat [roadmap.md](roadmap.md) as the implementation sequence; Phase Zero is **in progress**, not complete.
 
 ---
 
 ## Document conventions
 
-- Every page carries **Status: Proposed** and **Last reviewed: 2026-07-13**.
-- Language uses *proposed*, *target*, *planned*, never *currently implemented*.
+- Architecture pages remain **Status: Proposed** unless they describe shipped code.
+- Language distinguishes *proposed* design from *implemented* foundation.
 - Cross-links are relative within `docs/`.
-- External links appear only in [references.md](references.md) and point at primary official sources.
+- External links appear in [references.md](references.md) and evidence pages; prefer primary official sources.
 - Open validation items are called out explicitly rather than papered over.
