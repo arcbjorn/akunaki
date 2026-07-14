@@ -17,14 +17,17 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from typing import TypeVar
 
-from sqlalchemy import case, delete, exists, or_, select, update
+from sqlalchemy import and_, case, delete, exists, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from akunaki.adapters.db.models import Job, JobLease, LeaderLease
+from akunaki.adapters.db.models import Job, JobAttempt, JobDeadLetter, JobLease, LeaderLease
 from akunaki.domain.jobs import (
+    JobAttemptStatus,
     JobCandidate,
     JobClaim,
+    JobFailureDisposition,
+    JobFailureResult,
     JobRole,
     JobStatus,
     LeaderClaim,
@@ -47,6 +50,9 @@ _BUSY_RETRY_BUDGET_S = 2.0
 # Outer claim_next polling budget (monotonic deadline for the full
 # discover-then-CAS-loop cycle).  Returns None when exhausted.
 _CLAIM_NEXT_BUDGET_S = 0.25
+
+_MAX_REDACTED_ERROR_MESSAGE_LENGTH = 500
+_WORKER_LEASE_EXPIRED = "worker_lease_expired"
 
 
 def _is_database_locked(exc: BaseException) -> bool:
@@ -79,6 +85,29 @@ def _require_lease_ttl(lease_ttl: timedelta) -> None:
             "(canonical timestamps use second resolution; "
             "a positive subsecond TTL would serialize to immediate expiry)"
         )
+        raise ValueError(msg)
+
+
+def _job_attempt_id(job_id: str, attempt_number: int) -> str:
+    """Build the stable primary key for one numbered job attempt."""
+    return f"{job_id}:attempt:{attempt_number}"
+
+
+def _require_failure_details(
+    *,
+    retry_delay: timedelta,
+    error_class: str,
+    redacted_error_message: str | None,
+) -> None:
+    _require_nonempty(error_class, field_name="error_class")
+    if retry_delay < timedelta(0):
+        msg = "retry_delay must be non-negative"
+        raise ValueError(msg)
+    if (
+        redacted_error_message is not None
+        and len(redacted_error_message) > _MAX_REDACTED_ERROR_MESSAGE_LENGTH
+    ):
+        msg = "redacted_error_message must be at most 500 characters"
         raise ValueError(msg)
 
 
@@ -194,11 +223,26 @@ class JobRepository:
                 updated_at=now_s,
             )
         )
+        session.add(
+            JobAttempt(
+                id=_job_attempt_id(job.id, job.attempts),
+                job_id=job.id,
+                attempt_number=job.attempts,
+                fence_token=new_fence,
+                lease_owner=owner,
+                status=JobAttemptStatus.RUNNING.value,
+                error_class=None,
+                redacted_error_message=None,
+                started_at=now_s,
+                finished_at=None,
+            )
+        )
         session.flush()
         return JobClaim(
             job_id=job.id,
             tenant_id=job.tenant_id,
             role=JobRole(job.role),
+            job_type=job.job_type,
             owner=owner,
             fence_token=new_fence,
             leased_until=leased_until,
@@ -438,41 +482,272 @@ class JobRepository:
         now_s = to_utc_rfc3339(now)
 
         def work(session: Session) -> bool:
-            lease = session.execute(
-                select(JobLease).where(
-                    JobLease.job_id == job_id,
-                    JobLease.lease_owner == owner,
-                    JobLease.fence_token == fence_token,
-                    JobLease.leased_until > now_s,
+            active = session.execute(
+                select(Job.attempts)
+                .join(
+                    JobLease,
+                    and_(
+                        JobLease.job_id == Job.id,
+                        JobLease.lease_owner == owner,
+                        JobLease.fence_token == fence_token,
+                        JobLease.leased_until > now_s,
+                    ),
                 )
-            ).scalar_one_or_none()
-            if lease is None:
-                return False
-
-            result = session.execute(
-                update(Job)
+                .join(
+                    JobAttempt,
+                    and_(
+                        JobAttempt.job_id == Job.id,
+                        JobAttempt.attempt_number == Job.attempts,
+                        JobAttempt.fence_token == fence_token,
+                        JobAttempt.lease_owner == owner,
+                        JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                    ),
+                )
                 .where(
                     Job.id == job_id,
                     Job.status == JobStatus.LEASED.value,
                     Job.fence_token == fence_token,
+                    ~exists(select(1).where(JobDeadLetter.job_id == job_id)),
                 )
-                .values(
-                    status=JobStatus.SUCCEEDED.value,
-                    updated_at=now_s,
-                )
-            )
-            if _affected_rows(result) != 1:
+            ).scalar_one_or_none()
+            if active is None:
                 return False
 
-            # Delete only the exact matching lease (id + owner + fence).
-            session.execute(
-                delete(JobLease).where(
-                    JobLease.job_id == job_id,
-                    JobLease.lease_owner == owner,
-                    JobLease.fence_token == fence_token,
+            # A savepoint guarantees any unexpected later CAS mismatch rolls
+            # back the whole lifecycle transition before returning False.
+            with session.begin_nested() as lifecycle_tx:
+                matching_lease = exists(
+                    select(1).where(
+                        JobLease.job_id == job_id,
+                        JobLease.lease_owner == owner,
+                        JobLease.fence_token == fence_token,
+                        JobLease.leased_until > now_s,
+                    )
                 )
+                matching_running_attempt = exists(
+                    select(1).where(
+                        JobAttempt.job_id == job_id,
+                        JobAttempt.attempt_number == active,
+                        JobAttempt.fence_token == fence_token,
+                        JobAttempt.lease_owner == owner,
+                        JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                    )
+                )
+                job_result = session.execute(
+                    update(Job)
+                    .where(
+                        Job.id == job_id,
+                        Job.status == JobStatus.LEASED.value,
+                        Job.fence_token == fence_token,
+                        Job.attempts == active,
+                        matching_lease,
+                        matching_running_attempt,
+                    )
+                    .values(
+                        status=JobStatus.SUCCEEDED.value,
+                        updated_at=now_s,
+                    )
+                )
+                if _affected_rows(job_result) != 1:
+                    lifecycle_tx.rollback()
+                    return False
+
+                attempt_result = session.execute(
+                    update(JobAttempt)
+                    .where(
+                        JobAttempt.job_id == job_id,
+                        JobAttempt.attempt_number == active,
+                        JobAttempt.fence_token == fence_token,
+                        JobAttempt.lease_owner == owner,
+                        JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                    )
+                    .values(
+                        status=JobAttemptStatus.SUCCEEDED.value,
+                        finished_at=now_s,
+                    )
+                )
+                if _affected_rows(attempt_result) != 1:
+                    lifecycle_tx.rollback()
+                    return False
+
+                lease_result = session.execute(
+                    delete(JobLease).where(
+                        JobLease.job_id == job_id,
+                        JobLease.lease_owner == owner,
+                        JobLease.fence_token == fence_token,
+                        JobLease.leased_until > now_s,
+                    )
+                )
+                if _affected_rows(lease_result) != 1:
+                    lifecycle_tx.rollback()
+                    return False
+                return True
+
+        return self._run_short_tx(work)
+
+    def fail_job(
+        self,
+        *,
+        job_id: str,
+        owner: str,
+        fence_token: int,
+        retryable: bool,
+        retry_delay: timedelta,
+        error_class: str,
+        redacted_error_message: str | None,
+        now: datetime,
+    ) -> JobFailureResult | None:
+        """Record a leased attempt failure and retry or dead-letter atomically."""
+        _require_nonempty(job_id, field_name="job_id")
+        _require_nonempty(owner, field_name="owner")
+        _require_failure_details(
+            retry_delay=retry_delay,
+            error_class=error_class,
+            redacted_error_message=redacted_error_message,
+        )
+        now_aware = require_aware(now, field_name="now")
+        now_s = to_utc_rfc3339(now_aware)
+        run_after = to_utc_rfc3339(now_aware + retry_delay)
+
+        def work(session: Session) -> JobFailureResult | None:
+            active = session.execute(
+                select(Job.tenant_id, Job.attempts, Job.max_attempts)
+                .join(
+                    JobLease,
+                    and_(
+                        JobLease.job_id == Job.id,
+                        JobLease.lease_owner == owner,
+                        JobLease.fence_token == fence_token,
+                        JobLease.leased_until > now_s,
+                    ),
+                )
+                .join(
+                    JobAttempt,
+                    and_(
+                        JobAttempt.job_id == Job.id,
+                        JobAttempt.attempt_number == Job.attempts,
+                        JobAttempt.fence_token == fence_token,
+                        JobAttempt.lease_owner == owner,
+                        JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                    ),
+                )
+                .where(
+                    Job.id == job_id,
+                    Job.status == JobStatus.LEASED.value,
+                    Job.fence_token == fence_token,
+                    ~exists(select(1).where(JobDeadLetter.job_id == job_id)),
+                )
+            ).one_or_none()
+            if active is None:
+                return None
+
+            tenant_id, attempt_number, max_attempts = active
+            should_retry = retryable and attempt_number < max_attempts
+            attempt_status = (
+                JobAttemptStatus.RETRY_SCHEDULED if should_retry else JobAttemptStatus.DEAD_LETTER
             )
-            return True
+            job_status = JobStatus.READY if should_retry else JobStatus.DEAD_LETTER
+            new_fence = fence_token + 1
+
+            with session.begin_nested() as lifecycle_tx:
+                matching_lease = exists(
+                    select(1).where(
+                        JobLease.job_id == job_id,
+                        JobLease.lease_owner == owner,
+                        JobLease.fence_token == fence_token,
+                        JobLease.leased_until > now_s,
+                    )
+                )
+                matching_running_attempt = exists(
+                    select(1).where(
+                        JobAttempt.job_id == job_id,
+                        JobAttempt.attempt_number == attempt_number,
+                        JobAttempt.fence_token == fence_token,
+                        JobAttempt.lease_owner == owner,
+                        JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                    )
+                )
+                job_values: dict[str, object] = {
+                    "status": job_status.value,
+                    "fence_token": Job.fence_token + 1,
+                    "last_error_class": error_class,
+                    "updated_at": now_s,
+                }
+                if should_retry:
+                    job_values["run_after"] = run_after
+                job_result = session.execute(
+                    update(Job)
+                    .where(
+                        Job.id == job_id,
+                        Job.status == JobStatus.LEASED.value,
+                        Job.fence_token == fence_token,
+                        Job.attempts == attempt_number,
+                        matching_lease,
+                        matching_running_attempt,
+                    )
+                    .values(**job_values)
+                )
+                if _affected_rows(job_result) != 1:
+                    lifecycle_tx.rollback()
+                    return None
+
+                attempt_result = session.execute(
+                    update(JobAttempt)
+                    .where(
+                        JobAttempt.job_id == job_id,
+                        JobAttempt.attempt_number == attempt_number,
+                        JobAttempt.fence_token == fence_token,
+                        JobAttempt.lease_owner == owner,
+                        JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                    )
+                    .values(
+                        status=attempt_status.value,
+                        error_class=error_class,
+                        redacted_error_message=redacted_error_message,
+                        finished_at=now_s,
+                    )
+                )
+                if _affected_rows(attempt_result) != 1:
+                    lifecycle_tx.rollback()
+                    return None
+
+                lease_result = session.execute(
+                    delete(JobLease).where(
+                        JobLease.job_id == job_id,
+                        JobLease.lease_owner == owner,
+                        JobLease.fence_token == fence_token,
+                        JobLease.leased_until > now_s,
+                    )
+                )
+                if _affected_rows(lease_result) != 1:
+                    lifecycle_tx.rollback()
+                    return None
+
+                if not should_retry:
+                    session.add(
+                        JobDeadLetter(
+                            job_id=job_id,
+                            tenant_id=tenant_id,
+                            attempt_number=attempt_number,
+                            fence_token=new_fence,
+                            error_class=error_class,
+                            redacted_error_message=redacted_error_message,
+                            dead_lettered_at=now_s,
+                        )
+                    )
+                    session.flush()
+
+                return JobFailureResult(
+                    disposition=(
+                        JobFailureDisposition.RETRY_SCHEDULED
+                        if should_retry
+                        else JobFailureDisposition.DEAD_LETTERED
+                    ),
+                    job_id=job_id,
+                    attempt_number=attempt_number,
+                    fence_token=new_fence,
+                    run_after=run_after if should_retry else None,
+                )
 
         return self._run_short_tx(work)
 
@@ -480,57 +755,117 @@ class JobRepository:
         """Requeue expired leases with remaining attempts via per-row fenced CAS.
 
         Each UPDATE rechecks status=leased, expected fence, attempts remaining,
-        and a matching expired job_leases row with the same fence. Lease delete
-        runs only after a one-row win. Returns actual CAS wins, not discovery count.
+        a matching expired lease, and the corresponding running attempt. A win
+        records lease expiry in attempt history before deleting the exact lease.
+        Returns committed lifecycle wins, not discovery count.
         """
         now_s = to_utc_rfc3339(now)
 
         def work(session: Session) -> int:
             stmt = (
-                select(Job.id, Job.fence_token)
-                .join(JobLease, JobLease.job_id == Job.id)
+                select(
+                    Job.id,
+                    Job.attempts,
+                    Job.fence_token,
+                    JobLease.lease_owner,
+                )
+                .join(
+                    JobLease,
+                    and_(
+                        JobLease.job_id == Job.id,
+                        JobLease.fence_token == Job.fence_token,
+                    ),
+                )
+                .join(
+                    JobAttempt,
+                    and_(
+                        JobAttempt.job_id == Job.id,
+                        JobAttempt.attempt_number == Job.attempts,
+                        JobAttempt.fence_token == Job.fence_token,
+                        JobAttempt.lease_owner == JobLease.lease_owner,
+                        JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                    ),
+                )
                 .where(
                     Job.status == JobStatus.LEASED.value,
                     JobLease.leased_until <= now_s,
-                    JobLease.fence_token == Job.fence_token,
                     Job.attempts < Job.max_attempts,
                 )
             )
             candidates = list(session.execute(stmt).all())
             wins = 0
-            for job_id, fence in candidates:
-                matching_expired_lease = exists(
-                    select(1).where(
-                        JobLease.job_id == job_id,
-                        JobLease.fence_token == fence,
-                        JobLease.leased_until <= now_s,
+            for job_id, attempt_number, fence, owner in candidates:
+                with session.begin_nested() as lifecycle_tx:
+                    matching_expired_lease = exists(
+                        select(1).where(
+                            JobLease.job_id == job_id,
+                            JobLease.lease_owner == owner,
+                            JobLease.fence_token == fence,
+                            JobLease.leased_until <= now_s,
+                        )
                     )
-                )
-                result = session.execute(
-                    update(Job)
-                    .where(
-                        Job.id == job_id,
-                        Job.status == JobStatus.LEASED.value,
-                        Job.fence_token == fence,
-                        Job.attempts < Job.max_attempts,
-                        matching_expired_lease,
+                    matching_running_attempt = exists(
+                        select(1).where(
+                            JobAttempt.job_id == job_id,
+                            JobAttempt.attempt_number == attempt_number,
+                            JobAttempt.fence_token == fence,
+                            JobAttempt.lease_owner == owner,
+                            JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                        )
                     )
-                    .values(
-                        status=JobStatus.READY.value,
-                        fence_token=Job.fence_token + 1,
-                        updated_at=now_s,
+                    result = session.execute(
+                        update(Job)
+                        .where(
+                            Job.id == job_id,
+                            Job.status == JobStatus.LEASED.value,
+                            Job.fence_token == fence,
+                            Job.attempts == attempt_number,
+                            Job.attempts < Job.max_attempts,
+                            matching_expired_lease,
+                            matching_running_attempt,
+                        )
+                        .values(
+                            status=JobStatus.READY.value,
+                            fence_token=Job.fence_token + 1,
+                            last_error_class=_WORKER_LEASE_EXPIRED,
+                            updated_at=now_s,
+                        )
                     )
-                )
-                if _affected_rows(result) != 1:
-                    continue
-                session.execute(
-                    delete(JobLease).where(
-                        JobLease.job_id == job_id,
-                        JobLease.fence_token == fence,
-                        JobLease.leased_until <= now_s,
+                    if _affected_rows(result) != 1:
+                        lifecycle_tx.rollback()
+                        continue
+
+                    attempt_result = session.execute(
+                        update(JobAttempt)
+                        .where(
+                            JobAttempt.job_id == job_id,
+                            JobAttempt.attempt_number == attempt_number,
+                            JobAttempt.fence_token == fence,
+                            JobAttempt.lease_owner == owner,
+                            JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                        )
+                        .values(
+                            status=JobAttemptStatus.LEASE_EXPIRED.value,
+                            error_class=_WORKER_LEASE_EXPIRED,
+                            finished_at=now_s,
+                        )
                     )
-                )
-                wins += 1
+                    if _affected_rows(attempt_result) != 1:
+                        lifecycle_tx.rollback()
+                        continue
+
+                    lease_result = session.execute(
+                        delete(JobLease).where(
+                            JobLease.job_id == job_id,
+                            JobLease.lease_owner == owner,
+                            JobLease.fence_token == fence,
+                            JobLease.leased_until <= now_s,
+                        )
+                    )
+                    if _affected_rows(lease_result) != 1:
+                        lifecycle_tx.rollback()
+                        continue
+                    wins += 1
             return wins
 
         return self._run_short_tx(work)
@@ -538,57 +873,131 @@ class JobRepository:
     def dead_letter_expired_jobs(self, *, now: datetime) -> int:
         """Dead-letter max-attempt expired leases via per-row fenced CAS.
 
-        Same fencing as requeue: status, fence, attempts, matching expired lease.
-        Returns actual CAS wins.
+        Same fencing as requeue. A win closes the running attempt, records a
+        permanent dead letter, and deletes the exact expired lease atomically.
         """
         now_s = to_utc_rfc3339(now)
 
         def work(session: Session) -> int:
             stmt = (
-                select(Job.id, Job.fence_token)
-                .join(JobLease, JobLease.job_id == Job.id)
+                select(
+                    Job.id,
+                    Job.tenant_id,
+                    Job.attempts,
+                    Job.fence_token,
+                    JobLease.lease_owner,
+                )
+                .join(
+                    JobLease,
+                    and_(
+                        JobLease.job_id == Job.id,
+                        JobLease.fence_token == Job.fence_token,
+                    ),
+                )
+                .join(
+                    JobAttempt,
+                    and_(
+                        JobAttempt.job_id == Job.id,
+                        JobAttempt.attempt_number == Job.attempts,
+                        JobAttempt.fence_token == Job.fence_token,
+                        JobAttempt.lease_owner == JobLease.lease_owner,
+                        JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                    ),
+                )
                 .where(
                     Job.status == JobStatus.LEASED.value,
                     JobLease.leased_until <= now_s,
-                    JobLease.fence_token == Job.fence_token,
                     Job.attempts >= Job.max_attempts,
+                    ~exists(select(1).where(JobDeadLetter.job_id == Job.id)),
                 )
             )
             candidates = list(session.execute(stmt).all())
             wins = 0
-            for job_id, fence in candidates:
-                matching_expired_lease = exists(
-                    select(1).where(
-                        JobLease.job_id == job_id,
-                        JobLease.fence_token == fence,
-                        JobLease.leased_until <= now_s,
+            for job_id, tenant_id, attempt_number, fence, owner in candidates:
+                with session.begin_nested() as lifecycle_tx:
+                    matching_expired_lease = exists(
+                        select(1).where(
+                            JobLease.job_id == job_id,
+                            JobLease.lease_owner == owner,
+                            JobLease.fence_token == fence,
+                            JobLease.leased_until <= now_s,
+                        )
                     )
-                )
-                result = session.execute(
-                    update(Job)
-                    .where(
-                        Job.id == job_id,
-                        Job.status == JobStatus.LEASED.value,
-                        Job.fence_token == fence,
-                        Job.attempts >= Job.max_attempts,
-                        matching_expired_lease,
+                    matching_running_attempt = exists(
+                        select(1).where(
+                            JobAttempt.job_id == job_id,
+                            JobAttempt.attempt_number == attempt_number,
+                            JobAttempt.fence_token == fence,
+                            JobAttempt.lease_owner == owner,
+                            JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                        )
                     )
-                    .values(
-                        status=JobStatus.DEAD_LETTER.value,
-                        fence_token=Job.fence_token + 1,
-                        updated_at=now_s,
+                    result = session.execute(
+                        update(Job)
+                        .where(
+                            Job.id == job_id,
+                            Job.status == JobStatus.LEASED.value,
+                            Job.fence_token == fence,
+                            Job.attempts == attempt_number,
+                            Job.attempts >= Job.max_attempts,
+                            matching_expired_lease,
+                            matching_running_attempt,
+                        )
+                        .values(
+                            status=JobStatus.DEAD_LETTER.value,
+                            fence_token=Job.fence_token + 1,
+                            last_error_class=_WORKER_LEASE_EXPIRED,
+                            updated_at=now_s,
+                        )
                     )
-                )
-                if _affected_rows(result) != 1:
-                    continue
-                session.execute(
-                    delete(JobLease).where(
-                        JobLease.job_id == job_id,
-                        JobLease.fence_token == fence,
-                        JobLease.leased_until <= now_s,
+                    if _affected_rows(result) != 1:
+                        lifecycle_tx.rollback()
+                        continue
+
+                    attempt_result = session.execute(
+                        update(JobAttempt)
+                        .where(
+                            JobAttempt.job_id == job_id,
+                            JobAttempt.attempt_number == attempt_number,
+                            JobAttempt.fence_token == fence,
+                            JobAttempt.lease_owner == owner,
+                            JobAttempt.status == JobAttemptStatus.RUNNING.value,
+                        )
+                        .values(
+                            status=JobAttemptStatus.DEAD_LETTER.value,
+                            error_class=_WORKER_LEASE_EXPIRED,
+                            finished_at=now_s,
+                        )
                     )
-                )
-                wins += 1
+                    if _affected_rows(attempt_result) != 1:
+                        lifecycle_tx.rollback()
+                        continue
+
+                    lease_result = session.execute(
+                        delete(JobLease).where(
+                            JobLease.job_id == job_id,
+                            JobLease.lease_owner == owner,
+                            JobLease.fence_token == fence,
+                            JobLease.leased_until <= now_s,
+                        )
+                    )
+                    if _affected_rows(lease_result) != 1:
+                        lifecycle_tx.rollback()
+                        continue
+
+                    session.add(
+                        JobDeadLetter(
+                            job_id=job_id,
+                            tenant_id=tenant_id,
+                            attempt_number=attempt_number,
+                            fence_token=fence + 1,
+                            error_class=_WORKER_LEASE_EXPIRED,
+                            redacted_error_message=None,
+                            dead_lettered_at=now_s,
+                        )
+                    )
+                    session.flush()
+                    wins += 1
             return wins
 
         return self._run_short_tx(work)
