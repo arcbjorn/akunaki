@@ -23,22 +23,26 @@ Legend:
 | Safe local default `sqlite+libsql` URL | yes | yes | parent dir created on engine build |
 | Local-only `database_url` validation (official `sqlite+libsql://` memory / path memory / relative / absolute file) | yes | yes | rejects hostname, credentials, port, query, fragment, non-dialect |
 | Remote Turso auth token / connect_args | **no** | n/a | **intentionally deferred** (not wired; not credential-blocked) |
-| SQLAlchemy 2 engine/session + FK pragma | yes | yes | official local `sqlite+libsql` dialect |
+| SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + initial migration (`tenants`, `jobs`) | yes | yes (up/down/up) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, `job_leases`, `leader_leases`) | yes | yes (up/down/up; 0002↔0001) | full product schema pending |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
+| Domain job types + ports Protocol (model-free) | yes | yes | no SQLAlchemy in domain/ports; second-precision times; min 1s lease TTL |
+| JobRepository CAS claim / lease / leader fencing | yes | yes | local multi-client; fenced requeue/dead-letter; `has_valid_job_lease` validity only |
+| Leader lease owner/expiry pair + nonempty name checks | yes | yes | migration `0002` + model agreement |
 | FastAPI app factory + `python -m akunaki.api` | yes | yes | |
 | `GET /healthz` (service, db ready, `models_required=false`) | yes | yes | does not fabricate product health |
 | Worker entry `python -m akunaki.worker` stub | yes | yes | **no job claim loop** |
 | Core-only / no model SDKs | yes | yes | import-linter + tests |
-| Ruff / mypy / import-linter / pytest / pip-audit gates | yes | yes | see evidence doc |
+| Ruff / mypy / import-linter / pytest / pip-audit gates | yes | yes | see evidence docs |
 | Frontend / web | no | no | deferred |
 | Auth / OIDC / sessions product | no | no | deferred |
 | Connectors (Oura, Google Health, Polar) | no | no | deferred |
 | Agent / model packages | no | no | forbidden in core |
-| Full data-model schema | no | no | only tenants + jobs foundation |
-| Job concurrency protocol (CAS claim, leases, fence) | no | no | table shape only |
+| Full data-model schema | no | no | tenants + jobs + lease tables only |
+| Worker claim loop / scheduler reaper | no | no | repository foundation only |
+| Retries with backoff / attempt history | no | no | not implemented |
 | Remote production Turso (Turso Cloud) | no | no | **product deferred**; proposed in ADR 0003 only |
 | Encryption-at-rest / backup evidence | no | no | Phase Zero open |
 | Volume / vector spikes | no | no | Phase Zero open |
@@ -62,6 +66,6 @@ Legend:
 |------|-------|
 | `docs/` architecture set | Proposed design (mostly still forward-looking; Turso Cloud remains **future** context) |
 | `backend/` | First real application code (this foundation) |
-| Phase Zero overall | **In progress** — local libSQL / Turso-compatible storage is the implemented scope; remote Turso intentionally deferred; concurrency + other spikes open |
+| Phase Zero overall | **In progress** — local libSQL foundation + job/leader lease CAS protocol tested; remote Turso intentionally deferred; worker loop / encryption / volume open |
 
-Evidence: [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md).
+Evidence: [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md), [evidence/phase-zero-job-concurrency.md](evidence/phase-zero-job-concurrency.md).
