@@ -28,7 +28,7 @@ from akunaki.adapters.db.engine import (
     probe_database_ready,
 )
 from akunaki.adapters.db.job_repository import MIN_LEASE_TTL, JobRepository
-from akunaki.adapters.db.models import Job, JobLease, LeaderLease, Tenant
+from akunaki.adapters.db.models import Job, JobAttempt, JobDeadLetter, JobLease, LeaderLease, Tenant
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import (
     JobCandidate,
@@ -106,6 +106,7 @@ def _add_job(
     created_at: datetime | None = None,
     payload: str = '{"kind":"ping"}',
     idempotency_key: str | None = None,
+    job_type: str = "system.noop",
 ) -> None:
     created = created_at if created_at is not None else run_after
     with session_factory() as session, session.begin():
@@ -124,6 +125,7 @@ def _add_job(
                 fence_token=fence_token,
                 created_at=to_utc_rfc3339(created),
                 updated_at=to_utc_rfc3339(created),
+                job_type=job_type,
             )
         )
 
@@ -1154,6 +1156,7 @@ def test_nested_transaction_savepoint_behavior(concurrency_db: str) -> None:
                     fence_token=0,
                     created_at=to_utc_rfc3339(T0),
                     updated_at=to_utc_rfc3339(T0),
+                    job_type="system.noop",
                 )
             )
             session.flush()
@@ -1174,6 +1177,7 @@ def test_nested_transaction_savepoint_behavior(concurrency_db: str) -> None:
                     fence_token=0,
                     created_at=to_utc_rfc3339(T0),
                     updated_at=to_utc_rfc3339(T0),
+                    job_type="system.noop",
                 )
             )
             session.flush()
@@ -1210,9 +1214,11 @@ def test_migration_upgrade_downgrade_to_0001_upgrade(
         tables = set(inspect(engine).get_table_names())
         assert "job_leases" in tables
         assert "leader_leases" in tables
+        assert "job_attempts" in tables
+        assert "job_dead_letters" in tables
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "20260713_0002"
+        assert version == "20260713_0003"
     finally:
         engine.dispose()
 
@@ -1222,6 +1228,8 @@ def test_migration_upgrade_downgrade_to_0001_upgrade(
         tables = set(inspect(engine).get_table_names())
         assert "job_leases" not in tables
         assert "leader_leases" not in tables
+        assert "job_attempts" not in tables
+        assert "job_dead_letters" not in tables
         assert "jobs" in tables
         assert "tenants" in tables
         with engine.connect() as conn:
@@ -1236,9 +1244,11 @@ def test_migration_upgrade_downgrade_to_0001_upgrade(
         tables = set(inspect(engine).get_table_names())
         assert "job_leases" in tables
         assert "leader_leases" in tables
+        assert "job_attempts" in tables
+        assert "job_dead_letters" in tables
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "20260713_0002"
+        assert version == "20260713_0003"
         assert db_path.resolve().is_relative_to(tmp_path.resolve())
     finally:
         engine.dispose()
@@ -1255,12 +1265,18 @@ def test_lease_models_agree_with_migration(concurrency_db: str) -> None:
             "jobs",
             "job_leases",
             "leader_leases",
+            "job_attempts",
+            "job_dead_letters",
             "alembic_version",
         }
         lease_cols = {c["name"] for c in insp.get_columns("job_leases")}
         leader_cols = {c["name"] for c in insp.get_columns("leader_leases")}
+        attempt_cols = {c["name"] for c in insp.get_columns("job_attempts")}
+        dl_cols = {c["name"] for c in insp.get_columns("job_dead_letters")}
         assert lease_cols == {c.name for c in JobLease.__table__.columns}
         assert leader_cols == {c.name for c in LeaderLease.__table__.columns}
+        assert attempt_cols == {c.name for c in JobAttempt.__table__.columns}
+        assert dl_cols == {c.name for c in JobDeadLetter.__table__.columns}
 
         fks = insp.get_foreign_keys("job_leases")
         assert any(
@@ -1271,6 +1287,27 @@ def test_lease_models_agree_with_migration(concurrency_db: str) -> None:
         assert "ix_job_leases_lease_owner" in lease_indexes
         leader_indexes = {ix["name"] for ix in insp.get_indexes("leader_leases")}
         assert "ix_leader_leases_leased_until" in leader_indexes
+
+        attempt_fks = insp.get_foreign_keys("job_attempts")
+        assert any(
+            fk["referred_table"] == "jobs" and fk["constrained_columns"] == ["job_id"]
+            for fk in attempt_fks
+        )
+        attempt_indexes = {ix["name"] for ix in insp.get_indexes("job_attempts")}
+        assert "ix_job_attempts_job_id" in attempt_indexes
+        assert "ix_job_attempts_status" in attempt_indexes
+
+        dl_fks = insp.get_foreign_keys("job_dead_letters")
+        assert any(
+            fk["referred_table"] == "jobs" and fk["constrained_columns"] == ["job_id"]
+            for fk in dl_fks
+        )
+        assert any(
+            fk["referred_table"] == "tenants" and fk["constrained_columns"] == ["tenant_id"]
+            for fk in dl_fks
+        )
+        dl_indexes = {ix["name"] for ix in insp.get_indexes("job_dead_letters")}
+        assert "ix_job_dead_letters_tenant_dead_lettered_at" in dl_indexes
     finally:
         engine.dispose()
 
