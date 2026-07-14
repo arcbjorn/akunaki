@@ -5,11 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import QueuePool, StaticPool
 
-from akunaki.adapters.db.engine import create_db_engine, probe_database_ready
+from akunaki.adapters.db.base import Base
+from akunaki.adapters.db.engine import (
+    create_db_engine,
+    create_session_factory,
+    probe_database_ready,
+)
 from akunaki.adapters.db.models import Job, Tenant
 from akunaki.config import Settings
 
@@ -62,6 +68,48 @@ def test_create_engine_makes_parent_directory(tmp_path: Path) -> None:
     try:
         assert nested.is_dir()
         assert probe_database_ready(engine)
+        assert isinstance(engine.pool, QueuePool)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "memory_url",
+    [
+        "sqlite+libsql://",
+        "sqlite+libsql:///:memory:",
+    ],
+)
+def test_memory_engine_persists_across_session_checkouts(memory_url: str) -> None:
+    """StaticPool keeps one in-memory DB across separate connections/sessions."""
+    settings = Settings(database_url=memory_url)
+    engine = create_db_engine(settings)
+    try:
+        assert isinstance(engine.pool, StaticPool)
+        Base.metadata.create_all(engine)
+        factory = create_session_factory(engine)
+
+        # Session 1: insert tenant and commit.
+        with factory() as session, session.begin():
+            session.add(
+                Tenant(
+                    id="mem-tenant",
+                    created_at="2026-07-13T00:00:00Z",
+                    status="active",
+                    primary_timezone="UTC",
+                    display_name="Memory",
+                )
+            )
+
+        # New connection/session checkout must see the same in-memory schema/data.
+        with engine.connect() as conn:
+            count = conn.execute(text("SELECT COUNT(*) FROM tenants")).scalar_one()
+        assert int(count) == 1
+
+        with factory() as session:
+            row = session.get(Tenant, "mem-tenant")
+            assert row is not None
+            assert row.display_name == "Memory"
     finally:
         engine.dispose()
 
@@ -106,3 +154,55 @@ def test_idempotency_unique(db_session: Session) -> None:
     with pytest.raises(ConstraintError, match=r"UNIQUE constraint"):
         db_session.commit()
     db_session.rollback()
+
+
+def test_file_engine_uses_queue_pool(tmp_path: Path) -> None:
+    """File-backed engine uses QueuePool with bounded settings."""
+    db_path = tmp_path / "pool.db"
+    url = f"sqlite+libsql:///{db_path.resolve()}"
+    settings = Settings(database_url=url)
+    engine = create_db_engine(settings)
+    try:
+        assert isinstance(engine.pool, QueuePool)
+        assert engine.pool.size() == 5
+        assert engine.pool.timeout() == 5
+    finally:
+        engine.dispose()
+
+
+def test_file_queue_pool_sequential_checkouts_reuse_connection(tmp_path: Path) -> None:
+    """Sequential session checkouts on QueuePool reuse the same physical connection."""
+    db_path = tmp_path / "reuse.db"
+    url = f"sqlite+libsql:///{db_path.resolve()}"
+    settings = Settings(database_url=url)
+    engine = create_db_engine(settings)
+    try:
+        Base.metadata.create_all(engine)
+        factory = create_session_factory(engine)
+
+        # Session 1: insert and commit, then close (connection returns to pool).
+        with factory() as session, session.begin():
+            session.add(
+                Tenant(
+                    id="reuse-tenant",
+                    created_at="2026-07-13T00:00:00Z",
+                    status="active",
+                    primary_timezone="UTC",
+                    display_name="Reuse",
+                )
+            )
+        # Session closed; connection returned to pool.
+
+        # Session 2: new checkout must reuse the same pooled connection.
+        with factory() as session:
+            row = session.get(Tenant, "reuse-tenant")
+            assert row is not None
+            assert row.display_name == "Reuse"
+
+        # Pool should have 1 idle connection (reused, not fresh).
+        status = engine.pool.status()
+        assert "Pool size: 5" in status
+        assert "Connections in pool: 1" in status
+        assert "Current Checked out connections: 0" in status
+    finally:
+        engine.dispose()
