@@ -1,4 +1,4 @@
-"""Platform foundation ORM models (tenants, jobs, leases).
+"""Platform foundation ORM models (tenants, jobs, leases, attempts, dead letters).
 
 Job concurrency protocol is implemented by JobRepository against these tables.
 IDs are caller-supplied TEXT values (no application UUIDv7 generator yet).
@@ -28,6 +28,10 @@ class Tenant(Base):
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     jobs: Mapped[list[Job]] = relationship(back_populates="tenant")
+    dead_letters_rel: Mapped[list[JobDeadLetter]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -62,9 +66,24 @@ class Job(Base):
     fence_token: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    job_type: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'system.noop'"),
+    )
+    last_error_class: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="jobs")
     lease: Mapped[JobLease | None] = relationship(
+        back_populates="job",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    attempts_rel: Mapped[list[JobAttempt]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+    dead_letter: Mapped[JobDeadLetter | None] = relationship(
         back_populates="job",
         uselist=False,
         cascade="all, delete-orphan",
@@ -100,6 +119,7 @@ class Job(Base):
         ),
         Index("ix_jobs_tenant_status", "tenant_id", "status"),
         Index("ix_jobs_role_status_run_after", "role", "status", "run_after"),
+        Index("ix_jobs_role_job_type_status_run_after", "role", "job_type", "status", "run_after"),
     )
 
 
@@ -157,4 +177,75 @@ class LeaderLease(Base):
             name="leader_lease_owner_null_or_nonempty",
         ),
         Index("ix_leader_leases_leased_until", "leased_until"),
+    )
+
+
+class JobAttempt(Base):
+    """Per-attempt tracking row for durable job execution."""
+
+    __tablename__ = "job_attempts"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    fence_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    error_class: Mapped[str | None] = mapped_column(Text, nullable=True)
+    redacted_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[str] = mapped_column(Text, nullable=False)
+    finished_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    job: Mapped[Job] = relationship(back_populates="attempts_rel")
+
+    __table_args__ = (
+        CheckConstraint("attempt_number >= 1", name="job_attempt_number_pos"),
+        CheckConstraint("fence_token >= 0", name="job_attempt_fence_token_nonneg"),
+        CheckConstraint("length(lease_owner) > 0", name="job_attempt_lease_owner_nonempty"),
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'retry_scheduled', 'dead_letter', 'lease_expired')",
+            name="job_attempt_status",
+        ),
+        UniqueConstraint(
+            "job_id",
+            "attempt_number",
+            name="uq_job_attempts_job_id_attempt_number",
+        ),
+        Index("ix_job_attempts_job_id", "job_id"),
+        Index("ix_job_attempts_status", "status"),
+    )
+
+
+class JobDeadLetter(Base):
+    """Permanent failure record for a dead-lettered job."""
+
+    __tablename__ = "job_dead_letters"
+
+    job_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    fence_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_class: Mapped[str] = mapped_column(Text, nullable=False)
+    redacted_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dead_lettered_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    job: Mapped[Job] = relationship(back_populates="dead_letter")
+    tenant: Mapped[Tenant] = relationship(back_populates="dead_letters_rel")
+
+    __table_args__ = (
+        CheckConstraint("attempt_number >= 1", name="job_dl_attempt_number_pos"),
+        CheckConstraint("fence_token >= 0", name="job_dl_fence_token_nonneg"),
+        Index("ix_job_dead_letters_tenant_dead_lettered_at", "tenant_id", "dead_lettered_at"),
     )
