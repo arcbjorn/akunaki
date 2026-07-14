@@ -1,8 +1,8 @@
-# Phase Zero evidence: local libSQL durable job lease and leader fencing
+# Phase Zero evidence: local libSQL durable job lifecycle and leader fencing
 
-**Date:** 2026-07-13
+**Date:** 2026-07-14
 
-**Status:** Partial — **local** file-backed libSQL concurrency protocol implemented and tested; **worker claim loop**, **retries with backoff**, **attempt history tables**, **atomic domain side-effect fencing (UoW)**, and **Turso Cloud** are **not** implemented
+**Status:** Partial — the **local** file-backed libSQL repository implements the atomic durable execution lifecycle and leader fencing; the **worker runtime**, retry/backoff policy and handlers, **atomic domain side-effect fencing (UoW)**, and **Turso Cloud** are **not** implemented
 
 **Authoritative context:** [repository-and-services.md](../architecture/repository-and-services.md) job protocol, [testing.md](../testing.md) integration expectations, [ADR 0003](../adr/0003-libsql-operational-store.md)
 
@@ -13,13 +13,16 @@
 Atomic claim uses **candidate discovery + conditional compare-and-swap**, never row-level lock idioms.
 
 1. **Discover** (short read transaction): `status=ready`, `run_after <= now`, matching worker `role`, `attempts < max_attempts`, ordered by `priority ASC`, `created_at ASC`, `id ASC`. Capture `expected_fence_token` per candidate.
-2. **Claim CAS** (separate short write transaction per candidate): conditional `UPDATE jobs` succeeds only when still `ready`, due, `fence_token` equals expected, `role` matches, and attempts remain. On win: set `leased`, `attempts = attempts + 1`, `fence_token = fence_token + 1`, then delete+insert matching `job_leases` row (`lease_owner`, `leased_until`, `fence_token`). **Zero-row update → lose cleanly**; try next candidate / rediscover. Each CAS attempt runs in its own short transaction; discovery and CAS are never in the same transaction.
+2. **Claim CAS** (separate short write transaction per candidate): conditional `UPDATE jobs` succeeds only when still `ready`, due, `fence_token` equals expected, `role` matches, and attempts remain. On win: set `leased`, increment `attempts` and `fence_token`, replace the matching `job_leases` row, and insert exactly one deterministic `(job_id, attempt_number)` `job_attempts` row with the current fence, owner, `running` status, and `started_at`, all in the same transaction. **Zero-row update → lose cleanly**; try next candidate / rediscover. Each CAS attempt runs in its own short transaction; discovery and CAS are never in the same transaction.
 3. **Heartbeat job**: extend `leased_until` only when lease owner/fence/unexpired match **and** the jobs row remains `leased` with the same fence.
-4. **Complete**: succeed only with matching owner + fence on an unexpired lease; set `succeeded` and delete the lease matching job id + owner + fence.
-5. **Requeue expired** (per-row fenced CAS): for each candidate, conditional `UPDATE` rechecks `status=leased`, expected fence, `attempts < max_attempts`, and a matching expired `job_leases` row with the same fence; on one-row win increment fence, set `ready`, delete that exact expired lease. Return **actual wins**, not discovery count.
-6. **Dead-letter** (same fenced CAS shape): leased + expired lease + `attempts >= max_attempts` → `dead_letter` + fence increment + exact lease delete; return actual wins.
-7. **Leader lease**: named row in `leader_leases`; CAS acquire when free/expired (null owner/expiry or `leased_until <= now`); fence increments on takeover; heartbeat and validity checks require owner + fence + unexpired. Schema requires nonempty `lease_name` and owner/expiry both null or both non-null.
-8. **`has_valid_job_lease`**: validity primitive (job status leased + owner + fence + unexpired matching lease). **Not** atomic domain side-effect fencing; that integrates with a later application unit of work.
+4. **Complete**: require the exact current owner and fence on an unexpired lease plus the matching `running` attempt; atomically mark that attempt `succeeded` with `finished_at`, mark the job `succeeded`, and delete only the exact lease. Stale or inconsistent state returns `false` with no mutation.
+5. **Explicit failure**: require the same exact unexpired lease and matching `running` attempt. A retryable failure with attempts remaining marks the attempt `retry_scheduled`, records redacted error data and `finished_at`, sets the job `ready` with `run_after = now + retry_delay`, records `last_error_class`, increments the job fence exactly once, and deletes the exact lease. Nonretryable failures and exhausted attempts instead mark the attempt and job `dead_letter`, increment the fence once, delete the exact lease, and create the job's single `job_dead_letters` record. Stale, wrong, expired, or inconsistent input returns `None` with no mutation.
+6. **Requeue expired** (per-row fenced CAS): for each candidate, conditional `UPDATE` rechecks `status=leased`, expected fence, `attempts < max_attempts`, a matching expired lease, and its matching `running` attempt; on one-row win increment the job fence, set the job `ready`, mark the attempt `lease_expired` with `error_class=worker_lease_expired` and `finished_at`, then delete that exact lease. Return **actual wins**, not discovery count.
+7. **Dead-letter expired** (same fenced CAS shape): a leased job at max attempts with the matching expired lease and `running` attempt becomes `dead_letter`; the attempt becomes `dead_letter` with `error_class=worker_lease_expired`, the job fence increments once, the exact lease is deleted, and one `job_dead_letters` row is written.
+8. **Leader lease**: named row in `leader_leases`; CAS acquire when free/expired (null owner/expiry or `leased_until <= now`); fence increments on takeover; heartbeat and validity checks require owner + fence + unexpired. Schema requires nonempty `lease_name` and owner/expiry both null or both non-null.
+9. **`has_valid_job_lease`**: validity primitive (job status leased + owner + fence + unexpired matching lease). **Not** atomic domain side-effect fencing; that integrates with a later application unit of work.
+
+Failure inputs reject naive time, empty identifiers or `error_class`, negative retry delay, and redacted messages over 500 characters. Retry scheduling is a durable repository primitive using the caller-provided delay; no runtime retry classification or backoff policy is claimed.
 
 **Forbidden:** `SELECT … FOR UPDATE`, `SKIP LOCKED`, and SQLAlchemy `with_for_update`.
 
@@ -113,10 +116,11 @@ Concurrency tests do **not** use always-true branches, fairness assumptions, or 
 | In scope | Out of scope (not claimed) |
 |----------|----------------------------|
 | Local file-backed `sqlite+libsql` (QueuePool) + in-memory StaticPool | Turso Cloud / remote auth |
-| Job + leader lease tables (migration `20260713_0002`) | Worker process claim loop |
-| `JobRepository` CAS API + `has_valid_job_lease` validity primitive | Atomic domain side-effect fencing / application UoW |
-| Domain types + ports Protocol | Retries with backoff policy |
-| Integration tests on temp files | `job_attempts` history table |
+| Jobs, leases, attempts, and dead letters (migrations through `20260713_0003`) | Worker process claim, heartbeat, scheduler, or reaper loops |
+| `JobRepository` CAS claim and atomic execution-lifecycle transitions | Atomic domain side-effect fencing / application UoW |
+| Pure domain lifecycle/failure types + ports Protocol | Runtime retry classification and backoff policy |
+| Durable attempt history and one-to-one dead-letter records | Job handlers and operator dead-letter UI |
+| Integration tests on temp files | Turso Cloud multi-client execution |
 | PRAGMA `foreign_keys` + `busy_timeout=50` + file WAL once | Production multi-region leadership |
 | | Encryption / backup spikes |
 
@@ -126,9 +130,29 @@ Concurrency tests do **not** use always-true branches, fairness assumptions, or 
 
 ---
 
-## Exact executed results
+## Current 0003 lifecycle verification
 
-Commands run from `backend/` after `uv sync --all-groups` on Python 3.13.14 (full gate re-run after this review-fix):
+**Date:** 2026-07-14
+
+| Check | Command | Result |
+|-------|---------|--------|
+| Focused lifecycle module | `uv run pytest tests/test_job_lifecycle.py` | PASS (17 passed); covers attempt creation, completion, retry, dead letters, invalid claims, expiry, and races |
+| Tests | `uv run pytest` | PASS (131 passed in 2.39 s) |
+| Lint | `uv run ruff check .` | PASS (All checks passed!) |
+| Format | `uv run ruff format --check .` | PASS (34 files already formatted) |
+| Types | `uv run mypy src tests` | PASS (Success across 30 source files) |
+| Import boundaries | `uv run lint-imports` | PASS (5 contracts kept) |
+| Lock | `uv lock --check` | PASS (Resolved 67 packages) |
+| Freshness | `uv tree --outdated` | Every direct dependency current; only transitive `pydantic-core` 2.46.4 is behind 2.47.0 because `pydantic` 2.13.4 requires 2.46.4 exactly |
+| Audit | `uv run pip-audit` | PASS (No known vulnerabilities; local `akunaki` package skipped because it is not on PyPI) |
+| Build | `uv build` | PASS (produced sdist and wheel) |
+| Diff whitespace | `git diff --check` | PASS |
+
+---
+
+## Previous lease-foundation execution baseline
+
+These commands were run from `backend/` on Python 3.13.14 for the `0002` lease-foundation baseline. The counts below predate the `0003` durable lifecycle work and are not presented as verification of that revision; current gate results belong in the final lifecycle verification record.
 
 | Check | Command | Result |
 |-------|---------|--------|
@@ -151,15 +175,16 @@ Commands run from `backend/` after `uv sync --all-groups` on Python 3.13.14 (ful
 |----------|----------|
 | `20260713_0001` | `tenants`, `jobs` (unchanged) |
 | `20260713_0002` | `job_leases`, `leader_leases` (owner/expiry pair + nonempty name checks) |
+| `20260713_0003` | `jobs.job_type` / `last_error_class`, `job_attempts`, `job_dead_letters` |
 
-Downgrade of `0002` returns cleanly to `0001` (lease tables dropped; foundation tables retained).
+The migration test exercises head → `20260713_0002` → head, preserves a legacy job, and verifies the `system.noop` backfill. Revisions `0001` and `0002` remain unchanged.
 
 ---
 
 ## What this evidence does *not* claim
 
 - Worker scheduler / claim loop process (`python -m akunaki.worker` remains a stub)
-- Retry backoff, poison-message attempt history, dead-letter operator UI
+- Runtime retry classification/backoff, job handlers, or dead-letter operator UI
 - Atomic domain side-effect fencing tied to application unit of work (`has_valid_job_lease` is validity-only)
 - Turso Cloud connectivity or multi-region leader election
 - Full product job types / handlers
