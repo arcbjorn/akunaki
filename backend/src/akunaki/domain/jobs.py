@@ -29,6 +29,23 @@ class JobStatus(StrEnum):
     DEAD_LETTER = "dead_letter"
 
 
+class JobAttemptStatus(StrEnum):
+    """Execution outcome recorded for one durable job attempt."""
+
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    RETRY_SCHEDULED = "retry_scheduled"
+    DEAD_LETTER = "dead_letter"
+    LEASE_EXPIRED = "lease_expired"
+
+
+class JobFailureDisposition(StrEnum):
+    """Repository disposition after recording a job failure."""
+
+    RETRY_SCHEDULED = "retry_scheduled"
+    DEAD_LETTERED = "dead_lettered"
+
+
 def require_aware(dt: datetime, *, field_name: str = "datetime") -> datetime:
     """Reject naive datetimes; return the same instance when timezone-aware."""
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
@@ -86,12 +103,24 @@ class JobClaim:
     job_id: str
     tenant_id: str
     role: JobRole
+    job_type: str
     owner: str
     fence_token: int
     leased_until: str
     attempts: int
     max_attempts: int
     payload_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class JobFailureResult:
+    """Committed result of handling a leased job failure."""
+
+    disposition: JobFailureDisposition
+    job_id: str
+    attempt_number: int
+    fence_token: int
+    run_after: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
