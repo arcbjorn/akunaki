@@ -35,10 +35,12 @@ def test_upgrade_downgrade_upgrade(
         tables = set(inspect(engine).get_table_names())
         assert "tenants" in tables
         assert "jobs" in tables
+        assert "job_leases" in tables
+        assert "leader_leases" in tables
         assert "alembic_version" in tables
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "20260713_0001"
+        assert version == "20260713_0002"
     finally:
         engine.dispose()
 
@@ -48,6 +50,8 @@ def test_upgrade_downgrade_upgrade(
         tables = set(inspect(engine).get_table_names())
         assert "tenants" not in tables
         assert "jobs" not in tables
+        assert "job_leases" not in tables
+        assert "leader_leases" not in tables
     finally:
         engine.dispose()
 
@@ -57,6 +61,8 @@ def test_upgrade_downgrade_upgrade(
         tables = set(inspect(engine).get_table_names())
         assert "tenants" in tables
         assert "jobs" in tables
+        assert "job_leases" in tables
+        assert "leader_leases" in tables
         # DB file must live under this test's pytest tmp_path (no leftover outside temp).
         path_part = Path(temp_db_url.removeprefix("sqlite+libsql:///"))
         resolved_db = path_part.resolve()
