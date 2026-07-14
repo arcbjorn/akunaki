@@ -16,6 +16,7 @@ Nothing outside the documented foundation should be assumed to exist at runtime.
 |------|----------|
 | **Implementation status** | [implementation-status.md](implementation-status.md) |
 | **Phase Zero evidence (local libSQL foundation)** | [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md) |
+| **Phase Zero evidence (job lease / leader fencing)** | [evidence/phase-zero-job-concurrency.md](evidence/phase-zero-job-concurrency.md) |
 | Product principles | [product-principles.md](product-principles.md) |
 | Glossary | [glossary.md](glossary.md) |
 | Architecture overview | [architecture/overview.md](architecture/overview.md) |
