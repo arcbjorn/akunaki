@@ -160,7 +160,7 @@ This is **not** blocked on missing credentials. Long-term Turso Cloud production
 1. **Starlette / TestClient:** Dev dependency is **`httpx2==2.5.0`**. Starlette 1.3.1 prefers httpx2 and deprecates plain httpx for `TestClient`. With this pin there is **no** `StarletteDeprecationWarning` from the TestClient path; pytest runs with `filterwarnings=error` so any recurrence would fail the suite.
 2. **Transitive freshness / pydantic-core:** **pydantic 2.13.4** is the latest stable top-level Pydantic release as of **2026-07-13**. **pydantic-core** is a separate internal package with an independent version sequence; Pydantic 2.13.4 requires **pydantic-core 2.46.4** exactly. Therefore **2.13 versus 2.46 is not an age comparison**, and **core 2.47.0 must not be forced**. Do not change the Pydantic pin. `uv tree --outdated` may still report `pydantic-core v2.46.4 (latest: v2.47.0)` under that constraint — treat it as expected, not a pin error.
 3. **sqlalchemy-libsql constraint errors:** some SQLite constraint failures surface as `ValueError` (not always SQLAlchemy `IntegrityError`). Tests accept both; application code should treat this as a known driver quirk.
-4. **Full schema / concurrency protocol:** deliberately **pending**. Foundation tables are minimal; job claim CAS, leases, multi-worker races, and expand/contract rolling migrations beyond upgrade/downgrade of this revision are **not** claimed done.
+4. **Full schema / concurrency protocol:** job claim CAS, leases, and multi-worker races on **local** libSQL are covered in [phase-zero-job-concurrency.md](phase-zero-job-concurrency.md). Full product schema, worker claim loop, and expand/contract rolling migrations remain **pending**.
 
 ---
 
