@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from akunaki.domain.jobs import JobCandidate, JobClaim, JobRole, LeaderClaim
+from akunaki.domain.jobs import JobCandidate, JobClaim, JobFailureResult, JobRole, LeaderClaim
 
 
 class JobRepositoryPort(Protocol):
@@ -76,6 +76,21 @@ class JobRepositoryPort(Protocol):
         now: datetime,
     ) -> bool:
         """Mark succeeded only with matching owner and fence on an unexpired lease."""
+        ...
+
+    def fail_job(
+        self,
+        *,
+        job_id: str,
+        owner: str,
+        fence_token: int,
+        retryable: bool,
+        retry_delay: timedelta,
+        error_class: str,
+        redacted_error_message: str | None,
+        now: datetime,
+    ) -> JobFailureResult | None:
+        """Record a leased attempt failure and retry or dead-letter atomically."""
         ...
 
     def requeue_expired_leases(self, *, now: datetime) -> int:
