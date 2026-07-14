@@ -2,7 +2,7 @@
 
 Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
-This package intentionally includes **no** frontend, connectors, auth product surface, or model/AI SDKs. Full product schema and the job concurrency protocol remain **pending**.
+This package intentionally includes **no** frontend, connectors, auth product surface, or model/AI SDKs. Full product schema remains **pending**. The **local** durable job lease and leader fencing foundation is implemented; the **worker claim loop**, retries with backoff, and attempt history are **not**.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -54,17 +54,23 @@ uv run python -m akunaki.api
 uv run python -m akunaki.worker
 ```
 
-Boots core config/DB, probes readiness, prints an explicit stub message, and exits. **No job loop yet.**
+Boots core config/DB, probes readiness, prints an explicit stub message, and exits. **No job loop yet.** Job claim/lease APIs live in `JobRepository` for the next worker integration.
 
 ## Migrations
 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
+uv run alembic downgrade 20260713_0001   # drop lease tables only
 uv run alembic downgrade base
 uv run alembic upgrade head
 uv run alembic current
 ```
+
+| Revision | Tables |
+|----------|--------|
+| `20260713_0001` | `tenants`, `jobs` |
+| `20260713_0002` | `job_leases`, `leader_leases` |
 
 ## Configuration
 
@@ -93,13 +99,13 @@ Remote host URLs (including Turso Cloud hosts), credentialed URLs, non-`sqlite+l
 
 ```text
 src/akunaki/
-  domain/           # pure (empty foundation)
+  domain/           # pure job concurrency types (no SQLAlchemy)
   application/      # use cases (empty foundation)
-  ports/            # protocols (empty foundation)
-  adapters/db/      # SQLAlchemy engine, models, readiness
+  ports/            # JobRepositoryPort protocol
+  adapters/db/      # engine, models, JobRepository CAS adapter
   api/              # FastAPI app factory + /healthz
-  worker/           # core worker stub entrypoint
-alembic/            # migrations
+  worker/           # core worker stub entrypoint (no claim loop)
+alembic/            # migrations 0001 foundation + 0002 leases
 tests/              # temp-file libSQL tests (no leftover artifacts)
 ```
 
@@ -114,4 +120,4 @@ tests/              # temp-file libSQL tests (no leftover artifacts)
 
 ## Evidence
 
-See `docs/evidence/phase-zero-turso-foundation.md` and `docs/implementation-status.md` at the repository root.
+See `docs/evidence/phase-zero-turso-foundation.md`, `docs/evidence/phase-zero-job-concurrency.md`, and `docs/implementation-status.md` at the repository root.
