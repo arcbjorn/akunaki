@@ -7,12 +7,14 @@ from akunaki.adapters.db.engine import (
     probe_database_ready,
 )
 from akunaki.adapters.db.job_repository import JobRepository
-from akunaki.adapters.db.models import Job, JobLease, LeaderLease, Tenant
+from akunaki.adapters.db.models import Job, JobAttempt, JobDeadLetter, JobLease, LeaderLease, Tenant
 
 __all__ = [
     "NAMING_CONVENTION",
     "Base",
     "Job",
+    "JobAttempt",
+    "JobDeadLetter",
     "JobLease",
     "JobRepository",
     "LeaderLease",
