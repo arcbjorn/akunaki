@@ -2,7 +2,7 @@
 
 Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
-This package intentionally includes **no** frontend, connectors, auth product surface, or model/AI SDKs. Full product schema remains **pending**. The **local** durable job lease and leader fencing foundation is implemented; the **worker claim loop**, retries with backoff, and attempt history are **not**.
+This package intentionally includes **no** frontend, connectors, auth product surface, or model/AI SDKs. Full product schema remains **pending**. The **local** atomic durable-job repository lifecycle is implemented: fenced claims create attempt history, and completion, retry scheduling, dead-lettering, and lease-expiry transitions are transactional. The **worker runtime**, retry/backoff policy, and job handlers are **not** implemented.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -54,14 +54,15 @@ uv run python -m akunaki.api
 uv run python -m akunaki.worker
 ```
 
-Boots core config/DB, probes readiness, prints an explicit stub message, and exits. **No job loop yet.** Job claim/lease APIs live in `JobRepository` for the next worker integration.
+Boots core config/DB, probes readiness, prints an explicit stub message, and exits. **No job loop yet.** Atomic job lifecycle APIs live in `JobRepository` for the next worker integration.
 
 ## Migrations
 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260713_0001   # drop lease tables only
+uv run alembic downgrade 20260713_0002   # drop attempt/dead-letter lifecycle schema
+uv run alembic downgrade 20260713_0001   # also drop lease tables
 uv run alembic downgrade base
 uv run alembic upgrade head
 uv run alembic current
@@ -71,6 +72,7 @@ uv run alembic current
 |----------|--------|
 | `20260713_0001` | `tenants`, `jobs` |
 | `20260713_0002` | `job_leases`, `leader_leases` |
+| `20260713_0003` | job type/error fields, `job_attempts`, `job_dead_letters` |
 
 ## Configuration
 
@@ -99,13 +101,13 @@ Remote host URLs (including Turso Cloud hosts), credentialed URLs, non-`sqlite+l
 
 ```text
 src/akunaki/
-  domain/           # pure job concurrency types (no SQLAlchemy)
+  domain/           # pure job lifecycle/concurrency types (no SQLAlchemy)
   application/      # use cases (empty foundation)
   ports/            # JobRepositoryPort protocol
   adapters/db/      # engine, models, JobRepository CAS adapter
   api/              # FastAPI app factory + /healthz
   worker/           # core worker stub entrypoint (no claim loop)
-alembic/            # migrations 0001 foundation + 0002 leases
+alembic/            # migrations 0001 foundation + 0002 leases + 0003 execution lifecycle
 tests/              # temp-file libSQL tests (no leftover artifacts)
 ```
 
