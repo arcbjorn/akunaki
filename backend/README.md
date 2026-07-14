@@ -1,0 +1,117 @@
+# Akunaki backend (Phase Zero foundation)
+
+Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
+
+This package intentionally includes **no** frontend, connectors, auth product surface, or model/AI SDKs. Full product schema and the job concurrency protocol remain **pending**.
+
+**Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
+
+## Requirements
+
+| Item | Policy |
+|------|--------|
+| Python | **3.13.14** only (`requires-python = ">=3.13.14,<3.14"`) |
+| Dependencies | **Exact pins** of latest **stable** releases as of 2026-07-13 — **no prereleases** |
+| Database dialect | Official `sqlite+libsql` via `sqlalchemy-libsql==0.2.0` (local forms only) |
+| Model SDKs | **Forbidden** in core install (openai, anthropic, gemini, xai, openrouter, local-model stacks, …) |
+
+### Python compatibility gate (honest)
+
+On **macOS ARM**, **Python 3.14.5 + sqlalchemy-libsql 0.2.0** was observed to **segfault**. The same driver works on **Python 3.13**. This foundation therefore pins **3.13.14** and rejects 3.14 until the driver/runtime stack is re-validated.
+
+## Setup
+
+```bash
+cd backend
+uv python install 3.13.14
+uv sync --all-groups
+```
+
+## Tests and quality gates
+
+```bash
+uv run ruff check
+uv run ruff format --check
+uv run mypy src tests
+uv run lint-imports
+uv run pytest
+uv lock --check
+uv tree --outdated
+uv run pip-audit
+```
+
+## Run API
+
+```bash
+# optional: export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
+uv run python -m akunaki.api
+# GET http://127.0.0.1:8000/healthz
+```
+
+## Run worker stub
+
+```bash
+uv run python -m akunaki.worker
+```
+
+Boots core config/DB, probes readiness, prints an explicit stub message, and exits. **No job loop yet.**
+
+## Migrations
+
+```bash
+export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+uv run alembic current
+```
+
+## Configuration
+
+All settings use the **`AKUNAKI_`** prefix (pydantic-settings).
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `AKUNAKI_DATABASE_URL` | `sqlite+libsql:///.local/akunaki.db` | Local `sqlite+libsql` only: official in-memory (`sqlite+libsql://`), path in-memory, relative file, or absolute file. Hostnames, credentials, ports, query strings, and fragments are rejected. Parent dirs for file URLs are created on engine build. |
+| `AKUNAKI_SERVICE_NAME` | `akunaki-api` | Reported by `/healthz` |
+| `AKUNAKI_ECHO_SQL` | `false` | Dev SQL echo |
+
+There is **no** `AKUNAKI_DATABASE_AUTH_TOKEN` and **no** remote connect-args path in this foundation.
+
+### Accepted `AKUNAKI_DATABASE_URL` forms
+
+| Form | Example |
+|------|---------|
+| Official in-memory | `sqlite+libsql://` |
+| Path in-memory | `sqlite+libsql:///:memory:` |
+| Relative file | `sqlite+libsql:///.local/akunaki.db` |
+| Absolute file | `sqlite+libsql:////abs/path/to/file.db` |
+
+Remote host URLs (including Turso Cloud hosts), credentialed URLs, non-`sqlite+libsql` dialects, and **any** query string or fragment (including `authToken`, `syncUrl`, `secure`, or arbitrary parameters) are rejected at settings validation.
+
+## Layout
+
+```text
+src/akunaki/
+  domain/           # pure (empty foundation)
+  application/      # use cases (empty foundation)
+  ports/            # protocols (empty foundation)
+  adapters/db/      # SQLAlchemy engine, models, readiness
+  api/              # FastAPI app factory + /healthz
+  worker/           # core worker stub entrypoint
+alembic/            # migrations
+tests/              # temp-file libSQL tests (no leftover artifacts)
+```
+
+## Dependency policy
+
+- Prefer **latest stable** only; never pin prereleases for production path.
+- Dev HTTP client for Starlette/FastAPI `TestClient` is **`httpx2==2.5.0`** (Starlette 1.3.1 prefers httpx2; plain `httpx` is deprecated for that path).
+- **pydantic 2.13.4** is the latest stable top-level Pydantic release as of **2026-07-13**. **pydantic-core** is a separate internal package with an independent version sequence; Pydantic 2.13.4 requires **pydantic-core 2.46.4** exactly. Therefore **2.13 versus 2.46 is not an age comparison**, and **core 2.47.0 must not be forced**. Do not change the Pydantic pin. An outdated `pydantic-core` line from `uv tree --outdated` is expected under that constraint.
+- Re-run `uv tree --outdated` and `uv run pip-audit` when refreshing pins.
+- Do not add model provider packages to the core dependency set.
+- Pytest is configured with `filterwarnings = ["error"]` so new warnings fail the suite.
+
+## Evidence
+
+See `docs/evidence/phase-zero-turso-foundation.md` and `docs/implementation-status.md` at the repository root.
