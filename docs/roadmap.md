@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 
-**Last reviewed:** 2026-07-13
+**Last reviewed:** 2026-07-14
 
 Authoritative for **phased plan** (coverage matrix item 20). Phases describe the implementation sequence. Application code has **started** under `backend/` for a model-free platform foundation; Phase Zero is **in progress**, not complete. See [implementation-status.md](implementation-status.md).
 
@@ -17,8 +17,8 @@ Retire platform and vendor uncertainties **before** feature velocity.
 | Spike | Question | Exit criteria | Progress |
 |-------|----------|---------------|----------|
 | **Turso/libSQL Python + SQLAlchemy + Alembic** | Exact driver path for local libSQL now; production Turso later (selected long-term store) | Documented working **local** connection; known limitations listed; remote Turso deferred until product reopens it | **Partial (local complete for foundation):** local `sqlite+libsql` path proven on Python **3.13.14**; local-only URL validation; Python **3.14.5** + `sqlalchemy-libsql==0.2.0` segfault on macOS ARM documented; **Turso Cloud intentionally deferred** (not wired). Evidence: [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md) |
-| **Concurrency** | Write contention, nested transactions, job claim CAS (conditional UPDATE + affected-row/`RETURNING` check; no `FOR UPDATE`/`SKIP LOCKED`), fence reject, multi-worker race, leader lease for passive standby under concurrent API+worker on Turso/libSQL | Pass stress harness; exactly one claim winner; stale fence rejected; no silent corruption | **Partial (local complete for lease foundation):** CAS claim, `job_leases` / `leader_leases`, dual-client races, multi-worker distribution, fence reject, requeue/dead-letter, nested savepoints proven on **local** file-backed libSQL. **Not** claimed: worker claim loop, backoff retries, attempt history, Turso Cloud multi-client. Evidence: [evidence/phase-zero-job-concurrency.md](evidence/phase-zero-job-concurrency.md) |
-| **Migrations** | Alembic expand/contract / N−1 rolling on libSQL/Turso | Upgrade/downgrade CI green | **Partial:** foundation `0001` + lease `0002` upgrade/downgrade/upgrade green on local libSQL (including downgrade `0002`→`0001`); expand/contract / N−1 rolling not proven |
+| **Concurrency** | Write contention, nested transactions, job claim CAS (conditional UPDATE + affected-row/`RETURNING` check; no `FOR UPDATE`/`SKIP LOCKED`), fence reject, multi-worker race, leader lease for passive standby under concurrent API+worker on Turso/libSQL | Pass stress harness; exactly one claim winner; stale fence rejected; no silent corruption | **Partial (local repository lifecycle complete):** CAS claims create durable attempts; fenced completion, retry scheduling, explicit and expiry dead letters, expiry history, dual-client races, multi-worker distribution, and nested savepoints are proven on **local** file-backed libSQL. **Not** claimed: worker runtime, retry/backoff policy or handlers, atomic domain side-effect UoW, Turso Cloud multi-client. Evidence: [evidence/phase-zero-job-concurrency.md](evidence/phase-zero-job-concurrency.md) |
+| **Migrations** | Alembic expand/contract / N−1 rolling on libSQL/Turso | Upgrade/downgrade CI green | **Partial:** revisions through durable lifecycle `0003` upgrade/downgrade/upgrade on local libSQL; head → `0002` → head preserves a legacy job and verifies the `system.noop` backfill; expand/contract / N−1 rolling not proven |
 | **Encryption** | DB/backup/export encryption-at-rest assumptions on Turso path | Documented key separation and backup approach | **Not started** |
 | **Volume** | Minute-level HR sample cardinality estimates | Storage and write budget; decide sampling/downsampling policy | **Not started** |
 | **Vector (later-ready)** | Filtered ANN + tenant predicates; optional F32_BLOB path | Spike note; not MVP schema | **Not started** |
