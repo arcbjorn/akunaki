@@ -1,6 +1,6 @@
-"""Minimal platform foundation ORM models (tenants, jobs).
+"""Platform foundation ORM models (tenants, jobs, leases).
 
-Full product schema and the job concurrency protocol remain pending.
+Job concurrency protocol is implemented by JobRepository against these tables.
 IDs are caller-supplied TEXT values (no application UUIDv7 generator yet).
 """
 
@@ -38,11 +38,9 @@ class Tenant(Base):
 
 
 class Job(Base):
-    """Durable work unit row (platform foundation only).
+    """Durable work unit row.
 
-    Claim/lease loop, dead letters, and full concurrency protocol are not
-    implemented yet. This table is a deliberate minimal shape for migrations
-    and FK/index validation.
+    Claim/lease operations live in JobRepository (CAS; no FOR UPDATE).
     """
 
     __tablename__ = "jobs"
@@ -66,6 +64,11 @@ class Job(Base):
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
     tenant: Mapped[Tenant] = relationship(back_populates="jobs")
+    lease: Mapped[JobLease | None] = relationship(
+        back_populates="job",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -97,4 +100,61 @@ class Job(Base):
         ),
         Index("ix_jobs_tenant_status", "tenant_id", "status"),
         Index("ix_jobs_role_status_run_after", "role", "status", "run_after"),
+    )
+
+
+class JobLease(Base):
+    """One active lease row per job (PK = job_id)."""
+
+    __tablename__ = "job_leases"
+
+    job_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    lease_owner: Mapped[str] = mapped_column(Text, nullable=False)
+    leased_until: Mapped[str] = mapped_column(Text, nullable=False)
+    fence_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    job: Mapped[Job] = relationship(back_populates="lease")
+
+    __table_args__ = (
+        CheckConstraint("fence_token >= 0", name="job_lease_fence_token_nonneg"),
+        CheckConstraint("length(lease_owner) > 0", name="job_lease_owner_nonempty"),
+        Index("ix_job_leases_leased_until", "leased_until"),
+        Index("ix_job_leases_lease_owner", "lease_owner"),
+    )
+
+
+class LeaderLease(Base):
+    """Named leader coordination row with optional owner and fencing token.
+
+    ``lease_owner`` and ``leased_until`` are both null (free) or both non-null
+    (held). ``lease_name`` must be nonempty.
+    """
+
+    __tablename__ = "leader_leases"
+
+    lease_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    leased_until: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fence_token: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("fence_token >= 0", name="leader_lease_fence_token_nonneg"),
+        CheckConstraint("length(lease_name) > 0", name="leader_lease_name_nonempty"),
+        CheckConstraint(
+            "(lease_owner IS NULL AND leased_until IS NULL) OR "
+            "(lease_owner IS NOT NULL AND leased_until IS NOT NULL)",
+            name="leader_lease_owner_expiry_pair",
+        ),
+        CheckConstraint(
+            "lease_owner IS NULL OR length(lease_owner) > 0",
+            name="leader_lease_owner_null_or_nonempty",
+        ),
+        Index("ix_leader_leases_leased_until", "leased_until"),
     )
