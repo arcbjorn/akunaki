@@ -4,29 +4,31 @@
 
 **Last reviewed:** 2026-07-13
 
-Authoritative for **phased plan** (coverage matrix item 20). Phases describe a future implementation sequence. None of this work is started in application code.
+Authoritative for **phased plan** (coverage matrix item 20). Phases describe the implementation sequence. Application code has **started** under `backend/` for a model-free platform foundation; Phase Zero is **in progress**, not complete. See [implementation-status.md](implementation-status.md).
 
 ---
 
 ## Phase zero — risk retirement (mandatory)
 
+**Status: in progress.** Local libSQL / Turso-compatible + SQLAlchemy + Alembic foundation exists and is tested. **Turso Cloud / remote is intentionally deferred** by product decision (not wired; not blocked on credentials). Remaining spikes (concurrency, encryption, volume, connectors, …) are open. Long-term production Turso remains proposed architecture (ADR 0003).
+
 Retire platform and vendor uncertainties **before** feature velocity.
 
-| Spike | Question | Exit criteria |
-|-------|----------|---------------|
-| **Turso/libSQL Python + SQLAlchemy + Alembic** | Exact driver path for production Turso (selected store) | Documented working local + remote connection; known limitations listed; only proven blocker reopens ADR 0003 |
-| **Concurrency** | Write contention, nested transactions, job claim CAS (conditional UPDATE + affected-row/`RETURNING` check; no `FOR UPDATE`/`SKIP LOCKED`), fence reject, multi-worker race, leader lease for passive standby under concurrent API+worker on Turso/libSQL | Pass stress harness; exactly one claim winner; stale fence rejected; no silent corruption |
-| **Migrations** | Alembic expand/contract / N−1 rolling on libSQL/Turso | Upgrade/downgrade CI green |
-| **Encryption** | DB/backup/export encryption-at-rest assumptions on Turso path | Documented key separation and backup approach |
-| **Volume** | Minute-level HR sample cardinality estimates | Storage and write budget; decide sampling/downsampling policy |
-| **Vector (later-ready)** | Filtered ANN + tenant predicates; optional F32_BLOB path | Spike note; not MVP schema |
-| **Google Health / Fitbit-origin capability** | Device marketing name mapping and Google Health field coverage | Written validation note; open gaps listed |
-| **Polar v3 vs v4 / Verity Sense swim** | Required swim fields availability | Choose API version; document missing fields |
-| **Google Health intraday / restricted scopes** | Approval path realistic for MVP? | Go/no-go for daytime HR resolution |
+| Spike | Question | Exit criteria | Progress |
+|-------|----------|---------------|----------|
+| **Turso/libSQL Python + SQLAlchemy + Alembic** | Exact driver path for local libSQL now; production Turso later (selected long-term store) | Documented working **local** connection; known limitations listed; remote Turso deferred until product reopens it | **Partial (local complete for foundation):** local `sqlite+libsql` path proven on Python **3.13.14**; local-only URL validation; Python **3.14.5** + `sqlalchemy-libsql==0.2.0` segfault on macOS ARM documented; **Turso Cloud intentionally deferred** (not wired). Evidence: [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md) |
+| **Concurrency** | Write contention, nested transactions, job claim CAS (conditional UPDATE + affected-row/`RETURNING` check; no `FOR UPDATE`/`SKIP LOCKED`), fence reject, multi-worker race, leader lease for passive standby under concurrent API+worker on Turso/libSQL | Pass stress harness; exactly one claim winner; stale fence rejected; no silent corruption | **Not started** (minimal `jobs` table only; no claim loop) |
+| **Migrations** | Alembic expand/contract / N−1 rolling on libSQL/Turso | Upgrade/downgrade CI green | **Partial:** initial foundation migration upgrade/downgrade/upgrade green on local libSQL; expand/contract / N−1 rolling not proven |
+| **Encryption** | DB/backup/export encryption-at-rest assumptions on Turso path | Documented key separation and backup approach | **Not started** |
+| **Volume** | Minute-level HR sample cardinality estimates | Storage and write budget; decide sampling/downsampling policy | **Not started** |
+| **Vector (later-ready)** | Filtered ANN + tenant predicates; optional F32_BLOB path | Spike note; not MVP schema | **Not started** |
+| **Google Health / Fitbit-origin capability** | Device marketing name mapping and Google Health field coverage | Written validation note; open gaps listed | **Not started** |
+| **Polar v3 vs v4 / Verity Sense swim** | Required swim fields availability | Choose API version; document missing fields | **Not started** |
+| **Google Health intraday / restricted scopes** | Approval path realistic for MVP? | Go/no-go for daytime HR resolution | **Not started** |
 
-**Exit phase zero:** written spike reports linked from this doc (future); Turso path validated (or ADR 0003 reopened on proven blocker); connector capability matrix updated.
+**Exit phase zero:** written spike reports linked from this doc; local libSQL path documented with known limitations; remaining spikes complete; remote Turso remains future work under ADR 0003 unless a proven blocker reopens the ADR; connector capability matrix updated.
 
-Dependencies: none (docs-only repo today).
+Dependencies: backend foundation scaffold is present (`backend/`); remaining spikes have no product-feature dependencies.
 
 ---
 
@@ -34,7 +36,7 @@ Dependencies: none (docs-only repo today).
 
 ### Scope
 
-- Repository scaffold: `backend/`, `web/`, `infra/` per [architecture/repository-and-services.md](architecture/repository-and-services.md)
+- Repository scaffold: `backend/` **started** (core package only); still need `web/`, `infra/` per [architecture/repository-and-services.md](architecture/repository-and-services.md)
 - Auth: OIDC + sessions
 - Schema: tenants, users, sessions, connections, secrets, jobs, raw tables
 - Job claim loop with one **core** worker
