@@ -9,11 +9,41 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from akunaki.domain.jobs import JobCandidate, JobClaim, JobFailureResult, JobRole, LeaderClaim
+from akunaki.domain.jobs import (
+    EnqueuedJob,
+    JobCandidate,
+    JobClaim,
+    JobFailureResult,
+    JobRole,
+    LeaderClaim,
+)
 
 
 class JobRepositoryPort(Protocol):
-    """Typed operations for job CAS claim, lease lifecycle, and leader fencing."""
+    """Typed operations for job enqueue, CAS claim, lease lifecycle, and leader fencing."""
+
+    def enqueue_job(
+        self,
+        *,
+        job_id: str,
+        tenant_id: str,
+        job_type: str,
+        payload_json: str,
+        now: datetime,
+        role: JobRole = JobRole.CORE,
+        priority: int = 100,
+        run_after: datetime | None = None,
+        max_attempts: int = 5,
+        idempotency_key: str | None = None,
+    ) -> EnqueuedJob:
+        """Insert one ready job, deduplicating on ``(tenant_id, idempotency_key)``.
+
+        When a key is supplied and a job already exists for that tenant/key,
+        the existing job is returned with ``created=False`` and nothing is
+        written. A ``None`` key always inserts. ``run_after`` defaults to
+        ``now`` (immediately due).
+        """
+        ...
 
     def discover_due_candidates(
         self,
