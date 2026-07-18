@@ -74,6 +74,22 @@ class Settings(BaseSettings):
         ),
     )
     echo_sql: bool = Field(default=False, description="Echo SQL to logs (dev only).")
+    secret_keks: str = Field(
+        default="",
+        description=(
+            "Envelope-encryption KEKs as 'version:base64key' pairs, comma separated. "
+            "Each key must decode to exactly 32 bytes (AES-256). "
+            "Empty disables secret sealing; processes that need it fail fast at boot. "
+            "Never commit real keys: supply via the platform secret store."
+        ),
+    )
+    active_kek_version: str = Field(
+        default="",
+        description=(
+            "KEK version new envelopes are sealed under. Must be present in secret_keks. "
+            "Defaults to the sole configured version when exactly one is supplied."
+        ),
+    )
 
     @field_validator("database_url")
     @classmethod
