@@ -1,6 +1,6 @@
 # Implementation status
 
-**Last updated:** 2026-07-14
+**Last updated:** 2026-07-18
 
 Honest truth table for what exists in this repository. Prefer this page over roadmap marketing language when asking “is it built?”
 
@@ -34,7 +34,12 @@ Legend:
 | Leader lease owner/expiry pair + nonempty name checks | yes | yes | migration `0002` + model agreement |
 | FastAPI app factory + `python -m akunaki.api` | yes | yes | |
 | `GET /healthz` (service, db ready, `models_required=false`) | yes | yes | does not fabricate product health |
-| Worker entry `python -m akunaki.worker` stub | yes | yes | **no job claim loop** |
+| Worker entry `python -m akunaki.worker` runtime | yes | yes | claim loop + SIGINT/SIGTERM cooperative shutdown; JSON logs |
+| Worker runtime (claim → execute → heartbeat → settle) | yes | yes | port-typed in `application`; fake-repository policy tests + file-backed end-to-end tests |
+| Retry classification + exponential backoff policy | yes | yes | transient/permanent/cancelled; capped jitter; min 1s (second-precision lifecycle) |
+| Handler registry (`system.noop` built in) | yes | yes | unregistered `job_type` dead-letters instead of burning attempts |
+| Background lease heartbeat | yes | yes | daemon thread; lease loss suppresses completion (no false success) |
+| Leader-gated reaper tick (requeue expired / dead-letter exhausted) | yes | yes | standby never reaps without the `core-reaper` leader lease |
 | Core-only / no model SDKs | yes | yes | import-linter + tests |
 | Ruff / mypy / import-linter / pytest / pip-audit gates | yes | yes | see evidence docs |
 | Frontend / web | no | no | deferred |
@@ -42,8 +47,9 @@ Legend:
 | Connectors (Oura, Google Health, Polar) | no | no | deferred |
 | Agent / model packages | no | no | forbidden in core |
 | Full data-model schema | no | no | only tenants and durable-job lifecycle tables exist |
-| Worker claim / heartbeat / scheduler / reaper runtime | no | no | repository lifecycle exists; worker entry remains a stub |
-| Runtime retry classification / backoff policy / handlers | no | no | durable retry scheduling exists; execution policy does not |
+| Multi-process worker fleet proven under load | no | no | single-process runtime tested; multi-worker runtime race/stress not claimed |
+| Product job handlers (connectors, normalization, scoring) | no | no | only `system.noop` exists; registry is ready for them |
+| Atomic domain side-effect unit of work | no | no | lease validity primitive exists; fenced side-effect UoW still pending |
 | Remote production Turso (Turso Cloud) | no | no | **product deferred**; proposed in ADR 0003 only |
 | Encryption-at-rest / backup evidence | no | no | Phase Zero open |
 | Volume / vector spikes | no | no | Phase Zero open |
@@ -55,7 +61,7 @@ Legend:
 | Entrypoint | Behavior today |
 |------------|----------------|
 | `python -m akunaki.api` | Serves core API; `/healthz` only |
-| `python -m akunaki.worker` | Boots config/DB, readiness, stub message, clean exit |
+| `python -m akunaki.worker` | Boots config/DB, readiness, then runs the durable claim loop until SIGINT/SIGTERM |
 | `python -m akunaki.agent_worker` | **not present** |
 | `python -m akunaki.mcp_adapter` | **not present** |
 
@@ -67,6 +73,6 @@ Legend:
 |------|-------|
 | `docs/` architecture set | Proposed design (mostly still forward-looking; Turso Cloud remains **future** context) |
 | `backend/` | First real application code (this foundation) |
-| Phase Zero overall | **In progress** — local libSQL foundation + atomic durable-job repository lifecycle tested; remote Turso intentionally deferred; worker runtime / encryption / volume open |
+| Phase Zero overall | **In progress** — local libSQL foundation, atomic durable-job repository lifecycle, and single-process worker runtime tested; remote Turso intentionally deferred; encryption / volume / connector spikes open |
 
 Evidence: [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md), [evidence/phase-zero-job-concurrency.md](evidence/phase-zero-job-concurrency.md).
