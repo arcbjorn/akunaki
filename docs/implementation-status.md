@@ -30,6 +30,7 @@ Legend:
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
 | Domain job lifecycle/failure types + ports Protocol (model-free) | yes | yes | immutable failure results; no SQLAlchemy in domain/ports; second-precision times; min 1s lease TTL |
 | JobRepository atomic execution lifecycle + leader fencing | yes | yes | claim creates one attempt; complete/fail/retry/dead-letter/expiry history are fenced local short transactions |
+| Idempotent enqueue (`enqueue_job`) deduped on `(tenant_id, idempotency_key)` | yes | yes | atomic `INSERT ... ON CONFLICT DO NOTHING`; NULL key always inserts; tenant-scoped; duplicate job id without a key raises |
 | Durable attempt history + one-to-one dead-letter records | yes | yes | retry scheduling uses exact caller-provided delay; redacted failure messages capped at 500 chars |
 | Leader lease owner/expiry pair + nonempty name checks | yes | yes | migration `0002` + model agreement |
 | FastAPI app factory + `python -m akunaki.api` | yes | yes | |
