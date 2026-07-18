@@ -47,7 +47,8 @@ Legend:
 | Connectors (Oura, Google Health, Polar) | no | no | deferred |
 | Agent / model packages | no | no | forbidden in core |
 | Full data-model schema | no | no | only tenants and durable-job lifecycle tables exist |
-| Multi-process worker fleet proven under load | no | no | single-process runtime tested; multi-worker runtime race/stress not claimed |
+| Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
+| Sustained multi-process fleet under production load | no | no | in-process threads with independent engines only; no long-running or cross-host soak |
 | Product job handlers (connectors, normalization, scoring) | no | no | only `system.noop` exists; registry is ready for them |
 | Atomic domain side-effect unit of work | no | no | lease validity primitive exists; fenced side-effect UoW still pending |
 | Remote production Turso (Turso Cloud) | no | no | **product deferred**; proposed in ADR 0003 only |
