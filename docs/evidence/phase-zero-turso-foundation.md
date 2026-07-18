@@ -160,14 +160,15 @@ This is **not** blocked on missing credentials. Long-term Turso Cloud production
 1. **Starlette / TestClient:** Dev dependency is **`httpx2==2.5.0`**. Starlette 1.3.1 prefers httpx2 and deprecates plain httpx for `TestClient`. With this pin there is **no** `StarletteDeprecationWarning` from the TestClient path; pytest runs with `filterwarnings=error` so any recurrence would fail the suite.
 2. **Transitive freshness / pydantic-core:** **pydantic 2.13.4** is the latest stable top-level Pydantic release as of **2026-07-13**. **pydantic-core** is a separate internal package with an independent version sequence; Pydantic 2.13.4 requires **pydantic-core 2.46.4** exactly. Therefore **2.13 versus 2.46 is not an age comparison**, and **core 2.47.0 must not be forced**. Do not change the Pydantic pin. `uv tree --outdated` may still report `pydantic-core v2.46.4 (latest: v2.47.0)` under that constraint — treat it as expected, not a pin error.
 3. **sqlalchemy-libsql constraint errors:** some SQLite constraint failures surface as `ValueError` (not always SQLAlchemy `IntegrityError`). Tests accept both; application code should treat this as a known driver quirk.
-4. **Full schema / concurrency protocol:** job claim CAS, leases, and multi-worker races on **local** libSQL are covered in [phase-zero-job-concurrency.md](phase-zero-job-concurrency.md). Full product schema, worker claim loop, and expand/contract rolling migrations remain **pending**.
+4. **`libsql_experimental` has no DBAPI `Binary` constructor (BLOB bind gap).** The driver **stores and returns BLOBs correctly** — a full 256-byte round-trip is byte-exact — but it does not expose the optional DBAPI `Binary` attribute that SQLAlchemy's stock `LargeBinary.bind_processor` looks up. Binding through `LargeBinary` therefore raises `AttributeError: module 'libsql_experimental' has no attribute 'Binary'` **before** the statement executes; `sqlalchemy-libsql==0.2.0` ships no shim. Worked around by `akunaki.adapters.db.types.Blob`, a `TypeDecorator` whose `bind_processor` returns `None` so `bytes` pass straight through. Emitted DDL is still `BLOB`, so this is a **driver-binding** workaround, not a schema relaxation. Two tests pin the quirk (`test_libsql_driver_still_lacks_dbapi_binary`, `test_stock_large_binary_still_fails_on_this_driver`) and fail deliberately if a future driver release adds `Binary`, at which point `Blob` can be dropped. **Relevant to the encryption spike:** envelope-encrypted ciphertext columns depend on this path.
+5. **Full schema / concurrency protocol:** job claim CAS, leases, and multi-worker races on **local** libSQL are covered in [phase-zero-job-concurrency.md](phase-zero-job-concurrency.md). Full product schema and expand/contract rolling migrations remain **pending**; the worker claim loop is implemented and covered there.
 
 ---
 
 ## What this evidence does *not* claim
 
 - Remote Turso Cloud connectivity (deferred; not wired)
-- Job claim loop / fencing / multi-worker stress harness
+- Job claim loop / fencing / multi-worker stress harness (covered separately in [phase-zero-job-concurrency.md](phase-zero-job-concurrency.md), not by this document)
 - Encryption-at-rest / backup policy validation
 - Volume / minute-level HR cardinality
 - Vector / ANN path
