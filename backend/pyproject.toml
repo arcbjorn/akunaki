@@ -12,6 +12,7 @@ dependencies = [
     "SQLAlchemy==2.0.51",
     "alembic==1.18.5",
     "sqlalchemy-libsql==0.2.0",
+    "cryptography==49.0.0",
 ]
 
 [dependency-groups]
