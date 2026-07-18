@@ -11,7 +11,7 @@ This package intentionally includes **no** frontend, connectors, auth product su
 | Item | Policy |
 |------|--------|
 | Python | **3.13.14** only (`requires-python = ">=3.13.14,<3.14"`) |
-| Dependencies | **Exact pins** of latest **stable** releases as of 2026-07-13 — **no prereleases** |
+| Dependencies | **Exact pins** of latest **stable** releases as of 2026-07-13 (`cryptography==49.0.0` added 2026-07-18) — **no prereleases** |
 | Database dialect | Official `sqlite+libsql` via `sqlalchemy-libsql==0.2.0` (local forms only) |
 | Model SDKs | **Forbidden** in core install (openai, anthropic, gemini, xai, openrouter, local-model stacks, …) |
 
@@ -120,6 +120,29 @@ All settings use the **`AKUNAKI_`** prefix (pydantic-settings).
 | `AKUNAKI_DATABASE_URL` | `sqlite+libsql:///.local/akunaki.db` | Local `sqlite+libsql` only: official in-memory (`sqlite+libsql://`), path in-memory, relative file, or absolute file. Hostnames, credentials, ports, query strings, and fragments are rejected. Parent dirs for file URLs are created on engine build. |
 | `AKUNAKI_SERVICE_NAME` | `akunaki-api` | Reported by `/healthz` |
 | `AKUNAKI_ECHO_SQL` | `false` | Dev SQL echo |
+| `AKUNAKI_SECRET_KEKS` | *(empty)* | Envelope-encryption KEKs as `version:base64key` pairs, comma separated; each key must decode to exactly 32 bytes. Empty means secret sealing is unavailable and any process that needs it fails fast. |
+| `AKUNAKI_ACTIVE_KEK_VERSION` | *(empty)* | KEK version new envelopes are sealed under. Optional when exactly one KEK is configured; **required** when several are. |
+
+### Secret sealing (envelope encryption)
+
+Provider tokens are stored only as envelope-encrypted ciphertext:
+
+```python
+sealer = build_sealer(get_settings())          # fails fast if no KEK configured
+sealed = sealer.seal(token_bytes, aad=b"conn-1")
+# persist sealed.ciphertext + sealed.key_version
+plaintext = sealer.open(sealed, aad=b"conn-1")
+```
+
+Each `seal` draws a fresh AES-256 DEK and fresh nonces; the DEK is wrapped by the active KEK. `aad` binds an envelope to its owning row, so ciphertext copied onto a different connection will not open. Rotation is additive: keep old KEK versions in `AKUNAKI_SECRET_KEKS` so existing rows stay readable while new writes use the new active version.
+
+**Never commit real keys.** Generate a local development key with:
+
+```bash
+uv run python -c "import base64,secrets;print('dev-v1:'+base64.b64encode(secrets.token_bytes(32)).decode())"
+```
+
+Production KEKs belong in the platform secret store or a KMS; see [phase-zero-envelope-encryption.md](../docs/evidence/phase-zero-envelope-encryption.md) for what is and is not covered.
 
 There is **no** `AKUNAKI_DATABASE_AUTH_TOKEN` and **no** remote connect-args path in this foundation.
 
@@ -138,10 +161,11 @@ Remote host URLs (including Turso Cloud hosts), credentialed URLs, non-`sqlite+l
 
 ```text
 src/akunaki/
-  domain/           # pure job lifecycle/concurrency types + retry policy (no SQLAlchemy)
+  domain/           # pure job lifecycle/retry/secret types (no SQLAlchemy, no crypto)
   application/      # worker runtime + handler registry (port-typed, no SQLAlchemy)
-  ports/            # JobRepositoryPort protocol
+  ports/            # JobRepositoryPort + SecretSealerPort protocols
   adapters/db/      # engine, models, JobRepository CAS adapter
+  adapters/crypto/  # AES-256-GCM envelope sealer + KEK config
   api/              # FastAPI app factory + /healthz
   worker/           # core worker entrypoint: claim loop + signal shutdown
 alembic/            # migrations 0001 foundation + 0002 leases + 0003 execution lifecycle
