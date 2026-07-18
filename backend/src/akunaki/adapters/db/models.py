@@ -6,10 +6,19 @@ IDs are caller-supplied TEXT values (no application UUIDv7 generator yet).
 
 from __future__ import annotations
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from akunaki.adapters.db.base import Base
+from akunaki.adapters.db.types import Blob
 
 
 class Tenant(Base):
@@ -29,6 +38,10 @@ class Tenant(Base):
 
     jobs: Mapped[list[Job]] = relationship(back_populates="tenant")
     dead_letters_rel: Mapped[list[JobDeadLetter]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
+    connections: Mapped[list[Connection]] = relationship(
         back_populates="tenant",
         cascade="all, delete-orphan",
     )
@@ -248,4 +261,118 @@ class JobDeadLetter(Base):
         CheckConstraint("attempt_number >= 1", name="job_dl_attempt_number_pos"),
         CheckConstraint("fence_token >= 0", name="job_dl_fence_token_nonneg"),
         Index("ix_job_dead_letters_tenant_dead_lettered_at", "tenant_id", "dead_lettered_at"),
+    )
+
+
+class Connection(Base):
+    """Per-tenant provider connection.
+
+    Tokens are never stored here: secret material lives in
+    :class:`ConnectionSecret` as envelope-encrypted ciphertext.
+    """
+
+    __tablename__ = "connections"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes_granted_json: Mapped[str] = mapped_column(Text, nullable=False)
+    external_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    connected_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    tenant: Mapped[Tenant] = relationship(back_populates="connections")
+    secret: Mapped[ConnectionSecret | None] = relationship(
+        back_populates="connection",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    health: Mapped[ConnectionHealth | None] = relationship(
+        back_populates="connection",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('oura', 'google_health', 'polar')",
+            name="connection_provider",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'active', 'needs_reauth', 'revoked', 'error')",
+            name="connection_status",
+        ),
+        CheckConstraint(
+            "json_valid(scopes_granted_json)",
+            name="connection_scopes_json_valid",
+        ),
+        UniqueConstraint("tenant_id", "provider", name="uq_connections_tenant_provider"),
+        Index("ix_connections_tenant_status", "tenant_id", "status"),
+    )
+
+
+class ConnectionSecret(Base):
+    """Envelope-encrypted token material for one connection (PK = connection_id)."""
+
+    __tablename__ = "connection_secrets"
+
+    connection_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("connections.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ciphertext: Mapped[bytes] = mapped_column(Blob, nullable=False)
+    key_version: Mapped[str] = mapped_column(Text, nullable=False)
+    rotated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    connection: Mapped[Connection] = relationship(back_populates="secret")
+
+    __table_args__ = (
+        CheckConstraint("length(ciphertext) > 0", name="connection_secret_ciphertext_nonempty"),
+        CheckConstraint("length(key_version) > 0", name="connection_secret_key_version_nonempty"),
+    )
+
+
+class ConnectionHealth(Base):
+    """Operational health counters for one connection (PK = connection_id).
+
+    Error classes only; never payload bodies or measurement values.
+    """
+
+    __tablename__ = "connection_health"
+
+    connection_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("connections.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    last_success_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_class: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    rate_limit_reset_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_last_verified_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    connection: Mapped[Connection] = relationship(back_populates="health")
+
+    __table_args__ = (
+        CheckConstraint("consecutive_failures >= 0", name="connection_health_failures_nonneg"),
     )
