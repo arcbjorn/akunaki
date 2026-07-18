@@ -1,8 +1,8 @@
 # Phase Zero evidence: local libSQL durable job lifecycle and leader fencing
 
-**Date:** 2026-07-14
+**Date:** 2026-07-18
 
-**Status:** Partial — the **local** file-backed libSQL repository implements the atomic durable execution lifecycle and leader fencing; the **worker runtime**, retry/backoff policy and handlers, **atomic domain side-effect fencing (UoW)**, and **Turso Cloud** are **not** implemented
+**Status:** Partial — the **local** file-backed libSQL repository implements the atomic durable execution lifecycle and leader fencing, and the **worker runtime** (claim → execute → heartbeat → settle, retry classification and capped backoff, leader-gated reaping) is implemented and proven under concurrent runtimes; **product job handlers**, **atomic domain side-effect fencing (UoW)**, sustained multi-**process** fleet load, and **Turso Cloud** are **not** implemented
 
 **Authoritative context:** [repository-and-services.md](../architecture/repository-and-services.md) job protocol, [testing.md](../testing.md) integration expectations, [ADR 0003](../adr/0003-libsql-operational-store.md)
 
@@ -81,6 +81,20 @@ Canonical lease timestamps use **second precision** (`to_utc_rfc3339` drops micr
 | Non-lock errors propagate through short-tx runner | `test_nonlock_error_propagates_through_short_tx` |
 | Joined threads no longer alive after join | dual-claim, multi-worker, leader race, concurrent reaper, held-lock |
 
+### Worker runtime invariants (execution policy over the repository)
+
+| Invariant | Test coverage |
+|-----------|---------------|
+| Concurrent runtimes drain a queue with exactly-once handler execution | `test_competing_workers_execute_each_job_exactly_once` (24 jobs, 3 workers, independent engines, barrier start; one attempt row per job) |
+| Concurrent reaper ticks yield a single leader; standbys never reap | `test_only_one_worker_holds_the_reaper_lease` (4 contenders; exactly one `core-reaper` lease row) |
+| Runtime heartbeat guard blocks completion of a stolen lease | `test_heartbeat_observes_stolen_lease_and_blocks_completion` (asserts `complete_job` is never called) |
+| Durable fence rejects completion when no heartbeat observed the theft | `test_repository_fence_rejects_completion_when_heartbeat_misses_theft` (asserts completion *was* attempted and refused) |
+| Transient failure → fenced retry, re-claimable after delay; exhaustion → dead letter | `test_transient_failure_persists_retry_then_reclaims_and_succeeds`, `test_retries_exhaust_into_dead_letter` |
+| Permanent failure / unregistered `job_type` dead-letters without exhausting attempts | `test_permanent_failure_dead_letters_on_first_attempt`, `test_unregistered_job_type_dead_letters_through_real_lifecycle` |
+| Leader reaper requeues a crashed worker's expired lease, then runs the job | `test_leader_reaper_requeues_expired_lease_from_a_crashed_worker` |
+
+The two stolen-lease tests assert on **distinct observables** (`complete_job` call count) so each fails only for its own mechanism; a disabled runtime guard is verified to fail the first test while the fence backstop still holds.
+
 ---
 
 ## Platform
@@ -104,6 +118,9 @@ Canonical lease timestamps use **second precision** (`to_utc_rfc3339` drops micr
 | Multi-worker distribution | 24 jobs, 2 independent engines/session factories, barrier start |
 | Concurrent reaper race | 2 clients, 1 expired leased job, barrier start; sum of wins == 1 |
 | Leader race | 2 contenders after pre-seeded expired lease row, barrier start |
+| Worker fleet (runtime) | 24 jobs, 3 `JobWorker` runtimes, one engine each, barrier start |
+| Reaper leader (runtime) | 4 `JobWorker` runtimes ticking concurrently, barrier start |
+| Stolen lease (runtime) | 1 job; reaper steals mid-handler; handler released on an explicit event (no sleeps) |
 | Time source | Fixed timezone-aware `datetime` (no wall-clock flakiness) |
 | Temp DBs | Under pytest `tmp_path` |
 
@@ -116,13 +133,14 @@ Concurrency tests do **not** use always-true branches, fairness assumptions, or 
 | In scope | Out of scope (not claimed) |
 |----------|----------------------------|
 | Local file-backed `sqlite+libsql` (QueuePool) + in-memory StaticPool | Turso Cloud / remote auth |
-| Jobs, leases, attempts, and dead letters (migrations through `20260713_0003`) | Worker process claim, heartbeat, scheduler, or reaper loops |
+| Jobs, leases, attempts, and dead letters (migrations through `20260713_0003`) | Sustained multi-**process** fleet under production load |
 | `JobRepository` CAS claim and atomic execution-lifecycle transitions | Atomic domain side-effect fencing / application UoW |
-| Pure domain lifecycle/failure types + ports Protocol | Runtime retry classification and backoff policy |
-| Durable attempt history and one-to-one dead-letter records | Job handlers and operator dead-letter UI |
-| Integration tests on temp files | Turso Cloud multi-client execution |
-| PRAGMA `foreign_keys` + `busy_timeout=50` + file WAL once | Production multi-region leadership |
-| | Encryption / backup spikes |
+| Worker runtime claim/heartbeat/settle loop + leader-gated reaper tick | Product job handlers and operator dead-letter UI |
+| Runtime retry classification and capped backoff policy | Turso Cloud multi-client execution |
+| Pure domain lifecycle/failure types + ports Protocol | Production multi-region leadership |
+| Durable attempt history and one-to-one dead-letter records | Encryption / backup spikes |
+| Integration tests on temp files (threads, independent engines) | |
+| PRAGMA `foreign_keys` + `busy_timeout=50` + file WAL once | |
 
 ### libSQL lock-contention note
 
@@ -183,11 +201,11 @@ The migration test exercises head → `20260713_0002` → head, preserves a lega
 
 ## What this evidence does *not* claim
 
-- Worker scheduler / claim loop process (`python -m akunaki.worker` remains a stub)
-- Runtime retry classification/backoff, job handlers, or dead-letter operator UI
+- Sustained multi-**process** fleet under production load (concurrency is proven with in-process threads on independent engines, not a long-running or cross-host soak)
+- Dead-letter operator UI or drain tooling
 - Atomic domain side-effect fencing tied to application unit of work (`has_valid_job_lease` is validity-only)
 - Turso Cloud connectivity or multi-region leader election
-- Full product job types / handlers
+- Full product job types / handlers (only `system.noop` ships)
 - Encryption-at-rest, volume spikes, vectors
 - Multi-worker **fairness** (both workers always win claims)
 
