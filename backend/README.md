@@ -92,7 +92,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260713_0002   # drop attempt/dead-letter lifecycle schema
+uv run alembic downgrade 20260713_0003   # drop connection lifecycle schema
+uv run alembic downgrade 20260713_0002   # also drop attempt/dead-letter lifecycle schema
 uv run alembic downgrade 20260713_0001   # also drop lease tables
 uv run alembic downgrade base
 uv run alembic upgrade head
@@ -104,6 +105,11 @@ uv run alembic current
 | `20260713_0001` | `tenants`, `jobs` |
 | `20260713_0002` | `job_leases`, `leader_leases` |
 | `20260713_0003` | job type/error fields, `job_attempts`, `job_dead_letters` |
+| `20260718_0004` | `connections`, `connection_secrets`, `connection_health` |
+
+### Local driver limitation: BLOB binding
+
+`libsql_experimental` stores BLOBs correctly but exposes no DBAPI `Binary` constructor, so SQLAlchemy's stock `LargeBinary` raises in its bind processor before executing. Binary columns therefore use `akunaki.adapters.db.types.Blob`, a `TypeDecorator` that passes `bytes` straight through. DDL is still `BLOB`. See note 4 in [phase-zero-turso-foundation.md](../docs/evidence/phase-zero-turso-foundation.md).
 
 ## Configuration
 
