@@ -16,8 +16,10 @@ from akunaki.adapters.db.models import (
     JobDeadLetter,
     JobLease,
     LeaderLease,
+    OAuthState,
     Tenant,
 )
+from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
 
 __all__ = [
     "NAMING_CONVENTION",
@@ -31,6 +33,8 @@ __all__ = [
     "JobLease",
     "JobRepository",
     "LeaderLease",
+    "OAuthState",
+    "OAuthStateRepository",
     "Tenant",
     "create_db_engine",
     "create_session_factory",
