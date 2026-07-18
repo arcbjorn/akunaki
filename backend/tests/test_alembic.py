@@ -10,6 +10,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
 from akunaki.config import clear_settings_cache
+from conftest import head_revision
 
 
 def _alembic_config(database_url: str) -> Config:
@@ -42,7 +43,7 @@ def test_upgrade_downgrade_upgrade(
         assert "alembic_version" in tables
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "20260713_0003"
+        assert version == head_revision()
     finally:
         engine.dispose()
 
@@ -171,7 +172,7 @@ def test_head_to_0002_to_head_preserves_legacy_job(
                 .one()
             )
 
-        assert version == "20260713_0003"
+        assert version == head_revision()
         assert dict(job) == {
             "id": "legacy-job",
             "tenant_id": "legacy-tenant",

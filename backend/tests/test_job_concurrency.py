@@ -39,6 +39,7 @@ from akunaki.domain.jobs import (
     require_aware,
     to_utc_rfc3339,
 )
+from conftest import head_revision
 
 T0 = datetime(2026, 7, 13, 12, 0, 0, tzinfo=UTC)
 LEASE_TTL = timedelta(seconds=30)
@@ -1218,7 +1219,7 @@ def test_migration_upgrade_downgrade_to_0001_upgrade(
         assert "job_dead_letters" in tables
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "20260713_0003"
+        assert version == head_revision()
     finally:
         engine.dispose()
 
@@ -1248,7 +1249,7 @@ def test_migration_upgrade_downgrade_to_0001_upgrade(
         assert "job_dead_letters" in tables
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "20260713_0003"
+        assert version == head_revision()
         assert db_path.resolve().is_relative_to(tmp_path.resolve())
     finally:
         engine.dispose()

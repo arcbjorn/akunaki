@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -19,6 +20,17 @@ from akunaki.config import Settings, clear_settings_cache
 
 def _backend_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def head_revision() -> str:
+    """Current head revision, derived from the migration scripts.
+
+    Asserting a literal head id would break on every new migration; callers
+    verify that ``upgrade head`` lands on head, not which id that is.
+    """
+    cfg = Config(str(_backend_root() / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_backend_root() / "alembic"))
+    return ScriptDirectory.from_config(cfg).get_current_head() or ""
 
 
 def _alembic_config(database_url: str) -> Config:
