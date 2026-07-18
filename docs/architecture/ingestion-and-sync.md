@@ -62,6 +62,23 @@ Polar AccessLink has **v3 and v4** surfaces. Whether **Verity Sense** swimming f
 | Apple Health / HealthKit | Requires future native iOS bridge; fine-grained user authorization; not a server connector; no native app in MVP |
 | Legacy Fitbit Web API | Do not depend on it for MVP continuity past September 2026 |
 
+### Google Health access: subscription vs review gate
+
+Fitbit-origin data (heart rate, intraday, steps/activity, sleep, SpO2, breathing rate, HRV, temperature, VO2 max, ECG, irregular-rhythm notifications) is exposed through the Google Health API **without any Google Health Premium / Fitbit Premium subscription**. Premium unlocks in-app features, not API data. Data access is governed by **OAuth scopes**, not subscription tier. A screenless Fitbit-origin tracker (informally "Fitbit Air") therefore needs no subscription for this connector; see device-coverage validation caveat above.
+
+The real gates for a **server-side webapp** (data leaves the user's device to our backend):
+
+| Gate | Applies to us? | Notes |
+|------|----------------|-------|
+| Premium subscription | **No** | Not required for any API data type |
+| Google OAuth consent + restricted-scope approval | **Yes** | All Google Health scopes are Restricted; each needs written justification; request only needed scopes |
+| CASA (Cloud Application Security Assessment) | **Yes, likely** | Triggered when a product **transfers data off the user's own device**. A server-backed webapp does exactly this, so the on-device exemption does **not** apply. Annual assessment + Letter of Assessment from a Google-designated third party |
+| Unverified-app 100-user cap | Only if unverified | An app in OAuth **Testing** mode / with explicit test users can authorize its own accounts against Restricted scopes without full verification, capped ~100 users. Sufficient for single/personal use; production multi-user requires verification + CASA |
+
+Open item: the exact CASA threshold ("number of user grants or users") and whether a strictly single-user personal deployment can stay in Testing mode indefinitely is not spelled out cleanly in Google's docs; confirm during phase-zero when the connector spike registers the real OAuth client. Testing-mode refresh tokens may also expire on a short cycle (verify against Google Health API specifically before relying on long-lived background sync).
+
+Sources: [Google Health API — App verification](https://developers.google.com/health/app-verification); [Developer and User Data Policy](https://developers.google.com/health/policies/health-api-developer-user-data-policy); [Restricted scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
+
 ---
 
 ## Typed connector port
