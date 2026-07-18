@@ -50,13 +50,16 @@ Legend:
 | Connectors (Oura, Google Health, Polar) | no | no | connection **schema** exists; no OAuth, HTTP client, sync, or normalization code |
 | Agent / model packages | no | no | forbidden in core |
 | Full data-model schema | no | no | tenants, durable-job lifecycle, and connection lifecycle tables exist; OAuth state, raw/sync transport, facts, and scores pending |
-| OAuth flow (`oauth_states`, token exchange, envelope encryption) | no | no | `connection_secrets` schema exists; **no** encryption implementation or KEK management yet |
+| Envelope encryption (AES-256-GCM, KEK/DEK, rotation, AAD binding) | yes | yes | fresh DEK+nonces per seal; versioned KEK registry; fail-fast boot without keys; mutation-checked randomness |
+| Sealed tokens persisted to `connection_secrets` | yes | yes | raw column holds no readable token; envelope bound to its connection; cascade delete |
+| KEK sourcing from external KMS / secret manager | no | no | keys load from `AKUNAKI_SECRET_KEKS` only; no KMS client, rotation runbook, or key-use audit |
+| OAuth flow (`oauth_states`, token exchange, refresh) | no | no | sealing exists; **no** OAuth state schema, provider client, or token acquisition |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
 | Sustained multi-process fleet under production load | no | no | in-process threads with independent engines only; no long-running or cross-host soak |
 | Product job handlers (connectors, normalization, scoring) | no | no | only `system.noop` exists; registry is ready for them |
 | Atomic domain side-effect unit of work | no | no | lease validity primitive exists; fenced side-effect UoW still pending |
 | Remote production Turso (Turso Cloud) | no | no | **product deferred**; proposed in ADR 0003 only |
-| Encryption-at-rest / backup evidence | no | no | Phase Zero open |
+| Encryption-at-rest / backup evidence | partial | partial | application-level envelope for secret columns done (see [evidence](evidence/phase-zero-envelope-encryption.md)); platform at-rest, backup/export encryption, and key separation runbooks open |
 | Volume / vector spikes | no | no | Phase Zero open |
 
 ---
