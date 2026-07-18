@@ -45,6 +45,10 @@ class Tenant(Base):
         back_populates="tenant",
         cascade="all, delete-orphan",
     )
+    oauth_states: Mapped[list[OAuthState]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -375,4 +379,52 @@ class ConnectionHealth(Base):
 
     __table_args__ = (
         CheckConstraint("consecutive_failures >= 0", name="connection_health_failures_nonneg"),
+    )
+
+
+class OAuthState(Base):
+    """Short-lived OAuth CSRF/PKCE state for one authorize attempt.
+
+    Stores a **hash** of the OAuth ``state`` (never the raw value) and the
+    **envelope-encrypted** PKCE ``code_verifier``. Single-use via
+    ``consumed_at``; callers must also enforce ``expires_at``.
+    """
+
+    __tablename__ = "oauth_states"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    state_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    code_verifier_ciphertext: Mapped[bytes] = mapped_column(Blob, nullable=False)
+    code_verifier_key_version: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[str] = mapped_column(Text, nullable=False)
+    consumed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    tenant: Mapped[Tenant] = relationship(back_populates="oauth_states")
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('oura', 'google_health', 'polar')",
+            name="oauth_state_provider",
+        ),
+        CheckConstraint("length(state_hash) > 0", name="oauth_state_hash_nonempty"),
+        CheckConstraint(
+            "length(code_verifier_ciphertext) > 0",
+            name="oauth_state_verifier_nonempty",
+        ),
+        CheckConstraint(
+            "length(code_verifier_key_version) > 0",
+            name="oauth_state_key_version_nonempty",
+        ),
+        CheckConstraint("length(redirect_uri) > 0", name="oauth_state_redirect_uri_nonempty"),
+        CheckConstraint("expires_at > created_at", name="oauth_state_expiry_after_creation"),
+        UniqueConstraint("state_hash", name="uq_oauth_states_state_hash"),
+        Index("ix_oauth_states_expires_at", "expires_at"),
     )
