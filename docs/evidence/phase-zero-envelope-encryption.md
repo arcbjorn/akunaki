@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-18
 
-**Status:** Partial — application-level envelope encryption for secret columns is implemented and tested; **external KMS/secret-manager sourcing, backup/export encryption, and rotation runbooks are not implemented**
+**Status:** Partial — application-level envelope encryption for secret columns and the OAuth state/PKCE handshake primitives are implemented and tested; **external KMS/secret-manager sourcing, backup/export encryption, rotation runbooks, and the HTTP OAuth legs are not implemented**
 
 **Authoritative context:** [security.md](../architecture/security.md) key management, [data-model.md](../architecture/data-model.md) `connection_secrets`, [ingestion-and-sync.md](../architecture/ingestion-and-sync.md) OAuth token handling
 
@@ -72,6 +72,30 @@ A DEK encrypts exactly one message, so GCM nonce reuse cannot occur across recor
 | Deleting a connection deletes its ciphertext (no orphaned secrets) | `test_secret_row_is_deleted_with_its_connection` |
 | The settings-configured sealer (not just a test fixture) works end to end | `test_settings_configured_sealer_persists_and_reopens` |
 
+### OAuth state and PKCE (`oauth_states`)
+
+The authorize/callback handshake is the first consumer of the sealer. Security rules live in `OAuthStateRepository`, not in callers.
+
+| Invariant | Test coverage |
+|-----------|---------------|
+| Raw `state` is never stored; only its SHA-256 hash | `test_raw_state_is_never_stored`, `test_state_hash_hides_the_raw_state` |
+| PKCE verifier is stored sealed and unreadable in the row | `test_raw_state_is_never_stored` |
+| `code_challenge` matches RFC 7636 **S256** (recomputed independently) | `test_code_challenge_matches_rfc7636_s256` |
+| Verifier length within the RFC 7636 43–128 range; unreserved chars only | `test_generated_verifier_is_unique_and_rfc_compliant`, `test_code_challenge_rejects_out_of_range_verifier` |
+| State and verifier are unique per generation (256-sample) | `test_generated_state_is_unique_and_high_entropy`, `test_generated_verifier_is_unique_and_rfc_compliant` |
+| State comparison is constant-time and matches only the original value | `test_state_matches_only_for_the_original_value` |
+| A valid consume releases the sealed verifier | `test_valid_consume_returns_the_sealed_verifier` |
+| **Single use:** a replayed callback is rejected | `test_state_is_single_use` |
+| Expiry enforced; boundary is exclusive | `test_expired_state_is_rejected`, `test_expiry_boundary_is_exclusive` |
+| Redirect URI matched **exactly** (no trailing slash, query, scheme, case, or suffix tolerance) | `test_redirect_uri_must_match_exactly`, `test_redirect_uri_match_is_exact` |
+| A failed attempt does **not** burn the state (no DoS vector) | `test_redirect_mismatch_does_not_consume_the_state` |
+| Unknown/forged state and empty inputs rejected | `test_unknown_state_is_rejected`, `test_empty_inputs_are_rejected` |
+| Duplicate `state_hash` rejected by unique constraint | `test_duplicate_state_hash_is_rejected` |
+| Concurrent callbacks yield exactly one winner | `test_concurrent_consume_yields_exactly_one_winner` |
+| Expiry purge removes spent rows, retaining live ones | `test_purge_removes_expired_and_keeps_live_states`, `test_purge_clears_spent_verifier_ciphertext` |
+| Model/migration agreement; verifier column is BLOB; no raw `state` column | `test_oauth_state_model_matches_migration` |
+| States cascade with their tenant | `test_states_cascade_with_tenant` |
+
 ---
 
 ## Mutation checks performed
@@ -87,6 +111,22 @@ Passing crypto tests are weak evidence on their own, so the randomness guarantee
 
 An earlier revision of these tests **missed** the fixed-DEK and fixed-nonce mutations: comparing whole ciphertexts passed because the random KEK nonce in the header masked an identical payload. The tests now assert on the parsed payload, DEK nonce, KEK nonce, and unwrapped DEK separately. Recorded because the weak version looked correct.
 
+### OAuth state enforcement
+
+| Mutation | Result |
+|----------|--------|
+| Skip expiry check | **Caught** (2 tests fail) |
+| Skip exact redirect-URI match | **Caught** (2 tests fail) |
+| Remove read-side `consumed_at` check **only** | Survives — the atomic CAS still enforces single use |
+| Remove atomic CAS guard **only** | Survives at natural timing — see caveat below |
+| Remove **both** single-use guards | **Caught** (`test_state_is_single_use`, `test_concurrent_consume_yields_exactly_one_winner`) |
+
+**Single-use timing caveat.** Consumption is guarded twice: a read-side `consumed_at` check and an atomic conditional `UPDATE ... WHERE consumed_at IS NULL`. These are deliberate defense-in-depth, so removing either alone still passes — the other covers it.
+
+Tracing confirms all concurrent threads *do* read the row as unconsumed, so the race window is genuinely open. However, **libSQL serializes the write transactions**, so at natural timing the read-side check alone breaks the tie and the concurrency test passes even with the CAS guard removed. Artificially widening the read→write window makes that test **fail without the CAS** and **pass with it**, confirming the CAS is load-bearing on any store that does not serialize writes.
+
+This is the same class of masking already recorded for concurrent enqueue in [phase-zero-job-concurrency.md](phase-zero-job-concurrency.md): local libSQL write serialization hides races that a networked store would expose. The caveat is documented in the test docstring itself.
+
 ---
 
 ## Honest scope
@@ -99,7 +139,8 @@ An earlier revision of these tests **missed** the fixed-DEK and fixed-nonce muta
 | AAD binding an envelope to its owning row | HSM / hardware-backed keys |
 | Fail-fast boot without configured keys | Backup, export, and object-storage encryption |
 | Local `AKUNAKI_SECRET_KEKS` configuration | Key access separation, audit logging of key use |
-| `connection_secrets` persistence | `oauth_states` PKCE verifier sealing (schema not yet added) |
+| `oauth_states` single-use handshake (hashed state, sealed PKCE verifier, exact redirect, expiry) | HTTP authorize/callback endpoints; provider registration |
+| `connection_secrets` persistence | Provider OAuth clients, token exchange, or refresh |
 
 ---
 
@@ -107,7 +148,7 @@ An earlier revision of these tests **missed** the fixed-DEK and fixed-nonce muta
 
 - Turso platform encryption at rest (provider-side; deferred with remote Turso)
 - Backup/restore key separation or the restoration-suppression deletion key
-- Any OAuth flow, token acquisition, or refresh path
+- HTTP authorize/callback endpoints, provider OAuth clients, token acquisition, or refresh (the state/PKCE *handshake primitives* are covered; the network legs are not)
 - Key rotation operations at scale, or re-encryption batch tooling
 - Formal cryptographic review or third-party audit of this construction
 
