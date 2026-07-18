@@ -26,7 +26,7 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections) | yes | yes (up/down/up through `0004`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states) | yes | yes (up/down/up through `0005`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
 | Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
 | libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
@@ -47,13 +47,14 @@ Legend:
 | Ruff / mypy / import-linter / pytest / pip-audit gates | yes | yes | see evidence docs |
 | Frontend / web | no | no | deferred |
 | Auth / OIDC / sessions product | no | no | deferred |
-| Connectors (Oura, Google Health, Polar) | no | no | connection **schema** exists; no OAuth, HTTP client, sync, or normalization code |
+| Connectors (Oura, Google Health, Polar) | no | no | connection schema + OAuth state/PKCE primitives exist; no provider HTTP client, sync, or normalization code |
 | Agent / model packages | no | no | forbidden in core |
-| Full data-model schema | no | no | tenants, durable-job lifecycle, and connection lifecycle tables exist; OAuth state, raw/sync transport, facts, and scores pending |
+| Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, and OAuth state tables exist; raw/sync transport, facts, and scores pending |
 | Envelope encryption (AES-256-GCM, KEK/DEK, rotation, AAD binding) | yes | yes | fresh DEK+nonces per seal; versioned KEK registry; fail-fast boot without keys; mutation-checked randomness |
 | Sealed tokens persisted to `connection_secrets` | yes | yes | raw column holds no readable token; envelope bound to its connection; cascade delete |
 | KEK sourcing from external KMS / secret manager | no | no | keys load from `AKUNAKI_SECRET_KEKS` only; no KMS client, rotation runbook, or key-use audit |
-| OAuth flow (`oauth_states`, token exchange, refresh) | no | no | sealing exists; **no** OAuth state schema, provider client, or token acquisition |
+| OAuth state / PKCE handshake primitives (`oauth_states`) | yes | yes | migration `0005`; hashed state only, sealed PKCE verifier, exact redirect match, single-use + expiry, purge sweep |
+| OAuth HTTP legs (authorize/callback endpoints, token exchange, refresh) | no | no | handshake primitives exist; **no** provider client, HTTP routes, or token acquisition |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
 | Sustained multi-process fleet under production load | no | no | in-process threads with independent engines only; no long-running or cross-host soak |
 | Product job handlers (connectors, normalization, scoring) | no | no | only `system.noop` exists; registry is ready for them |
@@ -83,4 +84,4 @@ Legend:
 | `backend/` | First real application code (this foundation) |
 | Phase Zero overall | **In progress** — local libSQL foundation, atomic durable-job repository lifecycle, and single-process worker runtime tested; remote Turso intentionally deferred; encryption / volume / connector spikes open |
 
-Evidence: [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md), [evidence/phase-zero-job-concurrency.md](evidence/phase-zero-job-concurrency.md).
+Evidence: [evidence/phase-zero-turso-foundation.md](evidence/phase-zero-turso-foundation.md), [evidence/phase-zero-job-concurrency.md](evidence/phase-zero-job-concurrency.md), [evidence/phase-zero-envelope-encryption.md](evidence/phase-zero-envelope-encryption.md).
