@@ -2,7 +2,9 @@
 
 Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
-This package intentionally includes **no** frontend, connectors, auth product surface, or model/AI SDKs. Full product schema remains **pending**. The **local** atomic durable-job repository lifecycle is implemented: fenced claims create attempt history, and completion, retry scheduling, dead-lettering, and lease-expiry transitions are transactional. The **worker runtime**, retry/backoff policy, and job handlers are **not** implemented.
+This package intentionally includes **no** frontend, provider HTTP clients, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
+
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, and the **OAuth state/PKCE handshake primitives**. Not implemented: product job handlers, provider OAuth clients and token exchange, and the HTTP authorize/callback legs.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -92,7 +94,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260713_0003   # drop connection lifecycle schema
+uv run alembic downgrade 20260718_0004   # drop oauth state schema
+uv run alembic downgrade 20260713_0003   # also drop connection lifecycle schema
 uv run alembic downgrade 20260713_0002   # also drop attempt/dead-letter lifecycle schema
 uv run alembic downgrade 20260713_0001   # also drop lease tables
 uv run alembic downgrade base
@@ -106,6 +109,7 @@ uv run alembic current
 | `20260713_0002` | `job_leases`, `leader_leases` |
 | `20260713_0003` | job type/error fields, `job_attempts`, `job_dead_letters` |
 | `20260718_0004` | `connections`, `connection_secrets`, `connection_health` |
+| `20260718_0005` | `oauth_states` (hashed state + sealed PKCE verifier) |
 
 ### Local driver limitation: BLOB binding
 
@@ -144,6 +148,28 @@ uv run python -c "import base64,secrets;print('dev-v1:'+base64.b64encode(secrets
 
 Production KEKs belong in the platform secret store or a KMS; see [phase-zero-envelope-encryption.md](../docs/evidence/phase-zero-envelope-encryption.md) for what is and is not covered.
 
+### OAuth state and PKCE
+
+`OAuthStateRepository` holds the callback-security rules so no call site can skip one:
+
+```python
+state, verifier = generate_state(), generate_code_verifier()
+challenge = code_challenge_s256(verifier)          # goes on the authorize URL
+repo.create(
+    state_id="s1", tenant_id="t1", provider="oura", state=state,
+    sealed_verifier=sealer.seal(verifier.encode(), aad=b"s1"),
+    redirect_uri=REDIRECT, now=now, ttl=timedelta(minutes=10),
+)
+# ... user returns ...
+result = repo.consume(state=state, redirect_uri=REDIRECT, now=now)
+if result.ok:
+    verifier = sealer.open(result.sealed_verifier, aad=b"s1").decode()
+```
+
+The raw `state` is **never stored** — only its SHA-256 hash — and the PKCE verifier is stored sealed. `consume` enforces single use (atomic `UPDATE ... WHERE consumed_at IS NULL`), expiry, and an **exact** redirect-URI match, returning a typed `rejection` instead of raising so callers can surface one generic error without revealing which check failed. A failed attempt does not burn the state. Call `purge_expired` periodically to drop spent rows and their sealed verifiers.
+
+PKCE is **S256** only; `plain` is deliberately unsupported.
+
 There is **no** `AKUNAKI_DATABASE_AUTH_TOKEN` and **no** remote connect-args path in this foundation.
 
 ### Accepted `AKUNAKI_DATABASE_URL` forms
@@ -165,7 +191,7 @@ src/akunaki/
   application/      # worker runtime + handler registry (port-typed, no SQLAlchemy)
   ports/            # JobRepositoryPort + SecretSealerPort protocols
   adapters/db/      # engine, models, JobRepository CAS adapter
-  adapters/crypto/  # AES-256-GCM envelope sealer + KEK config
+  adapters/crypto/  # AES-256-GCM envelope sealer, KEK config, OAuth state/PKCE
   api/              # FastAPI app factory + /healthz
   worker/           # core worker entrypoint: claim loop + signal shutdown
 alembic/            # migrations 0001 foundation + 0002 leases + 0003 execution lifecycle
