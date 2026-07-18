@@ -69,6 +69,24 @@ Only the holder of the `core-reaper` **leader lease** requeues expired leases an
 
 Execution policy lives in `akunaki.application.worker_runtime` (port-typed, no SQLAlchemy); durability lives in `JobRepository`. Handlers register in `akunaki.application.handlers`; only `system.noop` ships today. Handlers **must be idempotent** — a lease can expire mid-run and the job be retried elsewhere.
 
+## Enqueue work
+
+`JobRepository.enqueue_job` is how work enters the durable lifecycle:
+
+```python
+result = repository.enqueue_job(
+    job_id="job-1",
+    tenant_id="tenant-1",
+    job_type="connection.initial_sync",
+    payload_json='{"connection_id":"c1"}',
+    now=datetime.now(UTC),
+    idempotency_key="tenant-1:c1:initial",   # optional
+)
+result.created  # False when an existing job for this key was returned
+```
+
+Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON CONFLICT DO NOTHING`, so a retried API call, a redelivered webhook, or a re-run scheduler cannot fan out duplicates — and concurrent enqueues of one key neither double-insert nor raise. A `None` key always inserts (SQL `NULL` never conflicts). `run_after` defaults to `now`; pass a future time to schedule. A repeated `job_id` **without** a key raises, since that is a caller bug rather than a dedupe.
+
 ## Migrations
 
 ```bash
