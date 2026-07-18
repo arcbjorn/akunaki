@@ -97,6 +97,22 @@ class JobCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class EnqueuedJob:
+    """Result of an enqueue request.
+
+    ``created`` is False when an existing job with the same
+    ``(tenant_id, idempotency_key)`` was returned instead of inserting a
+    duplicate, so callers can distinguish a fresh enqueue from a deduped one.
+    """
+
+    job_id: str
+    tenant_id: str
+    job_type: str
+    role: JobRole
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
 class JobClaim:
     """Winning claim after a successful CAS lease acquisition."""
 
