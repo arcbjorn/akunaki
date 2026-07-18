@@ -26,7 +26,9 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters) | yes | yes (up/down/up through `0003`; legacy job + `system.noop` backfill) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections) | yes | yes (up/down/up through `0004`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
+| libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
 | Domain job lifecycle/failure types + ports Protocol (model-free) | yes | yes | immutable failure results; no SQLAlchemy in domain/ports; second-precision times; min 1s lease TTL |
 | JobRepository atomic execution lifecycle + leader fencing | yes | yes | claim creates one attempt; complete/fail/retry/dead-letter/expiry history are fenced local short transactions |
@@ -45,9 +47,10 @@ Legend:
 | Ruff / mypy / import-linter / pytest / pip-audit gates | yes | yes | see evidence docs |
 | Frontend / web | no | no | deferred |
 | Auth / OIDC / sessions product | no | no | deferred |
-| Connectors (Oura, Google Health, Polar) | no | no | deferred |
+| Connectors (Oura, Google Health, Polar) | no | no | connection **schema** exists; no OAuth, HTTP client, sync, or normalization code |
 | Agent / model packages | no | no | forbidden in core |
-| Full data-model schema | no | no | only tenants and durable-job lifecycle tables exist |
+| Full data-model schema | no | no | tenants, durable-job lifecycle, and connection lifecycle tables exist; OAuth state, raw/sync transport, facts, and scores pending |
+| OAuth flow (`oauth_states`, token exchange, envelope encryption) | no | no | `connection_secrets` schema exists; **no** encryption implementation or KEK management yet |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
 | Sustained multi-process fleet under production load | no | no | in-process threads with independent engines only; no long-running or cross-host soak |
 | Product job handlers (connectors, normalization, scoring) | no | no | only `system.noop` exists; registry is ready for them |
