@@ -62,13 +62,17 @@ def _is_database_locked(exc: BaseException) -> bool:
     return "database is locked" in msg or "database is busy" in msg
 
 
-def _affected_rows(result: object) -> int:
+def affected_rows(result: object) -> int:
     """Return integer rowcount from a SQLAlchemy DML result."""
     rowcount = getattr(result, "rowcount", None)
     if not isinstance(rowcount, int):
         msg = "statement result missing integer rowcount"
         raise RuntimeError(msg)
     return rowcount
+
+
+# Backwards-compatible private alias used throughout this module.
+_affected_rows = affected_rows
 
 
 def _require_nonempty(value: str, *, field_name: str) -> str:
