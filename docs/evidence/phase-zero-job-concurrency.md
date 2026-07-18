@@ -81,6 +81,22 @@ Canonical lease timestamps use **second precision** (`to_utc_rfc3339` drops micr
 | Non-lock errors propagate through short-tx runner | `test_nonlock_error_propagates_through_short_tx` |
 | Joined threads no longer alive after join | dual-claim, multi-worker, leader race, concurrent reaper, held-lock |
 
+### Enqueue invariants (work entering the lifecycle)
+
+| Invariant | Test coverage |
+|-----------|---------------|
+| Enqueue creates a ready, immediately-due job claimable by the real claim path | `test_enqueue_creates_a_ready_due_job`, `test_enqueued_job_is_claimable_and_runs` |
+| Same `(tenant_id, idempotency_key)` deduped; caller gets the winning job id | `test_enqueue_is_idempotent_for_same_key` |
+| `NULL` idempotency key never conflicts (always inserts) | `test_null_key_always_inserts` |
+| Dedupe is tenant-scoped; one tenant's key never blocks another's | `test_same_key_different_tenants_both_insert` |
+| Concurrent enqueues of one key insert exactly once and none raise | `test_concurrent_enqueue_of_same_key_inserts_once` (4 threads, independent engines, barrier start) |
+| Future `run_after` is not yet due; claimable once the time arrives | `test_future_run_after_is_not_yet_due` |
+| Agent-role work is never claimable by a core worker | `test_agent_role_is_not_claimable_by_core` |
+| Duplicate job id **without** a key is a caller error, not a silent dedupe | `test_duplicate_job_id_without_key_is_rejected` |
+| Argument validation + `json_valid(payload_json)` schema enforcement | `test_enqueue_validates_arguments`, `test_invalid_payload_json_is_rejected_by_schema` |
+
+Dedupe is a single `INSERT ... ON CONFLICT DO NOTHING` plus a read of the surviving row, so a lost insert race neither double-inserts nor raises. **Timing note:** at natural thread scheduling the pre-check/insert window is narrow enough that the conflict clause is rarely the deciding factor; removing `ON CONFLICT` was verified to fail `test_concurrent_enqueue_of_same_key_inserts_once` only when the window is artificially widened. The clause is load-bearing under contention, not decoration.
+
 ### Worker runtime invariants (execution policy over the repository)
 
 | Invariant | Test coverage |
@@ -121,6 +137,7 @@ The two stolen-lease tests assert on **distinct observables** (`complete_job` ca
 | Worker fleet (runtime) | 24 jobs, 3 `JobWorker` runtimes, one engine each, barrier start |
 | Reaper leader (runtime) | 4 `JobWorker` runtimes ticking concurrently, barrier start |
 | Stolen lease (runtime) | 1 job; reaper steals mid-handler; handler released on an explicit event (no sleeps) |
+| Concurrent enqueue | 4 threads, one shared idempotency key, independent engines, barrier start |
 | Time source | Fixed timezone-aware `datetime` (no wall-clock flakiness) |
 | Temp DBs | Under pytest `tmp_path` |
 
@@ -134,7 +151,7 @@ Concurrency tests do **not** use always-true branches, fairness assumptions, or 
 |----------|----------------------------|
 | Local file-backed `sqlite+libsql` (QueuePool) + in-memory StaticPool | Turso Cloud / remote auth |
 | Jobs, leases, attempts, and dead letters (migrations through `20260713_0003`) | Sustained multi-**process** fleet under production load |
-| `JobRepository` CAS claim and atomic execution-lifecycle transitions | Atomic domain side-effect fencing / application UoW |
+| `JobRepository` CAS claim, idempotent enqueue, and atomic execution-lifecycle transitions | Atomic domain side-effect fencing / application UoW |
 | Worker runtime claim/heartbeat/settle loop + leader-gated reaper tick | Product job handlers and operator dead-letter UI |
 | Runtime retry classification and capped backoff policy | Turso Cloud multi-client execution |
 | Pure domain lifecycle/failure types + ports Protocol | Production multi-region leadership |
