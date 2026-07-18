@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.models import Job, JobAttempt, JobDeadLetter, JobLease, LeaderLease
 from akunaki.domain.jobs import (
+    EnqueuedJob,
     JobAttemptStatus,
     JobCandidate,
     JobClaim,
@@ -150,6 +151,120 @@ class JobRepository:
                     raise
             finally:
                 session.close()
+
+    # ------------------------------------------------------------------
+    # Enqueue
+    # ------------------------------------------------------------------
+
+    def enqueue_job(
+        self,
+        *,
+        job_id: str,
+        tenant_id: str,
+        job_type: str,
+        payload_json: str,
+        now: datetime,
+        role: JobRole = JobRole.CORE,
+        priority: int = 100,
+        run_after: datetime | None = None,
+        max_attempts: int = 5,
+        idempotency_key: str | None = None,
+    ) -> EnqueuedJob:
+        """Insert one ready job, deduplicating on ``(tenant_id, idempotency_key)``.
+
+        Dedupe is a single ``INSERT ... ON CONFLICT DO NOTHING`` followed by a
+        read of the surviving row, so two concurrent enqueues of the same key
+        cannot both insert and neither raises. A ``None`` key always inserts
+        (SQL ``NULL`` never conflicts under the unique constraint).
+        """
+        _require_nonempty(job_id, field_name="job_id")
+        _require_nonempty(tenant_id, field_name="tenant_id")
+        _require_nonempty(job_type, field_name="job_type")
+        _require_nonempty(payload_json, field_name="payload_json")
+        if max_attempts < 1:
+            msg = "max_attempts must be >= 1"
+            raise ValueError(msg)
+        if idempotency_key is not None:
+            _require_nonempty(idempotency_key, field_name="idempotency_key")
+
+        now_aware = require_aware(now, field_name="now")
+        now_s = to_utc_rfc3339(now_aware)
+        run_after_s = to_utc_rfc3339(
+            require_aware(run_after, field_name="run_after") if run_after is not None else now_aware
+        )
+
+        def work(session: Session) -> EnqueuedJob:
+            if idempotency_key is not None:
+                existing = session.execute(
+                    select(Job.id, Job.job_type, Job.role).where(
+                        Job.tenant_id == tenant_id,
+                        Job.idempotency_key == idempotency_key,
+                    )
+                ).one_or_none()
+                if existing is not None:
+                    existing_id, existing_type, existing_role = existing
+                    return EnqueuedJob(
+                        job_id=existing_id,
+                        tenant_id=tenant_id,
+                        job_type=existing_type,
+                        role=JobRole(existing_role),
+                        created=False,
+                    )
+
+            result = session.execute(
+                sqlite_insert(Job)
+                .values(
+                    id=job_id,
+                    tenant_id=tenant_id,
+                    role=role.value,
+                    status=JobStatus.READY.value,
+                    payload_json=payload_json,
+                    priority=priority,
+                    run_after=run_after_s,
+                    attempts=0,
+                    max_attempts=max_attempts,
+                    idempotency_key=idempotency_key,
+                    fence_token=0,
+                    created_at=now_s,
+                    updated_at=now_s,
+                    job_type=job_type,
+                )
+                .on_conflict_do_nothing()
+            )
+            if _affected_rows(result) == 1:
+                return EnqueuedJob(
+                    job_id=job_id,
+                    tenant_id=tenant_id,
+                    job_type=job_type,
+                    role=role,
+                    created=True,
+                )
+
+            # Lost an insert race (or the job id itself already exists). Read
+            # the surviving row so the caller always gets a usable identity.
+            if idempotency_key is not None:
+                winner = session.execute(
+                    select(Job.id, Job.job_type, Job.role).where(
+                        Job.tenant_id == tenant_id,
+                        Job.idempotency_key == idempotency_key,
+                    )
+                ).one_or_none()
+                if winner is not None:
+                    winner_id, winner_type, winner_role = winner
+                    return EnqueuedJob(
+                        job_id=winner_id,
+                        tenant_id=tenant_id,
+                        job_type=winner_type,
+                        role=JobRole(winner_role),
+                        created=False,
+                    )
+
+            # No idempotency key: the conflict can only be the primary key, so
+            # this job id is already taken by a different logical job.
+            msg = f"job id {job_id!r} already exists"
+            raise ValueError(msg)
+
+        return self._run_short_tx(work)
 
     # ------------------------------------------------------------------
     # Private in-session helpers (discovery + claim construction)
