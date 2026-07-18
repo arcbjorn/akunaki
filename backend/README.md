@@ -48,13 +48,26 @@ uv run python -m akunaki.api
 # GET http://127.0.0.1:8000/healthz
 ```
 
-## Run worker stub
+## Run worker
 
 ```bash
 uv run python -m akunaki.worker
 ```
 
-Boots core config/DB, probes readiness, prints an explicit stub message, and exits. **No job loop yet.** Atomic job lifecycle APIs live in `JobRepository` for the next worker integration.
+Boots core config/DB, probes readiness, then runs the durable claim loop until `SIGINT`/`SIGTERM` requests a cooperative shutdown (the in-flight job settles first).
+
+Each iteration claims one due job by fenced CAS, runs its registered handler while a background thread extends the lease, and settles the outcome durably:
+
+| Outcome | Effect |
+|---------|--------|
+| Handler returns | `complete_job` under the original fence; a lease lost mid-run suppresses completion rather than reporting false success |
+| `TransientJobError` (or unknown exception) | Retry scheduled with capped exponential backoff + jitter, until `max_attempts` |
+| `PermanentJobError`, `ValueError`/`TypeError`/`KeyError` | Dead-lettered immediately without burning the attempt budget |
+| Unregistered `job_type` | Dead-lettered as `UnregisteredJobType` (deployment error, not transient) |
+
+Only the holder of the `core-reaper` **leader lease** requeues expired leases and dead-letters exhausted ones, so a passive standby never reaps behind an active worker.
+
+Execution policy lives in `akunaki.application.worker_runtime` (port-typed, no SQLAlchemy); durability lives in `JobRepository`. Handlers register in `akunaki.application.handlers`; only `system.noop` ships today. Handlers **must be idempotent** — a lease can expire mid-run and the job be retried elsewhere.
 
 ## Migrations
 
@@ -101,12 +114,12 @@ Remote host URLs (including Turso Cloud hosts), credentialed URLs, non-`sqlite+l
 
 ```text
 src/akunaki/
-  domain/           # pure job lifecycle/concurrency types (no SQLAlchemy)
-  application/      # use cases (empty foundation)
+  domain/           # pure job lifecycle/concurrency types + retry policy (no SQLAlchemy)
+  application/      # worker runtime + handler registry (port-typed, no SQLAlchemy)
   ports/            # JobRepositoryPort protocol
   adapters/db/      # engine, models, JobRepository CAS adapter
   api/              # FastAPI app factory + /healthz
-  worker/           # core worker stub entrypoint (no claim loop)
+  worker/           # core worker entrypoint: claim loop + signal shutdown
 alembic/            # migrations 0001 foundation + 0002 leases + 0003 execution lifecycle
 tests/              # temp-file libSQL tests (no leftover artifacts)
 ```
