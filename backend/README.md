@@ -210,6 +210,20 @@ requested -> jobs_cancelled -> rows_scrubbed -> backups_scheduled -> completed
 
 **Not built:** the restoration-suppression ledger (needs a dedicated deletion key with access separation — an empty table would imply a guarantee the system cannot make), and actual backup expiry (no backup provider is wired; the pipeline records the stage only).
 
+### Internal debug surface
+
+Phase one's vertical slice — "see raw sync success and latest sleep fact in API" — is served by an **internal, unauthenticated** router:
+
+```bash
+AKUNAKI_DEBUG_ROUTES_ENABLED=true uv run python -m akunaki.api
+curl 'localhost:8000/internal/debug/sync-status?tenant_id=t1'
+curl 'localhost:8000/internal/debug/latest-sleep?tenant_id=t1'
+```
+
+**Off by default and fails closed**: with the flag unset the routes are not registered at all, so they are absent from the OpenAPI schema rather than merely guarded at request time. Responses carry `private, no-store`, and a cross-tenant read is a `404` — indistinguishable from "no data yet".
+
+This is a deliberate stand-in for the authenticated `/v1` surface, which needs sessions. It should be **replaced**, not extended.
+
 ### Local driver limitation: BLOB binding
 
 `libsql_experimental` stores BLOBs correctly but exposes no DBAPI `Binary` constructor, so SQLAlchemy's stock `LargeBinary` raises in its bind processor before executing. Binary columns therefore use `akunaki.adapters.db.types.Blob`, a `TypeDecorator` that passes `bytes` straight through. DDL is still `BLOB`. See note 4 in [phase-zero-turso-foundation.md](../docs/evidence/phase-zero-turso-foundation.md).
@@ -224,6 +238,7 @@ All settings use the **`AKUNAKI_`** prefix (pydantic-settings).
 | `AKUNAKI_SERVICE_NAME` | `akunaki-api` | Reported by `/healthz` |
 | `AKUNAKI_ECHO_SQL` | `false` | Dev SQL echo |
 | `AKUNAKI_SECRET_KEKS` | *(empty)* | Envelope-encryption KEKs as `version:base64key` pairs, comma separated; each key must decode to exactly 32 bytes. Empty means secret sealing is unavailable and any process that needs it fails fast. |
+| `AKUNAKI_DEBUG_ROUTES_ENABLED` | `false` | Mounts the **unauthenticated** internal debug router. Serves tenant health data with no session check — keep off outside local development. |
 | `AKUNAKI_ACTIVE_KEK_VERSION` | *(empty)* | KEK version new envelopes are sealed under. Optional when exactly one KEK is configured; **required** when several are. |
 
 ### Secret sealing (envelope encryption)
