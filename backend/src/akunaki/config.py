@@ -90,6 +90,27 @@ class Settings(BaseSettings):
             "Defaults to the sole configured version when exactly one is supplied."
         ),
     )
+    oidc_issuer: str = Field(
+        default="",
+        description=(
+            "OIDC issuer URL (e.g. https://auth.example.com). Empty disables "
+            "the login routes: they are not mounted, so there is no half-built "
+            "auth surface on an unconfigured deployment."
+        ),
+    )
+    oidc_client_id: str = Field(default="", description="OIDC client id.")
+    oidc_client_secret: str = Field(default="", description="OIDC client secret.")
+    oidc_redirect_uri: str = Field(
+        default="",
+        description="Exact callback URI registered with the IdP; must match at the callback.",
+    )
+    session_cookie_secure: bool = Field(
+        default=True,
+        description=(
+            "Set the Secure attribute on the session cookie. Only turn off for "
+            "local HTTP development; a real deployment must keep it true."
+        ),
+    )
     debug_routes_enabled: bool = Field(
         default=False,
         description=(

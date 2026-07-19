@@ -54,6 +54,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(session_router)
 
+    # Login routes only when OIDC is configured. An unconfigured deployment
+    # exposes no half-built auth surface.
+    if resolved.oidc_issuer.strip():
+        from akunaki.api.routes.auth import router as auth_router
+
+        app.include_router(auth_router)
+
     if resolved.debug_routes_enabled:
         # Imported lazily so the unauthenticated router cannot be reached at
         # all — not even as a registered-but-guarded path — unless explicitly
