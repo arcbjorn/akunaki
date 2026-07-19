@@ -885,3 +885,39 @@ class SessionRow(Base):
         Index("ix_sessions_user", "user_id"),
         Index("ix_sessions_expires_at", "expires_at"),
     )
+
+
+class LoginState(Base):
+    """One in-flight OIDC login attempt.
+
+    Separate from ``OAuthState``: at login time no tenant exists yet, and OIDC
+    needs a ``nonce`` that the connector flow has no use for. ``state`` and
+    ``nonce`` are stored hashed; the PKCE verifier is envelope-encrypted.
+    """
+
+    __tablename__ = "login_states"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    state_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    nonce_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    code_verifier_ciphertext: Mapped[bytes] = mapped_column(Blob, nullable=False)
+    code_verifier_key_version: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[str] = mapped_column(Text, nullable=False)
+    consumed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("length(state_hash) > 0", name="login_state_hash_nonempty"),
+        CheckConstraint("length(nonce_hash) > 0", name="login_state_nonce_hash_nonempty"),
+        CheckConstraint(
+            "length(code_verifier_ciphertext) > 0", name="login_state_verifier_nonempty"
+        ),
+        CheckConstraint(
+            "length(code_verifier_key_version) > 0", name="login_state_key_version_nonempty"
+        ),
+        CheckConstraint("length(redirect_uri) > 0", name="login_state_redirect_nonempty"),
+        CheckConstraint("expires_at > created_at", name="login_state_expiry_after_creation"),
+        UniqueConstraint("state_hash", name="uq_login_states_state_hash"),
+        Index("ix_login_states_expires_at", "expires_at"),
+    )
