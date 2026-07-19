@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, and the **Oura sleep normalizer** writing versioned canonical facts. Not implemented: the `raw.normalize` job handler, other detail tables, source selection and scoring, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, and the **Oura sleep normalizer** writing versioned canonical facts. Not implemented: other detail tables, source selection and scoring, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -154,7 +154,9 @@ The handler opens the connection's sealed tokens, fetches windowed pages from Ou
 
 Backfill lookback defaults to 90 days plus a 36h overlap, but is configurable via `SyncConfig` because the 30-vs-90 choice is still an open product decision. `max_pages` bounds runaway pagination.
 
-**Known placeholder:** pages are keyed as `stream:page:<content_hash>` rather than by real vendor record ids, because Oura returns collection pages and no per-record normalizer exists yet. This is safe for dedupe (an unchanged page appends no new revision) but means one revision currently represents a page, not a record. Real per-record identity arrives with the normalizer.
+A successful page commit also enqueues a `raw.normalize` job **in the same transaction** as the revision, so a revision can never exist without its normalization job — and a crash before commit leaves neither.
+
+**Known limitation:** the raw layer keys pages as `stream:page:<content_hash>`, so one `raw_object`/`raw_revision` represents a *page*, not a record. Facts are keyed per record (`sleep_session:<vendor_id>`), so a page containing two sessions correctly yields two facts — but raw-layer identity is still coarse. Retiring this needs a stream-aware splitter in the fetch/commit path, not just the normalizer.
 
 ### Sleep facts and normalization (`0007`)
 
@@ -172,6 +174,16 @@ The normalizer (`akunaki.domain.sleep_normalizer`) is **pure**: no I/O and no cl
 | Canonical units | Vendor seconds become minutes; steps stay integers, energy kcal, distance metres |
 | Quality grading | Missing stage detail lowers `quality`/`confidence` rather than presenting a partial night as complete |
 | Bad records | One unusable record is skipped, never failing the whole page |
+
+### Normalization (`raw.normalize`)
+
+Enqueued automatically by a successful sync commit, keyed by `raw_revision_id`. The handler reads the immutable revision, normalizes its body, and writes versioned facts.
+
+| Outcome | Behavior |
+|---------|----------|
+| Missing revision, malformed payload, unparseable body | **Dead-letter** — none of these fix themselves on retry |
+| Tombstone revision | Skipped (vendor deletions use the deletion path, not a fabricated fact) |
+| Success | Facts written; identical content writes no new version |
 
 ### Local driver limitation: BLOB binding
 
