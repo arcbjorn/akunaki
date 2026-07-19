@@ -53,9 +53,9 @@ __all__ = [
 ]
 
 
-# Default backfill lookback. The 30-vs-90 choice is an open product decision
-# (roadmap open decision 6), so it is configurable rather than baked in.
-DEFAULT_LOOKBACK_DAYS = 90
+# Default backfill lookback. Roadmap decision 6 (2026-07-19) settled on 30 days
+# for lower first-sync cost and vendor load; still configurable per connection.
+DEFAULT_LOOKBACK_DAYS = 30
 
 # Overlap absorbs late vendor finalization on the sleep stream.
 DEFAULT_OVERLAP = timedelta(hours=36)
