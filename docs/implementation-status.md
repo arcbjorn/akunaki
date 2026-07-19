@@ -26,7 +26,7 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts, revision slices) | yes | yes (up/down/up through `0008`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts, revision slices, deletion pipeline) | yes | yes (up/down/up through `0010`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
 | Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
 | libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
@@ -74,9 +74,13 @@ Legend:
 | Google Health / Polar OAuth clients | no | no | only Oura implemented; both gated on unstarted phase-zero spikes |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
 | Sustained multi-process fleet under production load | no | no | in-process threads with independent engines only; no long-running or cross-host soak |
-| Product job handlers (normalization, scoring) | no | no | `connection.initial_sync` ships; normalization and scoring handlers pending |
+| Product job handlers | partial | partial | `connection.initial_sync` and `raw.normalize` ship; scoring/recompute handlers pending |
 | Atomic domain side-effect unit of work | no | no | lease validity primitive exists; fenced side-effect UoW still pending |
 | Remote production Turso (Turso Cloud) | no | no | **product deferred**; proposed in ADR 0003 only |
+| Privacy delete stub (cancel jobs → scrub rows → completion proof) | yes | yes | phase-one exit criterion; ordering enforced (scrub before cancel is rejected); tenant-scoped; proof carries counts only |
+| Restoration-suppression ledger | no | no | **deliberately not built**: needs a dedicated deletion key with access separation; an empty table would imply a guarantee the system cannot make |
+| Backup expiry on deletion | no | no | pipeline records the stage; no backup provider is wired, so nothing is actually expired |
+| Multi-tenant fact isolation | yes | yes | fact identity is tenant-scoped (migration `0010`); regression-tested after a collision bug where one tenant's fact silently overwrote another's |
 | Encryption-at-rest / backup evidence | partial | partial | application-level envelope for secret columns done (see [evidence](evidence/phase-zero-envelope-encryption.md)); platform at-rest, backup/export encryption, and key separation runbooks open |
 | Volume / vector spikes | no | no | Phase Zero open |
 
