@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, and the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit. Not implemented: normalization and facts, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, and the **Oura sleep normalizer** writing versioned canonical facts. Not implemented: the `raw.normalize` job handler, other detail tables, source selection and scoring, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -94,7 +94,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260718_0005   # drop sync transport schema
+uv run alembic downgrade 20260719_0006   # drop sleep fact schema
+uv run alembic downgrade 20260718_0005   # also drop sync transport schema
 uv run alembic downgrade 20260718_0004   # also drop oauth state schema
 uv run alembic downgrade 20260713_0003   # also drop connection lifecycle schema
 uv run alembic downgrade 20260713_0002   # also drop attempt/dead-letter lifecycle schema
@@ -112,6 +113,7 @@ uv run alembic current
 | `20260718_0004` | `connections`, `connection_secrets`, `connection_health` |
 | `20260718_0005` | `oauth_states` (hashed state + sealed PKCE verifier) |
 | `20260719_0006` | `sync_runs`, `raw_payload`, `sync_cursors`, `raw_objects`, `raw_revisions` |
+| `20260719_0007` | `fact_records`, `sleep_sessions` (sleep slice only) |
 
 ### Sync transport layer (`0006`)
 
@@ -153,6 +155,23 @@ The handler opens the connection's sealed tokens, fetches windowed pages from Ou
 Backfill lookback defaults to 90 days plus a 36h overlap, but is configurable via `SyncConfig` because the 30-vs-90 choice is still an open product decision. `max_pages` bounds runaway pagination.
 
 **Known placeholder:** pages are keyed as `stream:page:<content_hash>` rather than by real vendor record ids, because Oura returns collection pages and no per-record normalizer exists yet. This is safe for dedupe (an unchanged page appends no new revision) but means one revision currently represents a page, not a record. Real per-record identity arrives with the normalizer.
+
+### Sleep facts and normalization (`0007`)
+
+`fact_records` is the header row every normalized measurement gets; typed detail lives in a one-to-one table keyed by `fact_record_id` (**not** EAV, not a table-name string pointer). Only `sleep_sessions` ships today — the other detail tables arrive with the normalizers that populate them.
+
+**Facts are versioned, never updated in place.** Writing content identical to the current version is a no-op; changed content supersedes it and appends `version_n + 1`, retaining the prior row *and its detail* for provenance. A partial unique index (`fact_key WHERE is_current = 1`) is the schema-level backstop: a logical fact can have at most one current version.
+
+`fact_key` is an addition beyond the documented column list — the data model describes versioning but names no column identifying a logical fact across its versions. It is derived (`sleep_session:<vendor_record_id>`), so it introduces no new source of truth.
+
+The normalizer (`akunaki.domain.sleep_normalizer`) is **pure**: no I/O and no clock, so re-running it over the same raw revision produces byte-identical facts. Canonical rules it applies:
+
+| Rule | Behavior |
+|------|----------|
+| Wake-date assignment | A bout is assigned to the local date of **wake**, not onset — a 23:10→07:20 night counts for the morning it ended |
+| Canonical units | Vendor seconds become minutes; steps stay integers, energy kcal, distance metres |
+| Quality grading | Missing stage detail lowers `quality`/`confidence` rather than presenting a partial night as complete |
+| Bad records | One unusable record is skipped, never failing the whole page |
 
 ### Local driver limitation: BLOB binding
 
@@ -263,7 +282,7 @@ Remote host URLs (including Turso Cloud hosts), credentialed URLs, non-`sqlite+l
 
 ```text
 src/akunaki/
-  domain/           # pure job lifecycle/retry/secret types (no SQLAlchemy, no crypto)
+  domain/           # pure job/retry/secret types + sleep normalizer (no SQLAlchemy)
   application/      # worker runtime + handler registry (port-typed, no SQLAlchemy)
   ports/            # JobRepositoryPort + SecretSealerPort protocols
   adapters/db/      # engine, models, JobRepository CAS adapter
