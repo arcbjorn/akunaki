@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), and the **OAuth linking service** that wires them into a full authorize→callback flow. Not implemented: product job handlers, HTTP authorize/callback routes (deferred pending auth), Google Health and Polar clients, and any sync/normalization code.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, and the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit. Not implemented: normalization and facts, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -69,7 +69,7 @@ Each iteration claims one due job by fenced CAS, runs its registered handler whi
 
 Only the holder of the `core-reaper` **leader lease** requeues expired leases and dead-letters exhausted ones, so a passive standby never reaps behind an active worker.
 
-Execution policy lives in `akunaki.application.worker_runtime` (port-typed, no SQLAlchemy); durability lives in `JobRepository`. Handlers register in `akunaki.application.handlers`; only `system.noop` ships today. Handlers **must be idempotent** — a lease can expire mid-run and the job be retried elsewhere.
+Execution policy lives in `akunaki.application.worker_runtime` (port-typed, no SQLAlchemy); durability lives in `JobRepository`. Handlers register in `akunaki.application.handlers`; `system.noop` and `connection.initial_sync` ship today. Handlers **must be idempotent** — a lease can expire mid-run and the job be retried elsewhere.
 
 ## Enqueue work
 
@@ -127,6 +127,32 @@ This split is what makes crash replay safe: a crash before commit leaves cursors
 Other enforced invariants: `raw_payload.sync_run_id` is **nullable** (a webhook body can land before a run exists); `payload_json` and `payload_blob` are mutually exclusive; `revision_n` is unique per object; and `tombstone_reason` accepts only `vendor_deleted` or `privacy_delete` — **`superseded` is rejected**, because superseding is expressed by a later revision, not by marking the old one deleted. There is no `normalizer_version` on raw rows; that belongs on facts.
 
 `webhook_inbox` is **not** created yet — it arrives with webhook handling, keeping the inbox→payload FK one-way.
+
+### Initial sync (`connection.initial_sync`)
+
+The first product job handler. Enqueue it after a successful link:
+
+```python
+repository.enqueue_job(
+    job_id=new_id(), tenant_id=tenant_id,
+    job_type=INITIAL_SYNC_JOB_TYPE,
+    payload_json=json.dumps({"connection_id": connection_id}),
+    now=now, idempotency_key=f"{tenant_id}:{connection_id}:initial",
+)
+```
+
+The handler opens the connection's sealed tokens, fetches windowed pages from Oura V2, and commits each page atomically. Fetch outcomes map onto the worker's retry vocabulary:
+
+| Outcome | Handler behavior |
+|---------|------------------|
+| 401 / 403 | Flip connection to `needs_reauth`, then **dead-letter** — retrying a dead grant only burns the attempt budget |
+| 429 | Connection → `error`, raise `TransientJobError`; `Retry-After` is surfaced in the message |
+| 5xx / transport / malformed body | Connection → `error`, retry with backoff |
+| Success | Connection → `active`, cursor advanced |
+
+Backfill lookback defaults to 90 days plus a 36h overlap, but is configurable via `SyncConfig` because the 30-vs-90 choice is still an open product decision. `max_pages` bounds runaway pagination.
+
+**Known placeholder:** pages are keyed as `stream:page:<content_hash>` rather than by real vendor record ids, because Oura returns collection pages and no per-record normalizer exists yet. This is safe for dedupe (an unchanged page appends no new revision) but means one revision currently represents a page, not a record. Real per-record identity arrives with the normalizer.
 
 ### Local driver limitation: BLOB binding
 
@@ -242,8 +268,8 @@ src/akunaki/
   ports/            # JobRepositoryPort + SecretSealerPort protocols
   adapters/db/      # engine, models, JobRepository CAS adapter
   adapters/crypto/  # AES-256-GCM envelope sealer, KEK config, OAuth state/PKCE
-  adapters/connectors/ # provider OAuth clients (Oura)
-  application/      # + OAuthLinkingService (authorize -> callback -> sealed tokens)
+  adapters/connectors/ # provider OAuth + fetch clients (Oura)
+  application/      # + OAuthLinkingService, InitialSyncHandler
   api/              # FastAPI app factory + /healthz
   worker/           # core worker entrypoint: claim loop + signal shutdown
 alembic/            # migrations 0001 foundation + 0002 leases + 0003 execution lifecycle
