@@ -26,16 +26,31 @@ from typing import NoReturn
 
 from akunaki.domain.connections import ConnectionStatus
 from akunaki.domain.fetch import FetchFailure
-from akunaki.domain.jobs import JobClaim
+from akunaki.domain.jobs import (
+    INITIAL_SYNC_JOB_TYPE,
+    NORMALIZE_JOB_TYPE,
+    JobClaim,
+)
 from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.secrets import SecretDecryptionError
+from akunaki.domain.sleep_normalizer import NormalizationError, normalize_sleep_payload
 from akunaki.ports.connections import ConnectionRepositoryPort
+from akunaki.ports.facts import FactWriterPort, RevisionReaderPort
 from akunaki.ports.fetch import ConnectorFetchPort, IngestionRepositoryPort
 from akunaki.ports.secrets import SecretSealerPort
 
 logger = logging.getLogger("akunaki.sync_handlers")
 
-INITIAL_SYNC_JOB_TYPE = "connection.initial_sync"
+# Re-exported from domain so callers can register handlers without reaching
+# into akunaki.domain.jobs for a job-type string.
+__all__ = [
+    "INITIAL_SYNC_JOB_TYPE",
+    "NORMALIZE_JOB_TYPE",
+    "InitialSyncHandler",
+    "NormalizeHandler",
+    "SyncConfig",
+]
+
 
 # Default backfill lookback. The 30-vs-90 choice is an open product decision
 # (roadmap open decision 6), so it is configurable rather than baked in.
@@ -139,6 +154,9 @@ class InitialSyncHandler:
                 now=now,
                 window_start=window_start.isoformat(),
                 window_end=window_end.isoformat(),
+                # Enqueued in the same transaction as the revision, so a new
+                # revision can never exist without its normalization job.
+                normalize_job_id=self._new_id(),
             )
             pages += 1
             if outcome.is_new_revision:
@@ -237,3 +255,91 @@ def _vendor_record_id(stream: str, content_hash: str) -> str:
     claim about vendor record identity.
     """
     return f"{stream}:page:{content_hash}"
+
+
+class NormalizeHandler:
+    """Normalize one raw revision into canonical facts.
+
+    Keyed by ``raw_revision_id``, so a retry re-reads the same immutable raw
+    row and produces the same facts. Idempotency comes from the fact layer:
+    identical normalized content writes no new version.
+    """
+
+    def __init__(
+        self,
+        *,
+        revisions: RevisionReaderPort,
+        facts: FactWriterPort,
+        new_id: Callable[[], str],
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._revisions = revisions
+        self._facts = facts
+        self._new_id = new_id
+        self._clock = clock
+
+    def __call__(self, claim: JobClaim) -> None:
+        """Execute one normalization job."""
+        payload = _parse_normalize_payload(claim.payload_json)
+        revision_id = payload["raw_revision_id"]
+        now = self._clock()
+
+        revision = self._revisions.get_revision(revision_id=revision_id)
+        if revision is None:
+            # The revision is immutable and should exist; a missing one means a
+            # stale or malformed job, not a transient condition.
+            msg = "raw revision not found"
+            raise PermanentJobError(msg)
+
+        if revision.is_tombstone:
+            # Vendor deletions are handled by the deletion path, not by
+            # normalizing an empty body into a fact.
+            logger.info(
+                "skipping tombstone revision",
+                extra={"raw_revision_id": revision_id},
+            )
+            return
+
+        try:
+            facts = normalize_sleep_payload(revision.payload_text)
+        except NormalizationError as exc:
+            # A body that cannot be parsed will not parse on retry either.
+            msg = "raw payload could not be normalized"
+            raise PermanentJobError(msg) from exc
+
+        written = 0
+        for fact in facts:
+            outcome = self._facts.write_sleep_fact(
+                fact_record_id=self._new_id(),
+                tenant_id=claim.tenant_id,
+                connection_id=revision.connection_id,
+                fact=fact,
+                raw_revision_id=revision_id,
+                raw_payload_id=revision.raw_payload_id,
+                schema_version=revision.schema_version,
+                now=now,
+            )
+            if outcome.is_new_version:
+                written += 1
+
+        logger.info(
+            "normalized raw revision",
+            extra={
+                "raw_revision_id": revision_id,
+                "facts_seen": len(facts),
+                "versions_written": written,
+            },
+        )
+
+
+def _parse_normalize_payload(payload_json: str) -> dict[str, str]:
+    """Parse and validate a normalize job payload."""
+    try:
+        parsed = json.loads(payload_json)
+    except ValueError as exc:
+        msg = "payload is not valid json"
+        raise PermanentJobError(msg) from exc
+    if not isinstance(parsed, dict) or not parsed.get("raw_revision_id"):
+        msg = "payload must contain raw_revision_id"
+        raise PermanentJobError(msg)
+    return {str(k): v for k, v in parsed.items()}
