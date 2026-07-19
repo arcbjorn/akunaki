@@ -55,7 +55,9 @@ Legend:
 | KEK sourcing from external KMS / secret manager | no | no | keys load from `AKUNAKI_SECRET_KEKS` only; no KMS client, rotation runbook, or key-use audit |
 | OAuth state / PKCE handshake primitives (`oauth_states`) | yes | yes | migration `0005`; hashed state only, sealed PKCE verifier, exact redirect match, single-use + expiry, purge sweep |
 | Oura OAuth client (authorize URL, PKCE code exchange, refresh) | yes | yes | S256 only; typed failure vocabulary (`invalid_grant` → reauth vs retryable); secrets never logged; mock-transport + real-HTTP verified |
-| OAuth HTTP routes (authorize/callback endpoints) | no | no | client + state primitives exist; **no** FastAPI routes, session binding, or connection-status transitions |
+| OAuth linking service (start link → callback → sealed tokens) | yes | yes | port-typed in `application`; `tenant_id` is a parameter; connection row + sealed secret written in **one** transaction |
+| Connection repository (link/relink, status transitions) | yes | yes | relink reuses the existing `(tenant_id, provider)` row; failed exchange leaves no half-written connection |
+| OAuth HTTP routes (authorize/callback endpoints) | no | no | **deliberately deferred**: `/v1` requires an authenticated session and auth/OIDC is not built; the linking service takes `tenant_id` as a parameter so routes are a thin layer later |
 | Google Health / Polar OAuth clients | no | no | only Oura implemented; both gated on unstarted phase-zero spikes |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
 | Sustained multi-process fleet under production load | no | no | in-process threads with independent engines only; no long-running or cross-host soak |
