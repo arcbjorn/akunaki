@@ -90,6 +90,15 @@ class Settings(BaseSettings):
             "Defaults to the sole configured version when exactly one is supplied."
         ),
     )
+    debug_routes_enabled: bool = Field(
+        default=False,
+        description=(
+            "Mount the unauthenticated internal debug router. "
+            "Serves tenant health data with NO authentication, so it must stay "
+            "off outside local development. Default off: the routes are not "
+            "registered at all unless this is explicitly set."
+        ),
+    )
 
     @field_validator("database_url")
     @classmethod
