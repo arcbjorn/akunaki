@@ -294,6 +294,10 @@ All settings use the **`AKUNAKI_`** prefix (pydantic-settings).
 | `AKUNAKI_SERVICE_NAME` | `akunaki-api` | Reported by `/healthz` |
 | `AKUNAKI_ECHO_SQL` | `false` | Dev SQL echo |
 | `AKUNAKI_SECRET_KEKS` | *(empty)* | Envelope-encryption KEKs as `version:base64key` pairs, comma separated; each key must decode to exactly 32 bytes. Empty means secret sealing is unavailable and any process that needs it fails fast. |
+| `AKUNAKI_OIDC_ISSUER` | *(empty)* | OIDC issuer URL. Empty means the login routes are not mounted (no auth surface). |
+| `AKUNAKI_OIDC_CLIENT_ID` / `AKUNAKI_OIDC_CLIENT_SECRET` | *(empty)* | OIDC client credentials from the IdP. |
+| `AKUNAKI_OIDC_REDIRECT_URI` | *(empty)* | Exact callback URI registered with the IdP; must match at the callback. |
+| `AKUNAKI_SESSION_COOKIE_SECURE` | `true` | `Secure` attribute on the session cookie; only disable for local HTTP development. |
 | `AKUNAKI_DEBUG_ROUTES_ENABLED` | `false` | Mounts the **unauthenticated** internal debug router. Serves tenant health data with no session check — keep off outside local development. |
 | `AKUNAKI_ACTIVE_KEK_VERSION` | *(empty)* | KEK version new envelopes are sealed under. Optional when exactly one KEK is configured; **required** when several are. |
 
