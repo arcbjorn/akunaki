@@ -96,7 +96,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260719_0010   # drop users and sessions
+uv run alembic downgrade 20260719_0011   # drop oidc login states
+uv run alembic downgrade 20260719_0010   # also drop users and sessions
 uv run alembic downgrade 20260719_0009   # also revert tenant-scoped fact indexes
 uv run alembic downgrade 20260719_0008   # also drop deletion pipeline
 uv run alembic downgrade 20260719_0007   # also drop per-record slice body
@@ -124,6 +125,7 @@ uv run alembic current
 | `20260719_0009` | `deletion_requests`, `deletion_completion_proofs` |
 | `20260719_0010` | tenant-scoped fact identity indexes |
 | `20260719_0011` | `users`, `sessions` (hash-only token storage) |
+| `20260719_0012` | `login_states` (hashed state + nonce, sealed PKCE verifier) |
 
 ### Sync transport layer (`0006`)
 
@@ -249,7 +251,21 @@ Cookie and CSRF enforcement live in `akunaki.api.security`:
 | Tenant | Taken from the validated session, never from a request parameter |
 | Logout | Server-side revoke **and** cookie clear; clearing alone would leave a captured token usable |
 
-**Not built:** the OIDC handshake itself (discovery, PKCE, `state`/`nonce`, JWKS validation, user upsert). The IdP is decided — **self-hosted Authelia** — but until the handshake exists there is no way to *create* a session, so `/v1` has no login path.
+### OIDC login primitives (`0012`)
+
+The IdP is **self-hosted Authelia** (roadmap decision 1). `login_states` is deliberately separate from `oauth_states`:
+
+| Reason | Detail |
+|--------|--------|
+| No tenant yet | `oauth_states.tenant_id` is a required FK, but login is what *establishes* the tenant |
+| Different provider vocabulary | `oauth_states.provider` is constrained to data providers; loosening it would weaken a real guard on the connector path |
+| OIDC needs a nonce | `state` protects the redirect against CSRF; `nonce` binds the returned `id_token` to this specific request |
+
+`state` and `nonce` are stored **hashed**; the PKCE verifier is **envelope-encrypted**. Consumption is single-use via an atomic conditional `UPDATE`, so a replayed callback loses.
+
+`akunaki.domain.oidc.validate_id_token_claims` checks `iss`, `aud` (string or array), `nonce`, `exp`/`nbf`/`iat` (60s skew), and `sub`. It is pure with an injected clock, and **assumes the signature was already verified** against the issuer's JWKS — it never treats an unverified token as valid.
+
+**Not built:** discovery fetch, the JWKS client and signature verification, token exchange, user upsert, and the `/auth/login` + `/auth/callback` routes. Until those exist a session still cannot be created, so `/v1` has no login path.
 
 ### Local driver limitation: BLOB binding
 
