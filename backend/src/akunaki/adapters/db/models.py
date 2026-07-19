@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     CheckConstraint,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -633,4 +634,133 @@ class RawRevision(Base):
         CheckConstraint("length(content_hash) > 0", name="raw_revision_content_hash_nonempty"),
         UniqueConstraint("raw_object_id", "revision_n", name="uq_raw_revisions_object_n"),
         Index("ix_raw_revisions_object_content_hash", "raw_object_id", "content_hash"),
+    )
+
+
+class FactRecord(Base):
+    """Header row for one normalized measurement version.
+
+    Facts are versioned, never updated in place: a changed value or lineage
+    writes a new ``version_n`` and supersedes the prior row.
+    """
+
+    __tablename__ = "fact_records"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    connection_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("connections.id", ondelete="SET NULL"), nullable=True
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    vendor_record_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origin: Mapped[str | None] = mapped_column(Text, nullable=True)
+    method: Mapped[str] = mapped_column(Text, nullable=False)
+    utc_instant: Mapped[str | None] = mapped_column(Text, nullable=True)
+    start_utc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    end_utc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_offset_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    iana_timezone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    local_health_day: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unit: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    freshness_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_revision_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("raw_revisions.id", ondelete="SET NULL"), nullable=True
+    )
+    raw_payload_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("raw_payload.id", ondelete="SET NULL"), nullable=True
+    )
+    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    normalizer_version: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fact_key: Mapped[str] = mapped_column(Text, nullable=False)
+    version_n: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_current: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    superseded_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    superseded_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deletion_state: Mapped[str] = mapped_column(Text, nullable=False)
+    exclude_from_load: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('oura', 'google_health', 'polar', 'manual', 'derived')",
+            name="fact_provider",
+        ),
+        CheckConstraint(
+            "method IN ('wearable', 'user_entered', 'lab', 'derived')",
+            name="fact_method",
+        ),
+        CheckConstraint(
+            "quality IN ('high', 'medium', 'low', 'unknown')",
+            name="fact_quality",
+        ),
+        CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="fact_confidence_range"),
+        CheckConstraint("version_n >= 1", name="fact_version_n_pos"),
+        CheckConstraint("is_current IN (0, 1)", name="fact_is_current_bool"),
+        CheckConstraint("exclude_from_load IN (0, 1)", name="fact_exclude_from_load_bool"),
+        CheckConstraint(
+            "deletion_state IN ('active', 'vendor_deleted', 'privacy_scrubbed')",
+            name="fact_deletion_state",
+        ),
+        CheckConstraint(
+            "(superseded_by IS NULL AND superseded_at IS NULL) OR "
+            "(superseded_by IS NOT NULL AND superseded_at IS NOT NULL AND is_current = 0)",
+            name="fact_supersede_pair",
+        ),
+        CheckConstraint(
+            "local_health_day IS NULL OR length(local_health_day) = 10",
+            name="fact_local_day_format",
+        ),
+        UniqueConstraint("fact_key", "version_n", name="uq_fact_records_key_version"),
+        Index(
+            "ux_fact_records_current",
+            "fact_key",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+        Index(
+            "ix_fact_records_day_lookup",
+            "tenant_id",
+            "entity_type",
+            "local_health_day",
+            "is_current",
+        ),
+        Index("ix_fact_records_raw_revision", "tenant_id", "raw_revision_id"),
+    )
+
+
+class SleepSession(Base):
+    """Typed sleep detail, one-to-one with its fact header."""
+
+    __tablename__ = "sleep_sessions"
+
+    fact_record_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("fact_records.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    is_nap: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    duration_min: Mapped[float] = mapped_column(Float, nullable=False)
+    time_in_bed_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    efficiency_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    light_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    deep_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rem_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    awake_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("is_nap IN (0, 1)", name="sleep_session_is_nap_bool"),
+        CheckConstraint("duration_min >= 0", name="sleep_session_duration_nonneg"),
+        CheckConstraint(
+            "efficiency_pct IS NULL OR (efficiency_pct >= 0 AND efficiency_pct <= 100)",
+            name="sleep_session_efficiency_range",
+        ),
     )
