@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, and the **Oura sleep normalizer** writing versioned canonical facts. Not implemented: other detail tables, source selection and scoring, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, and the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score). Not implemented: other detail tables, source selection and scoring, the `/v1/today` and `/v1/recovery` score surfaces, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -279,6 +279,25 @@ export AKUNAKI_OIDC_REDIRECT_URI=https://app.example.com/auth/callback
 `GET /auth/login` returns the authorize URL; `GET /auth/callback` verifies the token, provisions the user on first login (one user per tenant, keyed by `(oidc_issuer, oidc_subject)`), sets the session cookie, and returns the CSRF secret. The orchestration (`akunaki.application.login`) seals state before the redirect, consumes it single-use, and verifies the token **before** any session is issued.
 
 Login now works end to end — `/v1` is reachable behind a cookie session.
+
+### `GET /v1/sleep` — deterministic sleep summary
+
+The first authenticated product surface. It answers with a **deterministic summary, not a score**: measured sleep duration against a target, bounded adherence, and the rolling 14-day sleep debt. The design forbids implying a sleep score exists, so the response carries no score field of any kind.
+
+```bash
+curl --cookie akunaki_session=<token> 'localhost:8000/v1/sleep?day=2026-07-19'
+```
+
+| Property | Rule |
+|----------|------|
+| Tenant | From the validated session, never the query string — a caller cannot read another tenant's sleep |
+| Duration | Total sleep minutes for the day, summed across all current sessions (naps and splits included, per the data model) |
+| Adherence | `sleep_summary_v0.1.0`: `clamp(100 * (1 - shortfall/target), 0, 100)`; oversleep earns no bonus |
+| Debt | 14-day window (the day plus the previous 13); per known day `credit = min(surplus, 60)`, `debt = clamp(debt + shortfall - credit, 0, 14*target)` |
+| Unknown days | **Skipped, never imputed as zero**; the window is marked `partial` and the debt disclosed as a lower bound |
+| Recommendations | Gated on `>= 12` known days in the window |
+
+The arithmetic lives in the pure `akunaki.domain.sleep_summary` (golden-tested against hand-computed values); `akunaki.application.sleep_surface` fetches the window durations and the route only shapes the response. Verified end to end over real HTTP, including tenant isolation and the no-score-leak guarantee.
 
 ### Local driver limitation: BLOB binding
 

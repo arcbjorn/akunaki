@@ -39,7 +39,8 @@ Legend:
 | `GET /healthz` (service, db ready, `models_required=false`) | yes | yes | does not fabricate product health |
 | Internal debug surface (`/internal/debug/sync-status`, `/latest-sleep`) | yes | yes | **unauthenticated**; router not registered unless `AKUNAKI_DEBUG_ROUTES_ENABLED` is set (default off); `private, no-store`; cross-tenant reads are 404 |
 | Phase-one vertical slice (connect → sync → normalize → read in API) | yes | yes | verified end-to-end in a real process against a live HTTP provider |
-| Authenticated `/v1` product surface | partial | partial | login + `/v1/session` reachable; product day-surfaces (`/v1/today`, recovery, sleep) are the phase-two build. The debug router remains a stand-in to be replaced |
+| Authenticated `/v1` product surface | partial | partial | login, `/v1/session`, and `/v1/sleep` reachable; `/v1/today` and `/v1/recovery` await the scoring engine. The debug router remains a stand-in to be replaced |
+| `GET /v1/sleep` deterministic sleep summary | yes | yes | authenticated, tenant from session; exact `sleep_summary_v0.1.0` adherence + 14-day debt; a **summary not a score** — no score field is exposed; unknown days disclosed as a lower bound; golden + end-to-end tests |
 | Worker entry `python -m akunaki.worker` runtime | yes | yes | claim loop + SIGINT/SIGTERM cooperative shutdown; JSON logs |
 | Worker runtime (claim → execute → heartbeat → settle) | yes | yes | port-typed in `application`; fake-repository policy tests + file-backed end-to-end tests |
 | Retry classification + exponential backoff policy | yes | yes | transient/permanent/cancelled; capped jitter; min 1s (second-precision lifecycle) |
