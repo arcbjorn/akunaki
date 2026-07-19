@@ -48,6 +48,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health_router)
 
+    # Session routes are always mounted: every endpoint on them requires a
+    # valid session cookie, so mounting them exposes nothing on its own.
+    from akunaki.api.routes.session import router as session_router
+
+    app.include_router(session_router)
+
     if resolved.debug_routes_enabled:
         # Imported lazily so the unauthenticated router cannot be reached at
         # all — not even as a registered-but-guarded path — unless explicitly
