@@ -22,9 +22,16 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from akunaki.adapters.db.models import RawObject, RawPayload, RawRevision, SyncCursor
+from akunaki.adapters.db.models import Job, RawObject, RawPayload, RawRevision, SyncCursor
 from akunaki.domain.fetch import RawEnvelope
-from akunaki.domain.jobs import require_aware, to_utc_rfc3339
+from akunaki.domain.jobs import (
+    NORMALIZE_JOB_TYPE,
+    JobRole,
+    JobStatus,
+    require_aware,
+    to_utc_rfc3339,
+)
+from akunaki.ports.facts import RevisionBody
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +42,7 @@ class CommitOutcome:
     revision_id: str | None
     revision_n: int | None
     is_new_revision: bool
+    normalize_job_id: str | None = None
 
 
 class IngestionRepository:
@@ -60,8 +68,13 @@ class IngestionRepository:
         now: datetime,
         window_start: str | None = None,
         window_end: str | None = None,
+        normalize_job_id: str | None = None,
     ) -> CommitOutcome:
-        """Commit one fetched page: transport row, logical revision, cursor."""
+        """Commit one fetched page: transport row, logical revision, cursor.
+
+        When ``normalize_job_id`` is supplied and the revision is genuinely
+        new, a ``raw.normalize`` job is enqueued in the **same transaction**.
+        """
         for name, value in (
             ("payload_id", payload_id),
             ("tenant_id", tenant_id),
@@ -161,6 +174,39 @@ class IngestionRepository:
                 )
                 existing_object.current_revision_id = revision_id
 
+                # 3b. Normalization job, same transaction as the revision it
+                # describes. This is the design's "outbox rows (or jobs)": a
+                # crash after commit leaves the job durable, and a crash before
+                # commit leaves neither, so normalization can never be silently
+                # skipped for a revision that exists.
+                if normalize_job_id is not None:
+                    session.add(
+                        Job(
+                            id=normalize_job_id,
+                            tenant_id=tenant_id,
+                            role=JobRole.CORE.value,
+                            status=JobStatus.READY.value,
+                            payload_json=json.dumps(
+                                {
+                                    "raw_revision_id": revision_id,
+                                    "raw_payload_id": payload_id,
+                                },
+                                sort_keys=True,
+                            ),
+                            priority=100,
+                            run_after=now_s,
+                            attempts=0,
+                            max_attempts=5,
+                            # Keyed by revision: a redelivered enqueue for the
+                            # same revision dedupes rather than fanning out.
+                            idempotency_key=f"normalize:{revision_id}",
+                            fence_token=0,
+                            created_at=now_s,
+                            updated_at=now_s,
+                            job_type=NORMALIZE_JOB_TYPE,
+                        )
+                    )
+
             # 4. Cursor advance, same transaction as the data it describes.
             session.merge(
                 SyncCursor(
@@ -181,6 +227,7 @@ class IngestionRepository:
                 revision_id=new_revision_id,
                 revision_n=new_revision_n,
                 is_new_revision=new_revision_id is not None,
+                normalize_job_id=normalize_job_id if new_revision_id is not None else None,
             )
 
     def get_cursor(self, *, connection_id: str, stream: str) -> str | None:
@@ -192,3 +239,47 @@ class IngestionRepository:
                     SyncCursor.stream == stream,
                 )
             ).scalar_one_or_none()
+
+
+class RevisionReader:
+    """Read immutable raw revisions joined to their exact transport body."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._session_factory = session_factory
+
+    def get_revision(self, *, revision_id: str) -> RevisionBody | None:
+        """Return the revision and its body, or None when unknown."""
+        if not revision_id:
+            return None
+        with self._session_factory() as session:
+            row = session.execute(
+                select(
+                    RawRevision.id,
+                    RawRevision.raw_payload_id,
+                    RawRevision.schema_version,
+                    RawRevision.is_tombstone,
+                    RawPayload.payload_json,
+                    RawPayload.connection_id,
+                )
+                .join(RawPayload, RawPayload.id == RawRevision.raw_payload_id)
+                .where(RawRevision.id == revision_id)
+            ).one_or_none()
+            if row is None:
+                return None
+            (
+                found_id,
+                payload_id,
+                schema_version,
+                is_tombstone,
+                payload_json,
+                connection_id,
+            ) = row
+            return RevisionBody(
+                revision_id=found_id,
+                connection_id=connection_id,
+                raw_payload_id=payload_id,
+                schema_version=schema_version,
+                # A tombstone may legitimately carry an empty body.
+                payload_text=payload_json or "",
+                is_tombstone=bool(is_tombstone),
+            )
