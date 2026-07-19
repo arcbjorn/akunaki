@@ -26,7 +26,7 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts) | yes | yes (up/down/up through `0007`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts, revision slices) | yes | yes (up/down/up through `0008`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
 | Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
 | libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
@@ -62,7 +62,8 @@ Legend:
 | Oura V2 fetch client (windowed pages, pagination, typed failures) | yes | yes | exact body returned for faithful transport persistence; 401/403 → `unauthorized`, 429 → `rate_limit` with `Retry-After`; token never logged |
 | Atomic fetch commit (`IngestionRepository`) | yes | yes | transport row + logical revision + cursor in **one** transaction; revision appended only on new `content_hash` |
 | `connection.initial_sync` handler | yes | yes | opens sealed tokens, paginates, translates fetch outcomes into the worker's retry vocabulary; auth failure → `needs_reauth` + dead letter, 429/5xx → retry |
-| Vendor record identity in the **raw** layer | no | no | **still page-keyed** (`stream:page:<content_hash>`). Facts *are* per-record (`sleep_session:<vendor_id>`), so one page correctly yields N facts — but one `raw_object`/`raw_revision` still represents a page, not a record. Per-record raw identity needs a stream-aware splitter in the fetch/commit path. |
+| Vendor record identity in the **raw** layer | yes | yes | per-record: one page yields one `raw_object`/`raw_revision` **per record**, keyed `stream:<vendor_id>` (or a body hash when the vendor supplies none); each revision stores its own slice body (`slice_json`) |
+| Stable ids for streams without a vendor id | partial | yes | falls back to hashing the record body — per-record, but a cosmetic vendor change re-identifies the record; only `sleep`/`daily_*`/`workout` have mapped id fields |
 | Sleep fact schema (`fact_records`, `sleep_sessions`) | yes | yes | migration `0007`; versioned headers with a partial unique index on current; typed one-to-one detail (not EAV) |
 | Oura sleep normalizer (pure, deterministic) | yes | yes | wake-date assignment, canonical minutes, honest quality grading; no clock, so re-runs are byte-identical |
 | Versioned fact writes (supersede, never update in place) | yes | yes | identical content is a no-op; changed content appends a version and retains the prior row with its detail |
