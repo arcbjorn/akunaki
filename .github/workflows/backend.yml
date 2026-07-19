@@ -1,0 +1,182 @@
+name: backend
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: backend
+
+env:
+  # Core processes must never require model configuration. No MODEL_* or
+  # provider keys are set anywhere in this workflow, which is itself part of
+  # the "models disabled" exit criterion.
+  AKUNAKI_DATABASE_URL: "sqlite+libsql:///.local/ci.db"
+
+jobs:
+  quality:
+    name: lint, types, contracts, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # The project pins 3.13.14 exactly: 3.14 + sqlalchemy-libsql segfaulted
+      # on macOS ARM and is rejected until the stack is re-validated.
+      - name: Pin Python
+        run: uv python install 3.13.14
+
+      - name: Install dependencies
+        run: uv sync --all-groups --frozen
+
+      - name: Lockfile is current
+        run: uv lock --check
+
+      - name: Ruff lint
+        run: uv run ruff check src tests
+
+      - name: Ruff format
+        run: uv run ruff format --check src tests
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Architecture contracts
+        run: uv run lint-imports
+
+      - name: Tests
+        run: uv run pytest
+
+  migrations:
+    name: migrations up/down/up
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Pin Python
+        run: uv python install 3.13.14
+
+      - name: Install dependencies
+        run: uv sync --all-groups --frozen
+
+      # Against an ephemeral DB, as operations.md requires. Downgrading to
+      # base and back proves every revision is reversible, not just additive.
+      - name: Upgrade, downgrade to base, upgrade again
+        run: |
+          set -euo pipefail
+          export AKUNAKI_DATABASE_URL="sqlite+libsql:///$(mktemp -d)/ci.db"
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+          uv run alembic current
+
+  boot-boundary:
+    name: core-only boot, models disabled
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Pin Python
+        run: uv python install 3.13.14
+
+      # Deliberately NOT --all-groups: this job proves the *core* install
+      # boots, without dev extras or any model SDK present.
+      - name: Install core dependencies only
+        run: uv sync --frozen --no-dev
+
+      - name: No model SDK is installed
+        run: |
+          set -euo pipefail
+          uv run python - <<'PY'
+          import importlib.util, sys
+
+          forbidden = [
+              "openai", "anthropic", "xai", "xai_sdk", "openrouter",
+              "litellm", "ollama", "llama_cpp", "transformers", "torch",
+          ]
+          found = [n for n in forbidden if importlib.util.find_spec(n) is not None]
+          if found:
+              sys.exit(f"model SDK present in core install: {found}")
+          print("core install carries no model SDK")
+          PY
+
+      - name: API and worker boot with no model config
+        run: |
+          set -euo pipefail
+          export AKUNAKI_DATABASE_URL="sqlite+libsql:///$(mktemp -d)/boot.db"
+          uv run alembic upgrade head
+          uv run python - <<'PY'
+          import os, threading
+
+          from akunaki.api.app import create_app
+          from akunaki.config import get_settings
+          from akunaki.worker.__main__ import run_worker
+
+          # API factory builds without any MODEL_* variable set. Check the
+          # served schema rather than app.routes: routers nest, so a path
+          # scan over top-level routes silently misses included endpoints.
+          app = create_app(get_settings())
+          assert "/healthz" in app.openapi()["paths"], "healthz not served"
+
+          # Worker boots and exits cleanly on a pre-set stop signal.
+          stop = threading.Event()
+          stop.set()
+          assert run_worker(stop_event=stop) == 0, "worker did not boot"
+
+          leaked = sorted(k for k in os.environ if k.startswith("MODEL_"))
+          assert not leaked, f"model config present: {leaked}"
+          print("api + worker boot core-only with no model config")
+          PY
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory: a newly published advisory should surface loudly without
+    # blocking unrelated work on an unchanged dependency set.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Pin Python
+        run: uv python install 3.13.14
+
+      - name: Install dependencies
+        run: uv sync --all-groups --frozen
+
+      - name: pip-audit
+        run: uv run pip-audit
