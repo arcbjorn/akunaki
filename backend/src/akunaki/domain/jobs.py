@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
+# Durable job type identifiers. Defined here so the ingestion adapter can
+# enqueue a job and the application layer can register its handler without
+# either importing the other.
+NORMALIZE_JOB_TYPE = "raw.normalize"
+INITIAL_SYNC_JOB_TYPE = "connection.initial_sync"
+
 
 class JobRole(StrEnum):
     """Worker role that may claim a job."""
