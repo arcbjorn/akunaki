@@ -52,8 +52,9 @@ Legend:
 | Core-only boot proven without dev deps | yes | yes | CI installs with `--no-dev` and asserts no model SDK is importable, then boots API + worker with no `MODEL_*` config |
 | Frontend / web | no | no | deferred |
 | Session layer (`users`, `sessions`: issue, validate, rotate, revoke, purge) | yes | yes | migration `0011`; **hash-only** storage of cookie token and CSRF secret; expiry + revocation enforced; rotation revokes the predecessor |
-| OIDC handshake (authorize, callback, token/nonce validation) | no | no | **blocked on roadmap open decision 1** (final IdP choice); the session layer above is what those flows will write to |
-| Session cookie wiring + CSRF enforcement in routes | no | no | repository primitives exist; no cookie issuance, `Secure`/`HttpOnly`/`SameSite` handling, or route-level CSRF check yet |
+| OIDC handshake (authorize, callback, token/nonce validation) | no | no | **unblocked**: IdP decided (self-hosted Authelia, 2026-07-19). Still to build: discovery, PKCE, `state`/`nonce`, JWKS validation, and user upsert. No way to *create* a session until then |
+| Session cookie wiring + CSRF enforcement | yes | yes | `Secure`/`HttpOnly`/`SameSite=Lax`; CSRF required on POST/PUT/PATCH/DELETE; one generic 401 so unknown/expired/revoked are indistinguishable |
+| `GET /v1/session`, `POST /v1/session/logout` | yes | yes | tenant comes from the validated session, never a request parameter; logout revokes server-side **and** clears the cookie |
 | Connectors (Oura, Google Health, Polar) | partial | partial | Oura OAuth, fetch, initial sync, and sleep normalization ship; no webhooks or incremental sync; Google Health and Polar not started |
 | Agent / model packages | no | no | forbidden in core |
 | Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, OAuth state, sync transport, and the **sleep** fact slice exist; `webhook_inbox`, other detail tables, source selection, and scores pending |
