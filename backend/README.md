@@ -94,7 +94,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260719_0006   # drop sleep fact schema
+uv run alembic downgrade 20260719_0007   # drop per-record slice body
+uv run alembic downgrade 20260719_0006   # also drop sleep fact schema
 uv run alembic downgrade 20260718_0005   # also drop sync transport schema
 uv run alembic downgrade 20260718_0004   # also drop oauth state schema
 uv run alembic downgrade 20260713_0003   # also drop connection lifecycle schema
@@ -114,6 +115,7 @@ uv run alembic current
 | `20260718_0005` | `oauth_states` (hashed state + sealed PKCE verifier) |
 | `20260719_0006` | `sync_runs`, `raw_payload`, `sync_cursors`, `raw_objects`, `raw_revisions` |
 | `20260719_0007` | `fact_records`, `sleep_sessions` (sleep slice only) |
+| `20260719_0008` | `raw_revisions.slice_json` (per-record body) |
 
 ### Sync transport layer (`0006`)
 
@@ -156,7 +158,9 @@ Backfill lookback defaults to 90 days plus a 36h overlap, but is configurable vi
 
 A successful page commit also enqueues a `raw.normalize` job **in the same transaction** as the revision, so a revision can never exist without its normalization job — and a crash before commit leaves neither.
 
-**Known limitation:** the raw layer keys pages as `stream:page:<content_hash>`, so one `raw_object`/`raw_revision` represents a *page*, not a record. Facts are keyed per record (`sleep_session:<vendor_id>`), so a page containing two sessions correctly yields two facts — but raw-layer identity is still coarse. Retiring this needs a stream-aware splitter in the fetch/commit path, not just the normalizer.
+**Per-record identity.** A fetched page is split (`akunaki.domain.record_split`) into one logical record per entry: one transport row is retained whole, but each record gets its own `raw_object`, its own append-only `raw_revision`, and its own `slice_json` body. A vendor correcting one night therefore revisions only that night, and each normalize job parses only its own record.
+
+Records are keyed `stream:<vendor_id>` when the vendor supplies an id. **Remaining gap:** streams without one fall back to `stream:hash:<body_hash>` — still per-record, but a cosmetic vendor change re-identifies the record. Only `sleep`, `daily_*`, and `workout` have mapped id fields today.
 
 ### Sleep facts and normalization (`0007`)
 
