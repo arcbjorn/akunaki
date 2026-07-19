@@ -16,6 +16,7 @@ duplicate revision.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -31,6 +32,7 @@ from akunaki.domain.jobs import (
     require_aware,
     to_utc_rfc3339,
 )
+from akunaki.domain.record_split import RecordSlice
 from akunaki.ports.facts import RevisionBody
 
 
@@ -39,10 +41,13 @@ class CommitOutcome:
     """What one atomic page commit actually persisted."""
 
     payload_id: str
-    revision_id: str | None
-    revision_n: int | None
-    is_new_revision: bool
-    normalize_job_id: str | None = None
+    new_revision_ids: tuple[str, ...] = ()
+    normalize_job_ids: tuple[str, ...] = ()
+
+    @property
+    def is_new_revision(self) -> bool:
+        """True when at least one record in the page was genuinely new."""
+        return bool(self.new_revision_ids)
 
 
 class IngestionRepository:
@@ -55,31 +60,29 @@ class IngestionRepository:
         self,
         *,
         payload_id: str,
-        revision_id: str,
-        object_id: str,
+        records: Sequence[RecordSlice],
+        ids: Iterator[str],
         tenant_id: str,
         connection_id: str,
         sync_run_id: str | None,
         envelope: RawEnvelope,
-        vendor_record_id: str,
         schema_version: str,
         cursor_id: str,
         cursor_value: str,
         now: datetime,
         window_start: str | None = None,
         window_end: str | None = None,
-        normalize_job_id: str | None = None,
     ) -> CommitOutcome:
-        """Commit one fetched page: transport row, logical revision, cursor.
+        """Commit one fetched page: transport row, per-record revisions, cursor.
 
-        When ``normalize_job_id`` is supplied and the revision is genuinely
-        new, a ``raw.normalize`` job is enqueued in the **same transaction**.
+        ``records`` are the page's per-record slices; ``ids`` supplies fresh
+        identifiers. Each genuinely-new record appends a revision and enqueues
+        its ``raw.normalize`` job in the **same transaction**.
         """
         for name, value in (
             ("payload_id", payload_id),
             ("tenant_id", tenant_id),
             ("connection_id", connection_id),
-            ("vendor_record_id", vendor_record_id),
         ):
             if not value:
                 msg = f"{name} must be non-empty"
@@ -110,49 +113,51 @@ class IngestionRepository:
                 )
             )
 
-            # 2. Logical object identity (created on first sight).
-            existing_object = session.execute(
-                select(RawObject).where(
-                    RawObject.tenant_id == tenant_id,
-                    RawObject.provider == envelope.provider,
-                    RawObject.stream == envelope.stream,
-                    RawObject.vendor_record_id == vendor_record_id,
-                )
-            ).scalar_one_or_none()
-            if existing_object is None:
-                existing_object = RawObject(
-                    id=object_id,
-                    tenant_id=tenant_id,
-                    connection_id=connection_id,
-                    provider=envelope.provider,
-                    stream=envelope.stream,
-                    vendor_record_id=vendor_record_id,
-                    current_revision_id=None,
-                    created_at=now_s,
-                )
-                session.add(existing_object)
-                session.flush()
-            resolved_object_id = existing_object.id
+            # 2-3. One logical object + revision per **record** in the page.
+            # The transport row above stays whole; identity is per record, so a
+            # vendor correcting one night supersedes only that night.
+            new_revision_ids: list[str] = []
+            enqueued_job_ids: list[str] = []
+            for record in records:
+                existing_object = session.execute(
+                    select(RawObject).where(
+                        RawObject.tenant_id == tenant_id,
+                        RawObject.provider == envelope.provider,
+                        RawObject.stream == envelope.stream,
+                        RawObject.vendor_record_id == record.vendor_record_id,
+                    )
+                ).scalar_one_or_none()
+                if existing_object is None:
+                    existing_object = RawObject(
+                        id=next(ids),
+                        tenant_id=tenant_id,
+                        connection_id=connection_id,
+                        provider=envelope.provider,
+                        stream=envelope.stream,
+                        vendor_record_id=record.vendor_record_id,
+                        current_revision_id=None,
+                        created_at=now_s,
+                    )
+                    session.add(existing_object)
+                    session.flush()
+                resolved_object_id = existing_object.id
 
-            # 3. Logical revision: appended only when content is genuinely new.
-            already_seen = session.execute(
-                select(RawRevision.id).where(
-                    RawRevision.raw_object_id == resolved_object_id,
-                    RawRevision.content_hash == envelope.content_hash,
-                    RawRevision.is_tombstone == 0,
-                )
-            ).first()
+                already_seen = session.execute(
+                    select(RawRevision.id).where(
+                        RawRevision.raw_object_id == resolved_object_id,
+                        RawRevision.content_hash == record.content_hash,
+                        RawRevision.is_tombstone == 0,
+                    )
+                ).first()
+                if already_seen is not None:
+                    continue
 
-            new_revision_id: str | None = None
-            new_revision_n: int | None = None
-            if already_seen is None:
                 highest = session.execute(
                     select(func.max(RawRevision.revision_n)).where(
                         RawRevision.raw_object_id == resolved_object_id
                     )
                 ).scalar()
-                new_revision_n = (highest or 0) + 1
-                new_revision_id = revision_id
+                revision_id = next(ids)
                 session.add(
                     RawRevision(
                         id=revision_id,
@@ -160,52 +165,50 @@ class IngestionRepository:
                         raw_object_id=resolved_object_id,
                         raw_payload_id=payload_id,
                         sync_run_id=sync_run_id,
-                        revision_n=new_revision_n,
-                        vendor_record_id=vendor_record_id,
+                        revision_n=(highest or 0) + 1,
+                        vendor_record_id=record.vendor_record_id,
                         observed_at=None,
                         effective_at=None,
                         received_at=now_s,
-                        content_hash=envelope.content_hash,
+                        content_hash=record.content_hash,
                         schema_version=schema_version,
                         deletion_state="active",
                         is_tombstone=0,
                         tombstone_reason=None,
+                        slice_json=record.payload_text,
                     )
                 )
                 existing_object.current_revision_id = revision_id
+                new_revision_ids.append(revision_id)
 
-                # 3b. Normalization job, same transaction as the revision it
-                # describes. This is the design's "outbox rows (or jobs)": a
-                # crash after commit leaves the job durable, and a crash before
-                # commit leaves neither, so normalization can never be silently
-                # skipped for a revision that exists.
-                if normalize_job_id is not None:
-                    session.add(
-                        Job(
-                            id=normalize_job_id,
-                            tenant_id=tenant_id,
-                            role=JobRole.CORE.value,
-                            status=JobStatus.READY.value,
-                            payload_json=json.dumps(
-                                {
-                                    "raw_revision_id": revision_id,
-                                    "raw_payload_id": payload_id,
-                                },
-                                sort_keys=True,
-                            ),
-                            priority=100,
-                            run_after=now_s,
-                            attempts=0,
-                            max_attempts=5,
-                            # Keyed by revision: a redelivered enqueue for the
-                            # same revision dedupes rather than fanning out.
-                            idempotency_key=f"normalize:{revision_id}",
-                            fence_token=0,
-                            created_at=now_s,
-                            updated_at=now_s,
-                            job_type=NORMALIZE_JOB_TYPE,
-                        )
+                # Normalization job in the same transaction as its revision, so
+                # a revision can never exist without its normalize job.
+                job_id = next(ids)
+                session.add(
+                    Job(
+                        id=job_id,
+                        tenant_id=tenant_id,
+                        role=JobRole.CORE.value,
+                        status=JobStatus.READY.value,
+                        payload_json=json.dumps(
+                            {
+                                "raw_revision_id": revision_id,
+                                "raw_payload_id": payload_id,
+                            },
+                            sort_keys=True,
+                        ),
+                        priority=100,
+                        run_after=now_s,
+                        attempts=0,
+                        max_attempts=5,
+                        idempotency_key=f"normalize:{revision_id}",
+                        fence_token=0,
+                        created_at=now_s,
+                        updated_at=now_s,
+                        job_type=NORMALIZE_JOB_TYPE,
                     )
+                )
+                enqueued_job_ids.append(job_id)
 
             # 4. Cursor advance, same transaction as the data it describes.
             session.merge(
@@ -224,10 +227,8 @@ class IngestionRepository:
 
             return CommitOutcome(
                 payload_id=payload_id,
-                revision_id=new_revision_id,
-                revision_n=new_revision_n,
-                is_new_revision=new_revision_id is not None,
-                normalize_job_id=normalize_job_id if new_revision_id is not None else None,
+                new_revision_ids=tuple(new_revision_ids),
+                normalize_job_ids=tuple(enqueued_job_ids),
             )
 
     def get_cursor(self, *, connection_id: str, stream: str) -> str | None:
@@ -258,6 +259,7 @@ class RevisionReader:
                     RawRevision.raw_payload_id,
                     RawRevision.schema_version,
                     RawRevision.is_tombstone,
+                    RawRevision.slice_json,
                     RawPayload.payload_json,
                     RawPayload.connection_id,
                 )
@@ -271,6 +273,7 @@ class RevisionReader:
                 payload_id,
                 schema_version,
                 is_tombstone,
+                slice_json,
                 payload_json,
                 connection_id,
             ) = row
@@ -279,7 +282,9 @@ class RevisionReader:
                 connection_id=connection_id,
                 raw_payload_id=payload_id,
                 schema_version=schema_version,
-                # A tombstone may legitimately carry an empty body.
-                payload_text=payload_json or "",
+                # Prefer this record's own slice; fall back to the full
+                # transport body for pre-split revisions. A tombstone may
+                # legitimately carry an empty body.
+                payload_text=slice_json or payload_json or "",
                 is_tombstone=bool(is_tombstone),
             )

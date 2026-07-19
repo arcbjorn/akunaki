@@ -6,10 +6,12 @@ client, so the transport is an adapter concern only.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from typing import Protocol
 
 from akunaki.domain.fetch import FetchResult, RawEnvelope
+from akunaki.domain.record_split import RecordSlice
 
 
 class ConnectorFetchPort(Protocol):
@@ -38,8 +40,18 @@ class CommitOutcomeLike(Protocol):
     """What one atomic page commit persisted."""
 
     @property
+    def new_revision_ids(self) -> tuple[str, ...]:
+        """Revisions appended by this commit (one per genuinely-new record)."""
+        ...
+
+    @property
+    def normalize_job_ids(self) -> tuple[str, ...]:
+        """Normalization jobs enqueued alongside those revisions."""
+        ...
+
+    @property
     def is_new_revision(self) -> bool:
-        """True when a logical revision was appended."""
+        """True when at least one revision was appended."""
         ...
 
 
@@ -50,20 +62,18 @@ class IngestionRepositoryPort(Protocol):
         self,
         *,
         payload_id: str,
-        revision_id: str,
-        object_id: str,
+        records: Sequence[RecordSlice],
+        ids: Iterator[str],
         tenant_id: str,
         connection_id: str,
         sync_run_id: str | None,
         envelope: RawEnvelope,
-        vendor_record_id: str,
         schema_version: str,
         cursor_id: str,
         cursor_value: str,
         now: datetime,
         window_start: str | None = None,
         window_end: str | None = None,
-        normalize_job_id: str | None = None,
     ) -> CommitOutcomeLike:
         """Commit one fetched page in a single transaction."""
         ...
