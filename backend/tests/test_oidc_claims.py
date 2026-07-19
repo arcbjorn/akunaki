@@ -25,6 +25,11 @@ AUDIENCE = "akunaki-web"
 NONCE = "nonce-abc123"
 
 
+def _identity_hash(value: str) -> str:
+    """Deterministic hasher for tests: identity, so nonce == its 'hash'."""
+    return value
+
+
 def _claims(**overrides: Any) -> dict[str, Any]:
     epoch = int(NOW.timestamp())
     values: dict[str, Any] = {
@@ -52,7 +57,8 @@ def _validate(**overrides: Any):  # type: ignore[no-untyped-def]
         _claims(**overrides),
         expected_issuer=ISSUER,
         expected_audience=AUDIENCE,
-        expected_nonce=NONCE,
+        expected_nonce_hash=_identity_hash(NONCE),
+        hash_nonce=_identity_hash,
         now=NOW,
     )
 
@@ -234,7 +240,8 @@ def test_no_rejection_returns_an_identity(overrides: dict[str, Any]) -> None:
         _claims(**overrides),
         expected_issuer=ISSUER,
         expected_audience=AUDIENCE,
-        expected_nonce=NONCE,
+        expected_nonce_hash=_identity_hash(NONCE),
+        hash_nonce=_identity_hash,
         now=NOW,
     )
     assert not result.ok

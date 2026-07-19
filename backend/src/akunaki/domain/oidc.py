@@ -12,6 +12,7 @@ to treat an unverified token as valid.
 from __future__ import annotations
 
 import hmac
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -72,7 +73,8 @@ def validate_id_token_claims(
     *,
     expected_issuer: str,
     expected_audience: str,
-    expected_nonce: str,
+    expected_nonce_hash: str,
+    hash_nonce: Callable[[str], str],
     now: datetime,
 ) -> TokenValidation:
     """Validate ``id_token`` claims against the request that produced them.
@@ -80,8 +82,10 @@ def validate_id_token_claims(
     Assumes the signature has **already** been verified against the issuer's
     JWKS; this checks the claims that a valid signature alone does not.
 
-    ``nonce`` is what binds the token to *this* authorization request: without
-    it, a token legitimately issued for another request could be replayed here.
+    The raw nonce is never stored, so ``expected_nonce_hash`` is compared
+    against the hash of the token's own nonce claim. ``nonce`` binds the token
+    to *this* authorization request: without it, a token issued for another
+    request could be replayed here.
     """
     issuer = claims.get("iss")
     if not isinstance(issuer, str) or issuer != expected_issuer:
@@ -91,7 +95,9 @@ def validate_id_token_claims(
         return TokenValidation(rejection=TokenRejection.AUDIENCE_MISMATCH)
 
     nonce = claims.get("nonce")
-    if not isinstance(nonce, str) or not _constant_time_equals(nonce, expected_nonce):
+    if not isinstance(nonce, str) or not _constant_time_equals(
+        hash_nonce(nonce), expected_nonce_hash
+    ):
         return TokenValidation(rejection=TokenRejection.NONCE_MISMATCH)
 
     epoch = int(now.timestamp())

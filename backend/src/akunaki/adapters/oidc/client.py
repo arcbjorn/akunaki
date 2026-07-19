@@ -21,6 +21,7 @@ import httpx2
 import jwt
 from jwt import PyJWKClient
 
+from akunaki.adapters.crypto.oauth import hash_state
 from akunaki.domain.oidc import (
     TokenRejection,
     TokenValidation,
@@ -160,7 +161,7 @@ class OIDCClient:
         code: str,
         code_verifier: str,
         redirect_uri: str,
-        expected_nonce: str,
+        expected_nonce_hash: str,
         now: datetime,
     ) -> TokenValidation:
         """Exchange an authorization code and validate the returned id_token.
@@ -211,7 +212,7 @@ class OIDCClient:
         return self._verify_id_token(
             id_token,
             metadata=metadata,
-            expected_nonce=expected_nonce,
+            expected_nonce_hash=expected_nonce_hash,
             now=now,
         )
 
@@ -220,7 +221,7 @@ class OIDCClient:
         id_token: str,
         *,
         metadata: OIDCProviderMetadata,
-        expected_nonce: str,
+        expected_nonce_hash: str,
         now: datetime,
     ) -> TokenValidation:
         """Verify the id_token signature, then validate its claims."""
@@ -254,7 +255,8 @@ class OIDCClient:
             claims,
             expected_issuer=metadata.issuer,
             expected_audience=self._client_id,
-            expected_nonce=expected_nonce,
+            expected_nonce_hash=expected_nonce_hash,
+            hash_nonce=hash_state,
             now=now,
         )
 

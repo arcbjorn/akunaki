@@ -18,6 +18,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt import PyJWKClient
 
+from akunaki.adapters.crypto.oauth import hash_state
 from akunaki.adapters.oidc.client import (
     OIDCClient,
     OIDCConfigError,
@@ -247,7 +248,7 @@ def test_valid_exchange_yields_a_verified_identity() -> None:
         code="auth-code",
         code_verifier="v" * 64,
         redirect_uri=REDIRECT,
-        expected_nonce=NONCE,
+        expected_nonce_hash=hash_state(NONCE),
         now=NOW,
     )
 
@@ -264,7 +265,7 @@ def test_token_signed_with_the_wrong_key_is_rejected() -> None:
         code="c",
         code_verifier="v" * 64,
         redirect_uri=REDIRECT,
-        expected_nonce=NONCE,
+        expected_nonce_hash=hash_state(NONCE),
         now=NOW,
     )
 
@@ -286,7 +287,7 @@ def test_hs256_token_is_refused_alg_confusion() -> None:
         code="c",
         code_verifier="v" * 64,
         redirect_uri=REDIRECT,
-        expected_nonce=NONCE,
+        expected_nonce_hash=hash_state(NONCE),
         now=NOW,
     )
 
@@ -300,7 +301,7 @@ def test_wrong_nonce_is_rejected_after_signature_check() -> None:
         code="c",
         code_verifier="v" * 64,
         redirect_uri=REDIRECT,
-        expected_nonce=NONCE,
+        expected_nonce_hash=hash_state(NONCE),
         now=NOW,
     )
 
@@ -313,7 +314,7 @@ def test_wrong_audience_is_rejected() -> None:
         code="c",
         code_verifier="v" * 64,
         redirect_uri=REDIRECT,
-        expected_nonce=NONCE,
+        expected_nonce_hash=hash_state(NONCE),
         now=NOW,
     )
 
@@ -331,7 +332,7 @@ def test_token_endpoint_error_raises() -> None:
             code="c",
             code_verifier="v" * 64,
             redirect_uri=REDIRECT,
-            expected_nonce=NONCE,
+            expected_nonce_hash=hash_state(NONCE),
             now=NOW,
         )
 
@@ -347,7 +348,7 @@ def test_missing_id_token_raises() -> None:
             code="c",
             code_verifier="v" * 64,
             redirect_uri=REDIRECT,
-            expected_nonce=NONCE,
+            expected_nonce_hash=hash_state(NONCE),
             now=NOW,
         )
 
@@ -369,7 +370,7 @@ def test_client_secret_is_sent_but_not_in_repr() -> None:
         code="c",
         code_verifier="v" * 64,
         redirect_uri=REDIRECT,
-        expected_nonce=NONCE,
+        expected_nonce_hash=hash_state(NONCE),
         now=NOW,
     )
 
@@ -403,7 +404,7 @@ def test_error_logs_carry_no_token_body(caplog: pytest.LogCaptureFixture) -> Non
                 code="c",
                 code_verifier="v" * 64,
                 redirect_uri=REDIRECT,
-                expected_nonce=NONCE,
+                expected_nonce_hash=hash_state(NONCE),
                 now=NOW,
             )
     finally:
