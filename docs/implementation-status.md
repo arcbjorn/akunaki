@@ -26,7 +26,7 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts, revision slices, deletion pipeline) | yes | yes (up/down/up through `0010`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts, revision slices, deletion pipeline, users/sessions) | yes | yes (up/down/up through `0011`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
 | Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
 | libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
@@ -39,7 +39,7 @@ Legend:
 | `GET /healthz` (service, db ready, `models_required=false`) | yes | yes | does not fabricate product health |
 | Internal debug surface (`/internal/debug/sync-status`, `/latest-sleep`) | yes | yes | **unauthenticated**; router not registered unless `AKUNAKI_DEBUG_ROUTES_ENABLED` is set (default off); `private, no-store`; cross-tenant reads are 404 |
 | Phase-one vertical slice (connect → sync → normalize → read in API) | yes | yes | verified end-to-end in a real process against a live HTTP provider |
-| Authenticated `/v1` product surface | no | no | needs sessions; the debug router is an explicit stand-in and must be replaced, not extended |
+| Authenticated `/v1` product surface | no | no | session **storage** exists; still needs the OIDC handshake and cookie/CSRF wiring. The debug router is an explicit stand-in and must be replaced, not extended |
 | Worker entry `python -m akunaki.worker` runtime | yes | yes | claim loop + SIGINT/SIGTERM cooperative shutdown; JSON logs |
 | Worker runtime (claim → execute → heartbeat → settle) | yes | yes | port-typed in `application`; fake-repository policy tests + file-backed end-to-end tests |
 | Retry classification + exponential backoff policy | yes | yes | transient/permanent/cancelled; capped jitter; min 1s (second-precision lifecycle) |
@@ -51,7 +51,9 @@ Legend:
 | CI workflow (GitHub Actions) | yes | yes | four jobs: quality, migrations up/down/up on an ephemeral DB, core-only boot with models disabled, advisory `pip-audit`; every step verified locally before commit |
 | Core-only boot proven without dev deps | yes | yes | CI installs with `--no-dev` and asserts no model SDK is importable, then boots API + worker with no `MODEL_*` config |
 | Frontend / web | no | no | deferred |
-| Auth / OIDC / sessions product | no | no | deferred |
+| Session layer (`users`, `sessions`: issue, validate, rotate, revoke, purge) | yes | yes | migration `0011`; **hash-only** storage of cookie token and CSRF secret; expiry + revocation enforced; rotation revokes the predecessor |
+| OIDC handshake (authorize, callback, token/nonce validation) | no | no | **blocked on roadmap open decision 1** (final IdP choice); the session layer above is what those flows will write to |
+| Session cookie wiring + CSRF enforcement in routes | no | no | repository primitives exist; no cookie issuance, `Secure`/`HttpOnly`/`SameSite` handling, or route-level CSRF check yet |
 | Connectors (Oura, Google Health, Polar) | partial | partial | Oura OAuth, fetch, initial sync, and sleep normalization ship; no webhooks or incremental sync; Google Health and Polar not started |
 | Agent / model packages | no | no | forbidden in core |
 | Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, OAuth state, sync transport, and the **sleep** fact slice exist; `webhook_inbox`, other detail tables, source selection, and scores pending |
