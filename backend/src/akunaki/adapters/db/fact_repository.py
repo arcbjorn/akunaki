@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.models import FactRecord, SleepSession
@@ -161,3 +161,38 @@ class FactRepository:
                     )
                 ).all()
             )
+
+    def daily_sleep_durations(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, float]:
+        """Total sleep minutes per local day, summed across current sessions.
+
+        Per the design, ``sleep_duration_min`` is the total sleep minutes across
+        all sessions assigned to a wake-date, naps and split sessions included.
+        Only current, load-eligible, active facts count; a day absent from the
+        result has no known sleep and must be treated as unknown by the caller,
+        never imputed as zero.
+        """
+        if not local_health_days:
+            return {}
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(
+                    FactRecord.local_health_day,
+                    func.sum(SleepSession.duration_min),
+                )
+                .join(SleepSession, SleepSession.fact_record_id == FactRecord.id)
+                .where(
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.entity_type == ENTITY_TYPE,
+                    FactRecord.local_health_day.in_(local_health_days),
+                    FactRecord.is_current == 1,
+                    FactRecord.deletion_state == "active",
+                    FactRecord.exclude_from_load == 0,
+                )
+                .group_by(FactRecord.local_health_day)
+            ).all()
+        return {day: float(total) for day, total in rows if day is not None}

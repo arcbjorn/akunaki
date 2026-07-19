@@ -51,8 +51,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Session routes are always mounted: every endpoint on them requires a
     # valid session cookie, so mounting them exposes nothing on its own.
     from akunaki.api.routes.session import router as session_router
+    from akunaki.api.routes.sleep import router as sleep_router
 
     app.include_router(session_router)
+    app.include_router(sleep_router)
 
     # Login routes only when OIDC is configured. An unconfigured deployment
     # exposes no half-built auth surface.
