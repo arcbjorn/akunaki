@@ -94,7 +94,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260718_0004   # drop oauth state schema
+uv run alembic downgrade 20260718_0005   # drop sync transport schema
+uv run alembic downgrade 20260718_0004   # also drop oauth state schema
 uv run alembic downgrade 20260713_0003   # also drop connection lifecycle schema
 uv run alembic downgrade 20260713_0002   # also drop attempt/dead-letter lifecycle schema
 uv run alembic downgrade 20260713_0001   # also drop lease tables
@@ -110,6 +111,22 @@ uv run alembic current
 | `20260713_0003` | job type/error fields, `job_attempts`, `job_dead_letters` |
 | `20260718_0004` | `connections`, `connection_secrets`, `connection_health` |
 | `20260718_0005` | `oauth_states` (hashed state + sealed PKCE verifier) |
+| `20260719_0006` | `sync_runs`, `raw_payload`, `sync_cursors`, `raw_objects`, `raw_revisions` |
+
+### Sync transport layer (`0006`)
+
+Two layers with deliberately different dedupe rules:
+
+| Layer | Tables | Rule |
+|-------|--------|------|
+| Transport | `raw_payload` | **Every** vendor response is retained. `content_hash` is *indexed, not unique*, so a retried fetch writes a new row. |
+| Logical | `raw_objects`, `raw_revisions` | Append-only. A new revision is skipped when that object already has the same `content_hash`. |
+
+This split is what makes crash replay safe: a crash before commit leaves cursors unchanged so the same window can be refetched, and the logical hash check stops the retry from creating duplicate revisions while the transport row is still kept for audit.
+
+Other enforced invariants: `raw_payload.sync_run_id` is **nullable** (a webhook body can land before a run exists); `payload_json` and `payload_blob` are mutually exclusive; `revision_n` is unique per object; and `tombstone_reason` accepts only `vendor_deleted` or `privacy_delete` — **`superseded` is rejected**, because superseding is expressed by a later revision, not by marking the old one deleted. There is no `normalizer_version` on raw rows; that belongs on facts.
+
+`webhook_inbox` is **not** created yet — it arrives with webhook handling, keeping the inbox→payload FK one-way.
 
 ### Local driver limitation: BLOB binding
 
