@@ -267,7 +267,18 @@ The IdP is **self-hosted Authelia** (roadmap decision 1). `login_states` is deli
 
 `akunaki.adapters.oidc.OIDCClient` handles the network and signature parts: discovery (cached, issuer confirmed against config), the PKCE authorize URL, token exchange, and `id_token` **signature** verification via PyJWT against the issuer's JWKS. It accepts **asymmetric algorithms only** — an HS256 token forged with a known public key is refused, closing the alg-confusion class. Signature verification lives here; the pure `domain.oidc` validator owns every *claim* policy against an injected clock, so PyJWT's real-time `exp`/`nbf` checks are turned off to keep one authority over time.
 
-**Not built:** the `/auth/login` and `/auth/callback` **routes** that wire the client, login state, and session issuance together, plus the user upsert on `(oidc_issuer, oidc_subject)`. Every primitive exists; until the routes call them, `/v1` still has no login path.
+The `/auth/login` and `/auth/callback` routes wire it together, mounted **only when OIDC is configured** (`AKUNAKI_OIDC_ISSUER` set):
+
+```bash
+export AKUNAKI_OIDC_ISSUER=https://auth.example.com
+export AKUNAKI_OIDC_CLIENT_ID=akunaki-web
+export AKUNAKI_OIDC_CLIENT_SECRET=...
+export AKUNAKI_OIDC_REDIRECT_URI=https://app.example.com/auth/callback
+```
+
+`GET /auth/login` returns the authorize URL; `GET /auth/callback` verifies the token, provisions the user on first login (one user per tenant, keyed by `(oidc_issuer, oidc_subject)`), sets the session cookie, and returns the CSRF secret. The orchestration (`akunaki.application.login`) seals state before the redirect, consumes it single-use, and verifies the token **before** any session is issued.
+
+Login now works end to end — `/v1` is reachable behind a cookie session.
 
 ### Local driver limitation: BLOB binding
 
