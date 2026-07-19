@@ -213,13 +213,13 @@ phase0 ──► phase1 ──► phase2 ──► phase3 ──► phase4
 
 ## Open decisions
 
-1. Final IdP choice (Auth0, Cognito, Keycloak, etc.)
+1. ~~Final IdP choice~~ — **decided 2026-07-19: self-hosted [Authelia](https://www.authelia.com/)**. Chosen for a minimal footprint (single Go binary, no external database) with password + TOTP/WebAuthn. Known trade-off: Authelia's OIDC provider is secondary to its reverse-proxy role. Mitigated by building the handshake to **standard OIDC** (discovery, PKCE, `state`, `nonce`, JWKS), so switching providers is a config change, not a rewrite. Rejected: Pocket ID (passkey-only), Zitadel/Keycloak/Authentik (heavier; require Postgres and, for Authentik, Redis + workers).
 2. Turso phase-zero findings (path details; reopen ADR only on proven blocker)
 3. Google Health intraday / restricted-scope approval strategy
 4. Polar API major version for MVP
 5. Exact Fitbit-origin device SKU naming and capability note (via Google Health)
-6. Default backfill lookback days (30 vs 90)
-7. Whether disconnect retains historical facts by default
+6. ~~Default backfill lookback days~~ — **decided 2026-07-19: 30 days.** Lower first-sync cost and vendor load; the value stays configurable via `SyncConfig`.
+7. ~~Whether disconnect retains historical facts by default~~ — **decided 2026-07-19: always preserve full data.** Disconnecting revokes credentials but never destroys history; only an explicit privacy delete removes facts.
 8. First model provider to productionize (if any)
 9. Whether tenant source overrides ship in phase three or later
 10. Legal review timeline before any compliance language
