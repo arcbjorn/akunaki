@@ -63,6 +63,7 @@ class IngestionRepositoryPort(Protocol):
         now: datetime,
         window_start: str | None = None,
         window_end: str | None = None,
+        normalize_job_id: str | None = None,
     ) -> CommitOutcomeLike:
         """Commit one fetched page in a single transaction."""
         ...
