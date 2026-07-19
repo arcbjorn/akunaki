@@ -26,7 +26,7 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport) | yes | yes (up/down/up through `0006`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts) | yes | yes (up/down/up through `0007`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
 | Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
 | libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
@@ -49,7 +49,7 @@ Legend:
 | Auth / OIDC / sessions product | no | no | deferred |
 | Connectors (Oura, Google Health, Polar) | partial | partial | Oura **OAuth client** done; no sync, fetch, webhook, or normalization code for any provider |
 | Agent / model packages | no | no | forbidden in core |
-| Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, OAuth state, and sync-transport tables exist; `webhook_inbox`, facts, and scores pending |
+| Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, OAuth state, sync transport, and the **sleep** fact slice exist; `webhook_inbox`, other detail tables, source selection, and scores pending |
 | Envelope encryption (AES-256-GCM, KEK/DEK, rotation, AAD binding) | yes | yes | fresh DEK+nonces per seal; versioned KEK registry; fail-fast boot without keys; mutation-checked randomness |
 | Sealed tokens persisted to `connection_secrets` | yes | yes | raw column holds no readable token; envelope bound to its connection; cascade delete |
 | KEK sourcing from external KMS / secret manager | no | no | keys load from `AKUNAKI_SECRET_KEKS` only; no KMS client, rotation runbook, or key-use audit |
@@ -63,7 +63,11 @@ Legend:
 | Atomic fetch commit (`IngestionRepository`) | yes | yes | transport row + logical revision + cursor in **one** transaction; revision appended only on new `content_hash` |
 | `connection.initial_sync` handler | yes | yes | opens sealed tokens, paginates, translates fetch outcomes into the worker's retry vocabulary; auth failure → `needs_reauth` + dead letter, 429/5xx → retry |
 | Vendor record identity (per-record keys) | no | no | **placeholder**: pages are keyed by `stream:page:<content_hash>`; real per-record identity arrives with the normalizer |
-| Normalization (`raw.normalize`, facts) | no | no | raw revisions land; **no** normalizer, fact tables, or `normalizer_version` |
+| Sleep fact schema (`fact_records`, `sleep_sessions`) | yes | yes | migration `0007`; versioned headers with a partial unique index on current; typed one-to-one detail (not EAV) |
+| Oura sleep normalizer (pure, deterministic) | yes | yes | wake-date assignment, canonical minutes, honest quality grading; no clock, so re-runs are byte-identical |
+| Versioned fact writes (supersede, never update in place) | yes | yes | identical content is a no-op; changed content appends a version and retains the prior row with its detail |
+| Other detail tables (HR, HRV, activity, workouts, labs, …) | no | no | **deliberately deferred**: each arrives with the normalizer that populates it, not as empty tables |
+| `raw.normalize` job handler | no | no | normalizer + fact writes exist; **no** handler registration or outbox-driven enqueue |
 | OAuth HTTP routes (authorize/callback endpoints) | no | no | **deliberately deferred**: `/v1` requires an authenticated session and auth/OIDC is not built; the linking service takes `tenant_id` as a parameter so routes are a thin layer later |
 | Google Health / Polar OAuth clients | no | no | only Oura implemented; both gated on unstarted phase-zero spikes |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
