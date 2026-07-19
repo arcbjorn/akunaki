@@ -614,6 +614,9 @@ class RawRevision(Base):
     deletion_state: Mapped[str] = mapped_column(Text, nullable=False)
     is_tombstone: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     tombstone_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Exact sub-body for this record. Nullable: revisions written before the
+    # per-record split fall back to the full transport body.
+    slice_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint("revision_n >= 1", name="raw_revision_n_pos"),
