@@ -26,7 +26,7 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states) | yes | yes (up/down/up through `0005`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport) | yes | yes (up/down/up through `0006`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
 | Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
 | libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
@@ -49,7 +49,7 @@ Legend:
 | Auth / OIDC / sessions product | no | no | deferred |
 | Connectors (Oura, Google Health, Polar) | partial | partial | Oura **OAuth client** done; no sync, fetch, webhook, or normalization code for any provider |
 | Agent / model packages | no | no | forbidden in core |
-| Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, and OAuth state tables exist; raw/sync transport, facts, and scores pending |
+| Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, OAuth state, and sync-transport tables exist; `webhook_inbox`, facts, and scores pending |
 | Envelope encryption (AES-256-GCM, KEK/DEK, rotation, AAD binding) | yes | yes | fresh DEK+nonces per seal; versioned KEK registry; fail-fast boot without keys; mutation-checked randomness |
 | Sealed tokens persisted to `connection_secrets` | yes | yes | raw column holds no readable token; envelope bound to its connection; cascade delete |
 | KEK sourcing from external KMS / secret manager | no | no | keys load from `AKUNAKI_SECRET_KEKS` only; no KMS client, rotation runbook, or key-use audit |
@@ -57,6 +57,9 @@ Legend:
 | Oura OAuth client (authorize URL, PKCE code exchange, refresh) | yes | yes | S256 only; typed failure vocabulary (`invalid_grant` → reauth vs retryable); secrets never logged; mock-transport + real-HTTP verified |
 | OAuth linking service (start link → callback → sealed tokens) | yes | yes | port-typed in `application`; `tenant_id` is a parameter; connection row + sealed secret written in **one** transaction |
 | Connection repository (link/relink, status transitions) | yes | yes | relink reuses the existing `(tenant_id, provider)` row; failed exchange leaves no half-written connection |
+| Sync transport schema (`sync_runs`, `raw_payload`, `sync_cursors`, `raw_objects`, `raw_revisions`) | yes | yes | migration `0006`; every response retained (hash indexed, **not** unique); append-only revisions; `superseded` rejected as a tombstone reason |
+| `webhook_inbox` table + webhook verification | no | no | deferred with webhook handling; one-way FK to `raw_payload` documented but not created |
+| `connection.initial_sync` handler / Oura fetch | no | no | transport schema exists; **no** fetch client, cursor advance, or handler registration |
 | OAuth HTTP routes (authorize/callback endpoints) | no | no | **deliberately deferred**: `/v1` requires an authenticated session and auth/OIDC is not built; the linking service takes `tenant_id` as a parameter so routes are a thin layer later |
 | Google Health / Polar OAuth clients | no | no | only Oura implemented; both gated on unstarted phase-zero spikes |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
