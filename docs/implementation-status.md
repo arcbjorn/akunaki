@@ -62,12 +62,13 @@ Legend:
 | Oura V2 fetch client (windowed pages, pagination, typed failures) | yes | yes | exact body returned for faithful transport persistence; 401/403 → `unauthorized`, 429 → `rate_limit` with `Retry-After`; token never logged |
 | Atomic fetch commit (`IngestionRepository`) | yes | yes | transport row + logical revision + cursor in **one** transaction; revision appended only on new `content_hash` |
 | `connection.initial_sync` handler | yes | yes | opens sealed tokens, paginates, translates fetch outcomes into the worker's retry vocabulary; auth failure → `needs_reauth` + dead letter, 429/5xx → retry |
-| Vendor record identity (per-record keys) | no | no | **placeholder**: pages are keyed by `stream:page:<content_hash>`; real per-record identity arrives with the normalizer |
+| Vendor record identity in the **raw** layer | no | no | **still page-keyed** (`stream:page:<content_hash>`). Facts *are* per-record (`sleep_session:<vendor_id>`), so one page correctly yields N facts — but one `raw_object`/`raw_revision` still represents a page, not a record. Per-record raw identity needs a stream-aware splitter in the fetch/commit path. |
 | Sleep fact schema (`fact_records`, `sleep_sessions`) | yes | yes | migration `0007`; versioned headers with a partial unique index on current; typed one-to-one detail (not EAV) |
 | Oura sleep normalizer (pure, deterministic) | yes | yes | wake-date assignment, canonical minutes, honest quality grading; no clock, so re-runs are byte-identical |
 | Versioned fact writes (supersede, never update in place) | yes | yes | identical content is a no-op; changed content appends a version and retains the prior row with its detail |
 | Other detail tables (HR, HRV, activity, workouts, labs, …) | no | no | **deliberately deferred**: each arrives with the normalizer that populates it, not as empty tables |
-| `raw.normalize` job handler | no | no | normalizer + fact writes exist; **no** handler registration or outbox-driven enqueue |
+| `raw.normalize` job handler | yes | yes | keyed by `raw_revision_id`; enqueued in the **same transaction** as the revision, so a revision can never exist without its normalize job |
+| Closed ingestion loop (sync → normalize → facts) | yes | yes | drained through the real worker; verified end-to-end against a live HTTP server with lineage intact |
 | OAuth HTTP routes (authorize/callback endpoints) | no | no | **deliberately deferred**: `/v1` requires an authenticated session and auth/OIDC is not built; the linking service takes `tenant_id` as a parameter so routes are a thin layer later |
 | Google Health / Polar OAuth clients | no | no | only Oura implemented; both gated on unstarted phase-zero spikes |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
