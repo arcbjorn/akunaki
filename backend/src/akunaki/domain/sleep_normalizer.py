@@ -80,8 +80,13 @@ def normalize_sleep_payload(payload_text: str) -> list[SleepFact]:
         msg = "payload root must be an object"
         raise NormalizationError(msg)
 
-    records = parsed.get("data")
-    if not isinstance(records, list):
+    raw_records = parsed.get("data")
+    if isinstance(raw_records, list):
+        records = raw_records
+    elif "bedtime_start" in parsed or "bedtime_end" in parsed:
+        # A per-record slice from the raw layer, not a collection page.
+        records = [parsed]
+    else:
         msg = "payload has no data array"
         raise NormalizationError(msg)
 

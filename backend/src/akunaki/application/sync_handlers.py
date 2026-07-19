@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
@@ -31,6 +31,7 @@ from akunaki.domain.jobs import (
     NORMALIZE_JOB_TYPE,
     JobClaim,
 )
+from akunaki.domain.record_split import split_page
 from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.secrets import SecretDecryptionError
 from akunaki.domain.sleep_normalizer import NormalizationError, normalize_sleep_payload
@@ -139,28 +140,26 @@ class InitialSyncHandler:
                     retry_after_seconds=result.retry_after_seconds,
                     now=now,
                 )
+            # Split the page into per-record slices: raw identity is per
+            # record, not per response page.
+            records = split_page(envelope.stream, envelope.payload_text)
             outcome = self._ingestion.commit_page(
                 payload_id=self._new_id(),
-                revision_id=self._new_id(),
-                object_id=self._new_id(),
+                records=records,
+                ids=_id_stream(self._new_id),
                 tenant_id=claim.tenant_id,
                 connection_id=connection_id,
                 sync_run_id=payload.get("sync_run_id"),
                 envelope=envelope,
-                vendor_record_id=_vendor_record_id(envelope.stream, envelope.content_hash),
                 schema_version=self._config.schema_version,
                 cursor_id=f"{connection_id}:{self._config.stream}",
                 cursor_value=envelope.fetched_at,
                 now=now,
                 window_start=window_start.isoformat(),
                 window_end=window_end.isoformat(),
-                # Enqueued in the same transaction as the revision, so a new
-                # revision can never exist without its normalization job.
-                normalize_job_id=self._new_id(),
             )
             pages += 1
-            if outcome.is_new_revision:
-                new_revisions += 1
+            new_revisions += len(outcome.new_revision_ids)
 
             page_token = envelope.next_page_token
             if not page_token:
@@ -246,15 +245,10 @@ def _parse_payload(payload_json: str) -> dict[str, str]:
     return {str(k): v for k, v in parsed.items()}
 
 
-def _vendor_record_id(stream: str, content_hash: str) -> str:
-    """Stable logical identity for a page.
-
-    Oura returns collection pages rather than one record per response, so the
-    page's content hash is the natural key until a per-record normalizer
-    exists. Documented explicitly because it is a placeholder, not a design
-    claim about vendor record identity.
-    """
-    return f"{stream}:page:{content_hash}"
+def _id_stream(new_id: Callable[[], str]) -> Iterator[str]:
+    """Unbounded id supply for one page commit."""
+    while True:
+        yield new_id()
 
 
 class NormalizeHandler:
