@@ -1,8 +1,8 @@
 # Phase Zero evidence: application-level envelope encryption
 
-**Date:** 2026-07-18
+**Date:** 2026-07-19
 
-**Status:** Partial — application-level envelope encryption for secret columns and the OAuth state/PKCE handshake primitives are implemented and tested; **external KMS/secret-manager sourcing, backup/export encryption, rotation runbooks, and the HTTP OAuth legs are not implemented**
+**Status:** Partial — application-level envelope encryption, the OAuth state/PKCE handshake, the Oura OAuth client, and the end-to-end **linking service** are implemented and tested; **external KMS/secret-manager sourcing, backup/export encryption, rotation runbooks, and the HTTP routes (deferred pending auth) are not implemented**
 
 **Authoritative context:** [security.md](../architecture/security.md) key management, [data-model.md](../architecture/data-model.md) `connection_secrets`, [ingestion-and-sync.md](../architecture/ingestion-and-sync.md) OAuth token handling
 
@@ -114,6 +114,26 @@ All traffic is served by an in-process mock transport or a local `http.server`; 
 | Argument and credential validation | `test_exchange_validates_arguments`, `test_construction_requires_credentials`, `test_authorize_url_validates_arguments` |
 | Client repr, token repr, and both log paths carry no secrets | `test_client_repr_redacts_credentials`, `test_tokens_repr_redacts_token_values`, `test_error_logs_never_contain_secrets_or_bodies`, `test_transport_error_logs_no_request_body` |
 
+### OAuth linking service (end-to-end orchestration)
+
+Wired against the **real** state repository, sealer, connection repository, and Oura client over a mock transport — not a stack of doubles. HTTP routes are deliberately deferred (see below), so `tenant_id` is a service parameter.
+
+| Invariant | Test coverage |
+|-----------|---------------|
+| Full authorize → callback flow links the connection and stores sealed tokens | `test_full_link_flow_persists_sealed_tokens` |
+| Stored token ciphertext (read outside the ORM) contains no readable token | `test_full_link_flow_persists_sealed_tokens` |
+| The authorize URL's S256 challenge matches the verifier that was actually sealed | `test_authorize_url_uses_s256_challenge_for_the_stored_verifier` |
+| Replayed, forged, expired, and redirect-mismatched callbacks all rejected | `test_replayed_callback_is_rejected`, `test_forged_state_is_rejected`, `test_expired_state_is_rejected`, `test_mismatched_redirect_is_rejected` |
+| A provider-denied callback (no `code`) does **not** burn the state | `test_missing_code_does_not_consume_the_state` |
+| An invalid state creates no connection and no secret | `test_no_connection_is_created_when_state_is_invalid` |
+| `invalid_grant` is non-retryable (drives reauth); 5xx/transport is retryable | `test_invalid_grant_is_not_retryable`, `test_provider_outage_is_retryable` |
+| A failed exchange leaves **no half-written connection** | `test_failed_exchange_leaves_no_half_written_connection` |
+| An unopenable sealed verifier is reported distinctly, not as a provider error | `test_unreadable_verifier_is_reported_distinctly` |
+| Re-consent reuses the existing connection row (no duplicate per provider) | `test_relinking_reuses_the_connection_row` |
+| `needs_reauth` transition; unknown connection returns False | `test_mark_needs_reauth_transitions_status`, `test_mark_needs_reauth_on_unknown_connection_returns_false` |
+
+**Atomicity verified by fault injection.** Raising between the connection-row write and the secret write rolls back **both** (0 rows of each), so an `active` connection can never exist without usable token material.
+
 ---
 
 ## Mutation checks performed
@@ -144,6 +164,16 @@ Root cause: Alembic's `env.py` calls `logging.config.fileConfig`, which replaces
 
 Recorded because the weak version passed a full green suite.
 
+### OAuth linking orchestration
+
+| Mutation | Result |
+|----------|--------|
+| Skip state validation on callback | **Caught** (5 tests fail) |
+| Link even when the token exchange failed | **Caught** (3 tests fail) |
+| Treat `invalid_grant` as retryable | **Caught** by `test_invalid_grant_is_not_retryable` |
+| Remove the missing-`code` guard | **Caught** by `test_missing_code_does_not_consume_the_state` |
+| Raise between connection-row and secret writes | **Rolled back cleanly** — 0 connections, 0 secrets |
+
 ### OAuth state enforcement
 
 | Mutation | Result |
@@ -173,7 +203,8 @@ This is the same class of masking already recorded for concurrent enqueue in [ph
 | Fail-fast boot without configured keys | Backup, export, and object-storage encryption |
 | Local `AKUNAKI_SECRET_KEKS` configuration | Key access separation, audit logging of key use |
 | `oauth_states` single-use handshake (hashed state, sealed PKCE verifier, exact redirect, expiry) | HTTP authorize/callback endpoints; provider registration |
-| Oura OAuth client: authorize URL, PKCE code exchange, refresh, typed failure mapping | Google Health / Polar OAuth clients; token sealing wired into a callback route |
+| Oura OAuth client: authorize URL, PKCE code exchange, refresh, typed failure mapping | Google Health / Polar OAuth clients |
+| OAuth linking service: start link, callback validation, sealed token persistence, relink | HTTP authorize/callback routes (deferred pending auth); session binding; CSRF |
 | `connection_secrets` persistence | Provider OAuth clients, token exchange, or refresh |
 
 ---
@@ -182,11 +213,20 @@ This is the same class of masking already recorded for concurrent enqueue in [ph
 
 - Turso platform encryption at rest (provider-side; deferred with remote Turso)
 - Backup/restore key separation or the restoration-suppression deletion key
-- HTTP authorize/callback endpoints or connection-status transitions (the Oura *client* and the state/PKCE handshake primitives are covered; the routes wiring them together are not)
+- HTTP authorize/callback endpoints (**deliberately deferred**, see below)
+- Any authenticated `/v1` surface, session cookies, or CSRF
 - Any live call against the real Oura API (all tests use a mock transport or a local HTTP server)
 - Google Health and Polar OAuth clients
 - Key rotation operations at scale, or re-encryption batch tooling
 - Formal cryptographic review or third-party audit of this construction
+
+---
+
+## Deferred: HTTP OAuth routes
+
+The `/v1/connections/{provider}/oauth/start` and `/callback` endpoints are **not** implemented, by decision rather than omission. Those routes are authenticated in the design — they need a `tenant_id` from a session — and auth/OIDC is not built. Shipping them now would mean either an unauthenticated `/v1` surface or a throwaway auth shim.
+
+Instead the whole flow lives in `OAuthLinkingService` with `tenant_id` as an explicit parameter, fully tested against real components. Once sessions exist, the routes become a thin layer that resolves the tenant and calls the service; none of the security rules above move.
 
 ---
 
