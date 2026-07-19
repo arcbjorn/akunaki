@@ -96,6 +96,24 @@ The authorize/callback handshake is the first consumer of the sealer. Security r
 | Model/migration agreement; verifier column is BLOB; no raw `state` column | `test_oauth_state_model_matches_migration` |
 | States cascade with their tenant | `test_states_cascade_with_tenant` |
 
+### Oura OAuth client
+
+All traffic is served by an in-process mock transport or a local `http.server`; **no test touches the real Oura API.**
+
+| Invariant | Test coverage |
+|-----------|---------------|
+| Authorize URL carries state, challenge, exact redirect, and `code_challenge_method=S256` | `test_authorize_url_carries_pkce_s256_and_state` |
+| Authorize URL never carries the client secret | `test_authorize_url_never_contains_the_client_secret` |
+| Code exchange sends the PKCE verifier and returns parsed tokens | `test_exchange_code_sends_pkce_verifier_and_returns_tokens` |
+| Relative `expires_in` converted to an absolute instant (survives restart) | `test_exchange_code_sends_pkce_verifier_and_returns_tokens` |
+| Refresh uses the `refresh_token` grant | `test_refresh_sends_refresh_grant` |
+| Missing optional response fields tolerated | `test_missing_optional_fields_are_tolerated` |
+| `invalid_grant` / `invalid_client` / `unauthorized_client` are **non-retryable** (drive reauth) | `test_permanent_provider_errors_are_not_retryable` |
+| 5xx and transport failures are **retryable** | `test_server_error_is_retryable`, `test_transport_error_is_retryable` |
+| Non-JSON and missing `access_token` responses are malformed, not silent successes | `test_non_json_response_is_malformed`, `test_response_without_access_token_is_malformed` |
+| Argument and credential validation | `test_exchange_validates_arguments`, `test_construction_requires_credentials`, `test_authorize_url_validates_arguments` |
+| Client repr, token repr, and both log paths carry no secrets | `test_client_repr_redacts_credentials`, `test_tokens_repr_redacts_token_values`, `test_error_logs_never_contain_secrets_or_bodies`, `test_transport_error_logs_no_request_body` |
+
 ---
 
 ## Mutation checks performed
@@ -110,6 +128,21 @@ Passing crypto tests are weak evidence on their own, so the randomness guarantee
 | Payload stored as plaintext | **Caught** (9 tests fail) |
 
 An earlier revision of these tests **missed** the fixed-DEK and fixed-nonce mutations: comparing whole ciphertexts passed because the random KEK nonce in the header masked an identical payload. The tests now assert on the parsed payload, DEK nonce, KEK nonce, and unwrapped DEK separately. Recorded because the weak version looked correct.
+
+### Oura OAuth client secret handling
+
+| Mutation | Result |
+|----------|--------|
+| Log the full provider error body | **Caught** by `test_error_logs_never_contain_secrets_or_bodies` |
+| Log the request payload on transport error | **Caught** by `test_transport_error_logs_no_request_body` |
+| Unredacted `OuraOAuthClient.__repr__` | **Caught** by `test_client_repr_redacts_credentials` |
+| Remove `OAuthTokens.__repr__` redaction | **Caught** by `test_tokens_repr_redacts_token_values` |
+
+**Vacuous-test finding.** The two log-leak tests initially passed in isolation but failed once run after the migration tests — and the failure was in the *positive control*, not the leak assertion: `caplog` had captured **zero** records, so `assert secret not in rendered` was passing against an empty string. Any leak would have gone undetected.
+
+Root cause: Alembic's `env.py` calls `logging.config.fileConfig`, which replaces the root handlers and removes pytest's capture handlers for the rest of the session. Two fixes were applied — `fileConfig(..., disable_existing_loggers=False)` in `env.py`, and a private handler attached directly to the connector logger in the tests instead of `caplog`, so the assertions no longer depend on global logging state. Every leak test now carries an explicit positive control asserting that something *was* captured.
+
+Recorded because the weak version passed a full green suite.
 
 ### OAuth state enforcement
 
@@ -140,6 +173,7 @@ This is the same class of masking already recorded for concurrent enqueue in [ph
 | Fail-fast boot without configured keys | Backup, export, and object-storage encryption |
 | Local `AKUNAKI_SECRET_KEKS` configuration | Key access separation, audit logging of key use |
 | `oauth_states` single-use handshake (hashed state, sealed PKCE verifier, exact redirect, expiry) | HTTP authorize/callback endpoints; provider registration |
+| Oura OAuth client: authorize URL, PKCE code exchange, refresh, typed failure mapping | Google Health / Polar OAuth clients; token sealing wired into a callback route |
 | `connection_secrets` persistence | Provider OAuth clients, token exchange, or refresh |
 
 ---
@@ -148,7 +182,9 @@ This is the same class of masking already recorded for concurrent enqueue in [ph
 
 - Turso platform encryption at rest (provider-side; deferred with remote Turso)
 - Backup/restore key separation or the restoration-suppression deletion key
-- HTTP authorize/callback endpoints, provider OAuth clients, token acquisition, or refresh (the state/PKCE *handshake primitives* are covered; the network legs are not)
+- HTTP authorize/callback endpoints or connection-status transitions (the Oura *client* and the state/PKCE handshake primitives are covered; the routes wiring them together are not)
+- Any live call against the real Oura API (all tests use a mock transport or a local HTTP server)
+- Google Health and Polar OAuth clients
 - Key rotation operations at scale, or re-encryption batch tooling
 - Formal cryptographic review or third-party audit of this construction
 
