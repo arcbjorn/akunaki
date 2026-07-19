@@ -96,7 +96,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260719_0009   # revert tenant-scoped fact indexes
+uv run alembic downgrade 20260719_0010   # drop users and sessions
+uv run alembic downgrade 20260719_0009   # also revert tenant-scoped fact indexes
 uv run alembic downgrade 20260719_0008   # also drop deletion pipeline
 uv run alembic downgrade 20260719_0007   # also drop per-record slice body
 uv run alembic downgrade 20260719_0006   # also drop sleep fact schema
@@ -122,6 +123,7 @@ uv run alembic current
 | `20260719_0008` | `raw_revisions.slice_json` (per-record body) |
 | `20260719_0009` | `deletion_requests`, `deletion_completion_proofs` |
 | `20260719_0010` | tenant-scoped fact identity indexes |
+| `20260719_0011` | `users`, `sessions` (hash-only token storage) |
 
 ### Sync transport layer (`0006`)
 
@@ -223,6 +225,21 @@ curl 'localhost:8000/internal/debug/latest-sleep?tenant_id=t1'
 **Off by default and fails closed**: with the flag unset the routes are not registered at all, so they are absent from the OpenAPI schema rather than merely guarded at request time. Responses carry `private, no-store`, and a cross-tenant read is a `404` — indistinguishable from "no data yet".
 
 This is a deliberate stand-in for the authenticated `/v1` surface, which needs sessions. It should be **replaced**, not extended.
+
+### Sessions (`0011`)
+
+Backend-issued opaque sessions. The raw cookie token is generated at issue time, returned **once**, and never written: only `token_hash` and `csrf_secret_hash` are stored, so a database dump yields no usable session and lookup is an index probe on the hash.
+
+```python
+issued = sessions.issue(session_id=new_id(), user_id=user_id, now=now)
+# issued.token -> cookie;  issued.csrf_secret -> client
+result = sessions.validate(token=cookie_token, now=now)   # typed rejection, not an exception
+sessions.rotate(old_token=..., new_session_id=..., now=now)  # revokes the predecessor
+```
+
+`validate` returns a typed `SessionRejection` (`not_found` / `expired` / `revoked`) so callers surface one generic `401` without revealing which check failed. Rotation issues the successor **before** revoking the old session, so a crash between the two leaves the user logged in rather than stranded.
+
+**Not built:** the OIDC handshake itself (authorize, callback, nonce/token validation) is blocked on the final IdP choice — roadmap open decision 1 — and route-level cookie/CSRF wiring does not exist yet. This revision is the storage those flows will write to.
 
 ### Local driver limitation: BLOB binding
 
