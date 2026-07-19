@@ -14,7 +14,11 @@ from akunaki.config import Settings, get_settings
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False so running migrations in-process (tests,
+    # embedded callers) does not silence loggers configured by the host.
+    # fileConfig still replaces root handlers, so callers that capture logs
+    # around a migration should re-establish their own handlers afterwards.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
