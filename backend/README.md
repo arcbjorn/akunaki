@@ -42,6 +42,8 @@ uv tree --outdated
 uv run pip-audit
 ```
 
+These same gates run in CI (`.github/workflows/backend.yml`) across four jobs: **quality** (lint, format, types, contracts, tests), **migrations** (upgrade → downgrade to base → upgrade on an ephemeral DB), **boot-boundary** (installs with `--no-dev`, asserts no model SDK is importable, then boots API and worker with no `MODEL_*` config), and an advisory **audit**. No model or provider credentials are set anywhere in the workflow — that absence is itself part of the "models disabled" exit criterion.
+
 ## Run API
 
 ```bash
