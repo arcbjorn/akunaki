@@ -2,9 +2,9 @@
 
 Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
-This package intentionally includes **no** frontend, provider HTTP clients, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
+This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, and the **OAuth state/PKCE handshake primitives**. Not implemented: product job handlers, provider OAuth clients and token exchange, and the HTTP authorize/callback legs.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, and the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh). Not implemented: product job handlers, HTTP authorize/callback routes, Google Health and Polar clients, and any sync/normalization code.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -13,7 +13,7 @@ Implemented: the **local** atomic durable-job repository lifecycle (fenced claim
 | Item | Policy |
 |------|--------|
 | Python | **3.13.14** only (`requires-python = ">=3.13.14,<3.14"`) |
-| Dependencies | **Exact pins** of latest **stable** releases as of 2026-07-13 (`cryptography==49.0.0` added 2026-07-18) — **no prereleases** |
+| Dependencies | **Exact pins** of latest **stable** releases as of 2026-07-13 (`cryptography==49.0.0` added 2026-07-18; `httpx2==2.6.0` promoted to runtime 2026-07-19) — **no prereleases** |
 | Database dialect | Official `sqlite+libsql` via `sqlalchemy-libsql==0.2.0` (local forms only) |
 | Model SDKs | **Forbidden** in core install (openai, anthropic, gemini, xai, openrouter, local-model stacks, …) |
 
@@ -170,6 +170,22 @@ The raw `state` is **never stored** — only its SHA-256 hash — and the PKCE v
 
 PKCE is **S256** only; `plain` is deliberately unsupported.
 
+### Oura OAuth client
+
+`OuraOAuthClient` builds the authorize URL and performs the PKCE token exchange:
+
+```python
+client = OuraOAuthClient(client_id=..., client_secret=...)
+url = client.authorize_url(state=state, code_challenge=challenge,
+                           redirect_uri=REDIRECT, scopes=("daily", "personal"))
+result = client.exchange_code(code=code, code_verifier=verifier,
+                              redirect_uri=REDIRECT, now=now)
+if result.ok:
+    sealer.seal(result.tokens.access_token.encode(), aad=connection_id.encode())
+```
+
+Failures map to a typed vocabulary rather than raising: `invalid_grant` / `invalid_client` are **not retryable** and must drive `needs_reauth`, while 5xx and transport errors are retryable (`TokenExchangeFailure.retryable`). Provider response bodies are **never** logged or attached to exceptions — a token endpoint body contains credentials — and both `OuraOAuthClient` and `OAuthTokens` have redacted `__repr__`s. Relative `expires_in` is converted to an absolute `expires_at` so it stays meaningful across restarts.
+
 There is **no** `AKUNAKI_DATABASE_AUTH_TOKEN` and **no** remote connect-args path in this foundation.
 
 ### Accepted `AKUNAKI_DATABASE_URL` forms
@@ -192,6 +208,7 @@ src/akunaki/
   ports/            # JobRepositoryPort + SecretSealerPort protocols
   adapters/db/      # engine, models, JobRepository CAS adapter
   adapters/crypto/  # AES-256-GCM envelope sealer, KEK config, OAuth state/PKCE
+  adapters/connectors/ # provider OAuth clients (Oura)
   api/              # FastAPI app factory + /healthz
   worker/           # core worker entrypoint: claim loop + signal shutdown
 alembic/            # migrations 0001 foundation + 0002 leases + 0003 execution lifecycle
