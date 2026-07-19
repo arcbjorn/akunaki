@@ -13,7 +13,7 @@ Implemented: the **local** atomic durable-job repository lifecycle (fenced claim
 | Item | Policy |
 |------|--------|
 | Python | **3.13.14** only (`requires-python = ">=3.13.14,<3.14"`) |
-| Dependencies | **Exact pins** of latest **stable** releases as of 2026-07-13 (`cryptography==49.0.0` added 2026-07-18; `httpx2==2.6.0` promoted to runtime 2026-07-19) — **no prereleases** |
+| Dependencies | **Exact pins** of latest **stable** releases as of 2026-07-13 (`cryptography==49.0.0` 2026-07-18; `httpx2` promoted to runtime, `pyjwt==2.13.0` added 2026-07-19) — **no prereleases** |
 | Database dialect | Official `sqlite+libsql` via `sqlalchemy-libsql==0.2.0` (local forms only) |
 | Model SDKs | **Forbidden** in core install (openai, anthropic, gemini, xai, openrouter, local-model stacks, …) |
 
@@ -265,7 +265,9 @@ The IdP is **self-hosted Authelia** (roadmap decision 1). `login_states` is deli
 
 `akunaki.domain.oidc.validate_id_token_claims` checks `iss`, `aud` (string or array), `nonce`, `exp`/`nbf`/`iat` (60s skew), and `sub`. It is pure with an injected clock, and **assumes the signature was already verified** against the issuer's JWKS — it never treats an unverified token as valid.
 
-**Not built:** discovery fetch, the JWKS client and signature verification, token exchange, user upsert, and the `/auth/login` + `/auth/callback` routes. Until those exist a session still cannot be created, so `/v1` has no login path.
+`akunaki.adapters.oidc.OIDCClient` handles the network and signature parts: discovery (cached, issuer confirmed against config), the PKCE authorize URL, token exchange, and `id_token` **signature** verification via PyJWT against the issuer's JWKS. It accepts **asymmetric algorithms only** — an HS256 token forged with a known public key is refused, closing the alg-confusion class. Signature verification lives here; the pure `domain.oidc` validator owns every *claim* policy against an injected clock, so PyJWT's real-time `exp`/`nbf` checks are turned off to keep one authority over time.
+
+**Not built:** the `/auth/login` and `/auth/callback` **routes** that wire the client, login state, and session issuance together, plus the user upsert on `(oidc_issuer, oidc_subject)`. Every primitive exists; until the routes call them, `/v1` still has no login path.
 
 ### Local driver limitation: BLOB binding
 
