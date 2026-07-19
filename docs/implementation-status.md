@@ -59,12 +59,16 @@ Legend:
 | Connection repository (link/relink, status transitions) | yes | yes | relink reuses the existing `(tenant_id, provider)` row; failed exchange leaves no half-written connection |
 | Sync transport schema (`sync_runs`, `raw_payload`, `sync_cursors`, `raw_objects`, `raw_revisions`) | yes | yes | migration `0006`; every response retained (hash indexed, **not** unique); append-only revisions; `superseded` rejected as a tombstone reason |
 | `webhook_inbox` table + webhook verification | no | no | deferred with webhook handling; one-way FK to `raw_payload` documented but not created |
-| `connection.initial_sync` handler / Oura fetch | no | no | transport schema exists; **no** fetch client, cursor advance, or handler registration |
+| Oura V2 fetch client (windowed pages, pagination, typed failures) | yes | yes | exact body returned for faithful transport persistence; 401/403 → `unauthorized`, 429 → `rate_limit` with `Retry-After`; token never logged |
+| Atomic fetch commit (`IngestionRepository`) | yes | yes | transport row + logical revision + cursor in **one** transaction; revision appended only on new `content_hash` |
+| `connection.initial_sync` handler | yes | yes | opens sealed tokens, paginates, translates fetch outcomes into the worker's retry vocabulary; auth failure → `needs_reauth` + dead letter, 429/5xx → retry |
+| Vendor record identity (per-record keys) | no | no | **placeholder**: pages are keyed by `stream:page:<content_hash>`; real per-record identity arrives with the normalizer |
+| Normalization (`raw.normalize`, facts) | no | no | raw revisions land; **no** normalizer, fact tables, or `normalizer_version` |
 | OAuth HTTP routes (authorize/callback endpoints) | no | no | **deliberately deferred**: `/v1` requires an authenticated session and auth/OIDC is not built; the linking service takes `tenant_id` as a parameter so routes are a thin layer later |
 | Google Health / Polar OAuth clients | no | no | only Oura implemented; both gated on unstarted phase-zero spikes |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
 | Sustained multi-process fleet under production load | no | no | in-process threads with independent engines only; no long-running or cross-host soak |
-| Product job handlers (connectors, normalization, scoring) | no | no | only `system.noop` exists; registry is ready for them |
+| Product job handlers (normalization, scoring) | no | no | `connection.initial_sync` ships; normalization and scoring handlers pending |
 | Atomic domain side-effect unit of work | no | no | lease validity primitive exists; fenced side-effect UoW still pending |
 | Remote production Turso (Turso Cloud) | no | no | **product deferred**; proposed in ADR 0003 only |
 | Encryption-at-rest / backup evidence | partial | partial | application-level envelope for secret columns done (see [evidence](evidence/phase-zero-envelope-encryption.md)); platform at-rest, backup/export encryption, and key separation runbooks open |
