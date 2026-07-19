@@ -428,3 +428,209 @@ class OAuthState(Base):
         UniqueConstraint("state_hash", name="uq_oauth_states_state_hash"),
         Index("ix_oauth_states_expires_at", "expires_at"),
     )
+
+
+class SyncRun(Base):
+    """One fetch execution against a connection."""
+
+    __tablename__ = "sync_runs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    connection_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("connections.id", ondelete="CASCADE"), nullable=False
+    )
+    trigger: Mapped[str] = mapped_column(Text, nullable=False)
+    stream: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[str] = mapped_column(Text, nullable=False)
+    finished_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_class: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stats_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "trigger IN ('schedule', 'webhook', 'manual', 'reconcile', 'initial')",
+            name="sync_run_trigger",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed', 'partial')",
+            name="sync_run_status",
+        ),
+        CheckConstraint(
+            "stats_json IS NULL OR json_valid(stats_json)",
+            name="sync_run_stats_json_valid",
+        ),
+        Index("ix_sync_runs_connection_started_at", "connection_id", "started_at"),
+    )
+
+
+class RawPayload(Base):
+    """Exact vendor transport page. Every response body is retained."""
+
+    __tablename__ = "raw_payload"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    connection_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("connections.id", ondelete="CASCADE"), nullable=False
+    )
+    sync_run_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("sync_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    transport_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    stream: Mapped[str] = mapped_column(Text, nullable=False)
+    page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[str] = mapped_column(Text, nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_blob: Mapped[bytes | None] = mapped_column(Blob, nullable=True)
+    request_meta_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "transport_kind IN ('sync_fetch', 'webhook_capture')",
+            name="raw_payload_transport_kind",
+        ),
+        CheckConstraint(
+            "provider IN ('oura', 'google_health', 'polar')",
+            name="raw_payload_provider",
+        ),
+        CheckConstraint(
+            "NOT (payload_json IS NOT NULL AND payload_blob IS NOT NULL)",
+            name="raw_payload_body_exclusive",
+        ),
+        CheckConstraint(
+            "payload_json IS NULL OR json_valid(payload_json)",
+            name="raw_payload_json_valid",
+        ),
+        CheckConstraint(
+            "json_valid(request_meta_json)",
+            name="raw_payload_request_meta_json_valid",
+        ),
+        CheckConstraint("length(content_hash) > 0", name="raw_payload_content_hash_nonempty"),
+        Index("ix_raw_payload_connection_content_hash", "connection_id", "content_hash"),
+        Index("ix_raw_payload_tenant_received_at", "tenant_id", "received_at"),
+    )
+
+
+class SyncCursor(Base):
+    """Per-stream ingestion progress for one connection."""
+
+    __tablename__ = "sync_cursors"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    connection_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("connections.id", ondelete="CASCADE"), nullable=False
+    )
+    stream: Mapped[str] = mapped_column(Text, nullable=False)
+    cursor_type: Mapped[str] = mapped_column(Text, nullable=False)
+    cursor_value: Mapped[str] = mapped_column(Text, nullable=False)
+    window_start: Mapped[str | None] = mapped_column(Text, nullable=True)
+    window_end: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "cursor_type IN ('timestamp', 'page_token', 'resource_id')",
+            name="sync_cursor_type",
+        ),
+        UniqueConstraint("connection_id", "stream", name="uq_sync_cursors_connection_stream"),
+    )
+
+
+class RawObject(Base):
+    """Logical identity of a vendor record."""
+
+    __tablename__ = "raw_objects"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    connection_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("connections.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    stream: Mapped[str] = mapped_column(Text, nullable=False)
+    vendor_record_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # No FK: raw_revisions references raw_objects, so the reverse FK would be
+    # a cycle SQLite cannot satisfy on insert.
+    current_revision_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('oura', 'google_health', 'polar')",
+            name="raw_object_provider",
+        ),
+        UniqueConstraint(
+            "tenant_id", "provider", "stream", "vendor_record_id", name="uq_raw_objects_identity"
+        ),
+    )
+
+
+class RawRevision(Base):
+    """Immutable logical version of a vendor record.
+
+    Append-only: never updated in place. No ``normalizer_version`` here by
+    design; that belongs on facts, not on raw snapshots.
+    """
+
+    __tablename__ = "raw_revisions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    raw_object_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("raw_objects.id", ondelete="CASCADE"), nullable=False
+    )
+    raw_payload_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("raw_payload.id", ondelete="RESTRICT"), nullable=False
+    )
+    sync_run_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("sync_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    revision_n: Mapped[int] = mapped_column(Integer, nullable=False)
+    vendor_record_id: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    effective_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    deletion_state: Mapped[str] = mapped_column(Text, nullable=False)
+    is_tombstone: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    tombstone_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("revision_n >= 1", name="raw_revision_n_pos"),
+        CheckConstraint(
+            "deletion_state IN ('active', 'vendor_deleted', 'privacy_scrubbed')",
+            name="raw_revision_deletion_state",
+        ),
+        CheckConstraint("is_tombstone IN (0, 1)", name="raw_revision_is_tombstone_bool"),
+        CheckConstraint(
+            "tombstone_reason IS NULL OR tombstone_reason IN ('vendor_deleted', 'privacy_delete')",
+            name="raw_revision_tombstone_reason",
+        ),
+        CheckConstraint(
+            "(is_tombstone = 0 AND tombstone_reason IS NULL) OR "
+            "(is_tombstone = 1 AND tombstone_reason IS NOT NULL)",
+            name="raw_revision_tombstone_pair",
+        ),
+        CheckConstraint("length(content_hash) > 0", name="raw_revision_content_hash_nonempty"),
+        UniqueConstraint("raw_object_id", "revision_n", name="uq_raw_revisions_object_n"),
+        Index("ix_raw_revisions_object_content_hash", "raw_object_id", "content_hash"),
+    )

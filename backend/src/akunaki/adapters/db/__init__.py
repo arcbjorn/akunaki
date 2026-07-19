@@ -17,6 +17,11 @@ from akunaki.adapters.db.models import (
     JobLease,
     LeaderLease,
     OAuthState,
+    RawObject,
+    RawPayload,
+    RawRevision,
+    SyncCursor,
+    SyncRun,
     Tenant,
 )
 from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
@@ -35,6 +40,11 @@ __all__ = [
     "LeaderLease",
     "OAuthState",
     "OAuthStateRepository",
+    "RawObject",
+    "RawPayload",
+    "RawRevision",
+    "SyncCursor",
+    "SyncRun",
     "Tenant",
     "create_db_engine",
     "create_session_factory",
