@@ -37,6 +37,9 @@ Legend:
 | Leader lease owner/expiry pair + nonempty name checks | yes | yes | migration `0002` + model agreement |
 | FastAPI app factory + `python -m akunaki.api` | yes | yes | |
 | `GET /healthz` (service, db ready, `models_required=false`) | yes | yes | does not fabricate product health |
+| Internal debug surface (`/internal/debug/sync-status`, `/latest-sleep`) | yes | yes | **unauthenticated**; router not registered unless `AKUNAKI_DEBUG_ROUTES_ENABLED` is set (default off); `private, no-store`; cross-tenant reads are 404 |
+| Phase-one vertical slice (connect → sync → normalize → read in API) | yes | yes | verified end-to-end in a real process against a live HTTP provider |
+| Authenticated `/v1` product surface | no | no | needs sessions; the debug router is an explicit stand-in and must be replaced, not extended |
 | Worker entry `python -m akunaki.worker` runtime | yes | yes | claim loop + SIGINT/SIGTERM cooperative shutdown; JSON logs |
 | Worker runtime (claim → execute → heartbeat → settle) | yes | yes | port-typed in `application`; fake-repository policy tests + file-backed end-to-end tests |
 | Retry classification + exponential backoff policy | yes | yes | transient/permanent/cancelled; capped jitter; min 1s (second-precision lifecycle) |
