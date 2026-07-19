@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, and the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh). Not implemented: product job handlers, HTTP authorize/callback routes, Google Health and Polar clients, and any sync/normalization code.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), and the **OAuth linking service** that wires them into a full authorize→callback flow. Not implemented: product job handlers, HTTP authorize/callback routes (deferred pending auth), Google Health and Polar clients, and any sync/normalization code.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -170,6 +170,23 @@ The raw `state` is **never stored** — only its SHA-256 hash — and the PKCE v
 
 PKCE is **S256** only; `plain` is deliberately unsupported.
 
+### Linking a provider
+
+`OAuthLinkingService` wires the client, state repository, and sealer into one flow:
+
+```python
+redirect = service.start_link(tenant_id=..., redirect_uri=REDIRECT,
+                              scopes=("daily", "personal"), now=now)
+# send the user to redirect.authorize_url ...
+result = service.complete_link(state=state, code=code,
+                               redirect_uri=REDIRECT, now=now)
+result.ok            # LinkedConnection, or a typed LinkRejection
+```
+
+The connection row and its sealed tokens are written in **one transaction**, so an `active` connection always has usable token material — a failed exchange leaves nothing behind. Re-consent reuses the existing `(tenant_id, provider)` row rather than creating a duplicate. `LinkRejection.PROVIDER_REJECTED` (from `invalid_grant`) is **not** retryable and should drive `needs_reauth`; `PROVIDER_UNAVAILABLE` is.
+
+**HTTP routes are deliberately not implemented yet.** `/v1` endpoints need a `tenant_id` from an authenticated session, and auth/OIDC is not built. `tenant_id` is a service parameter, so the routes become a thin layer once sessions exist.
+
 ### Oura OAuth client
 
 `OuraOAuthClient` builds the authorize URL and performs the PKCE token exchange:
@@ -209,6 +226,7 @@ src/akunaki/
   adapters/db/      # engine, models, JobRepository CAS adapter
   adapters/crypto/  # AES-256-GCM envelope sealer, KEK config, OAuth state/PKCE
   adapters/connectors/ # provider OAuth clients (Oura)
+  application/      # + OAuthLinkingService (authorize -> callback -> sealed tokens)
   api/              # FastAPI app factory + /healthz
   worker/           # core worker entrypoint: claim loop + signal shutdown
 alembic/            # migrations 0001 foundation + 0002 leases + 0003 execution lifecycle
