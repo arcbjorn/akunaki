@@ -21,10 +21,12 @@ from akunaki.adapters.db.models import (
     RawObject,
     RawPayload,
     RawRevision,
+    SessionRow,
     SleepSession,
     SyncCursor,
     SyncRun,
     Tenant,
+    User,
 )
 from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
 
@@ -46,10 +48,12 @@ __all__ = [
     "RawObject",
     "RawPayload",
     "RawRevision",
+    "SessionRow",
     "SleepSession",
     "SyncCursor",
     "SyncRun",
     "Tenant",
+    "User",
     "create_db_engine",
     "create_session_factory",
     "probe_database_ready",

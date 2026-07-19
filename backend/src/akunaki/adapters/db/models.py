@@ -829,3 +829,59 @@ class DeletionCompletionProof(Base):
         CheckConstraint("json_valid(scrub_counts_json)", name="deletion_proof_counts_json_valid"),
         UniqueConstraint("deletion_request_id", name="uq_deletion_proofs_request"),
     )
+
+
+class User(Base):
+    """A person, identified by an OIDC issuer/subject pair."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    oidc_issuer: Mapped[str] = mapped_column(Text, nullable=False)
+    oidc_subject: Mapped[str] = mapped_column(Text, nullable=False)
+    # Sensitive PII: never free log material.
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("length(oidc_issuer) > 0", name="user_issuer_nonempty"),
+        CheckConstraint("length(oidc_subject) > 0", name="user_subject_nonempty"),
+        UniqueConstraint("oidc_issuer", "oidc_subject", name="uq_users_issuer_subject"),
+        Index("ix_users_tenant", "tenant_id"),
+    )
+
+
+class SessionRow(Base):
+    """A backend-issued opaque session.
+
+    Named ``SessionRow`` to avoid colliding with SQLAlchemy's ``Session``.
+    Stores hashes only: the raw cookie token and CSRF secret are returned to
+    the caller once at issue time and never persisted.
+    """
+
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    csrf_secret_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[str] = mapped_column(Text, nullable=False)
+    revoked_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("length(token_hash) > 0", name="session_token_hash_nonempty"),
+        CheckConstraint("length(csrf_secret_hash) > 0", name="session_csrf_hash_nonempty"),
+        CheckConstraint("expires_at > created_at", name="session_expiry_after_creation"),
+        UniqueConstraint("token_hash", name="uq_sessions_token_hash"),
+        Index("ix_sessions_user", "user_id"),
+        Index("ix_sessions_expires_at", "expires_at"),
+    )
