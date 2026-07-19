@@ -26,7 +26,7 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts, revision slices, deletion pipeline, users/sessions, login states) | yes | yes (up/down/up through `0012`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Alembic env + migrations (through OIDC login states) | yes | yes (up/down/up through `0012`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
 | Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
 | libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
@@ -39,7 +39,7 @@ Legend:
 | `GET /healthz` (service, db ready, `models_required=false`) | yes | yes | does not fabricate product health |
 | Internal debug surface (`/internal/debug/sync-status`, `/latest-sleep`) | yes | yes | **unauthenticated**; router not registered unless `AKUNAKI_DEBUG_ROUTES_ENABLED` is set (default off); `private, no-store`; cross-tenant reads are 404 |
 | Phase-one vertical slice (connect → sync → normalize → read in API) | yes | yes | verified end-to-end in a real process against a live HTTP provider |
-| Authenticated `/v1` product surface | no | no | session **storage** exists; still needs the OIDC handshake and cookie/CSRF wiring. The debug router is an explicit stand-in and must be replaced, not extended |
+| Authenticated `/v1` product surface | partial | partial | login + `/v1/session` reachable; product day-surfaces (`/v1/today`, recovery, sleep) are the phase-two build. The debug router remains a stand-in to be replaced |
 | Worker entry `python -m akunaki.worker` runtime | yes | yes | claim loop + SIGINT/SIGTERM cooperative shutdown; JSON logs |
 | Worker runtime (claim → execute → heartbeat → settle) | yes | yes | port-typed in `application`; fake-repository policy tests + file-backed end-to-end tests |
 | Retry classification + exponential backoff policy | yes | yes | transient/permanent/cancelled; capped jitter; min 1s (second-precision lifecycle) |
@@ -55,7 +55,8 @@ Legend:
 | OIDC login state (`login_states`: hashed `state` + `nonce`, sealed PKCE verifier) | yes | yes | migration `0012`; separate from `oauth_states` because login has **no tenant yet** and needs a nonce; single-use, expiring, exact redirect match |
 | `id_token` claim validation (iss, aud, nonce, exp/nbf/iat, sub) | yes | yes | pure and clock-injected; 60s skew tolerance; rejected tokens never yield an identity; email redacted in `repr` |
 | OIDC client (discovery, authorize URL, token exchange, JWKS signature verification) | yes | yes | PyJWT against the issuer's JWKS; **asymmetric algs only** (HS256 refused — alg-confusion closed); real-HTTP verified; secrets never logged |
-| OIDC login flow wiring (user upsert + session issue + `/auth/login`, `/auth/callback` routes) | no | no | client + login state + claim validation all exist; the routes that call them and upsert the user are the last piece before login works |
+| OIDC login flow (`/auth/login`, `/auth/callback`, user upsert, session issue) | yes | yes | port-typed service; state sealed before redirect, single-use consume, verify-before-session; first login provisions tenant+user; end-to-end verified against a real HTTP IdP through to an authenticated `/v1` request |
+| User provisioning (one user per tenant, MVP) | yes | yes | keyed by `(oidc_issuer, oidc_subject)`; first login provisions tenant + user atomically; email refreshed but never used as identity |
 | Session cookie wiring + CSRF enforcement | yes | yes | `Secure`/`HttpOnly`/`SameSite=Lax`; CSRF required on POST/PUT/PATCH/DELETE; one generic 401 so unknown/expired/revoked are indistinguishable |
 | `GET /v1/session`, `POST /v1/session/logout` | yes | yes | tenant comes from the validated session, never a request parameter; logout revokes server-side **and** clears the cookie |
 | Connectors (Oura, Google Health, Polar) | partial | partial | Oura OAuth, fetch, initial sync, and sleep normalization ship; no webhooks or incremental sync; Google Health and Polar not started |
