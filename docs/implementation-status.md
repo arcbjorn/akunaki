@@ -1,6 +1,6 @@
 # Implementation status
 
-**Last updated:** 2026-07-18
+**Last updated:** 2026-07-19
 
 Honest truth table for what exists in this repository. Prefer this page over roadmap marketing language when asking “is it built?”
 
@@ -45,9 +45,11 @@ Legend:
 | Leader-gated reaper tick (requeue expired / dead-letter exhausted) | yes | yes | standby never reaps without the `core-reaper` leader lease |
 | Core-only / no model SDKs | yes | yes | import-linter + tests |
 | Ruff / mypy / import-linter / pytest / pip-audit gates | yes | yes | see evidence docs |
+| CI workflow (GitHub Actions) | yes | yes | four jobs: quality, migrations up/down/up on an ephemeral DB, core-only boot with models disabled, advisory `pip-audit`; every step verified locally before commit |
+| Core-only boot proven without dev deps | yes | yes | CI installs with `--no-dev` and asserts no model SDK is importable, then boots API + worker with no `MODEL_*` config |
 | Frontend / web | no | no | deferred |
 | Auth / OIDC / sessions product | no | no | deferred |
-| Connectors (Oura, Google Health, Polar) | partial | partial | Oura **OAuth client** done; no sync, fetch, webhook, or normalization code for any provider |
+| Connectors (Oura, Google Health, Polar) | partial | partial | Oura OAuth, fetch, initial sync, and sleep normalization ship; no webhooks or incremental sync; Google Health and Polar not started |
 | Agent / model packages | no | no | forbidden in core |
 | Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, OAuth state, sync transport, and the **sleep** fact slice exist; `webhook_inbox`, other detail tables, source selection, and scores pending |
 | Envelope encryption (AES-256-GCM, KEK/DEK, rotation, AAD binding) | yes | yes | fresh DEK+nonces per seal; versioned KEK registry; fail-fast boot without keys; mutation-checked randomness |
