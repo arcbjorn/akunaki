@@ -94,7 +94,9 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260719_0007   # drop per-record slice body
+uv run alembic downgrade 20260719_0009   # revert tenant-scoped fact indexes
+uv run alembic downgrade 20260719_0008   # also drop deletion pipeline
+uv run alembic downgrade 20260719_0007   # also drop per-record slice body
 uv run alembic downgrade 20260719_0006   # also drop sleep fact schema
 uv run alembic downgrade 20260718_0005   # also drop sync transport schema
 uv run alembic downgrade 20260718_0004   # also drop oauth state schema
@@ -116,6 +118,8 @@ uv run alembic current
 | `20260719_0006` | `sync_runs`, `raw_payload`, `sync_cursors`, `raw_objects`, `raw_revisions` |
 | `20260719_0007` | `fact_records`, `sleep_sessions` (sleep slice only) |
 | `20260719_0008` | `raw_revisions.slice_json` (per-record body) |
+| `20260719_0009` | `deletion_requests`, `deletion_completion_proofs` |
+| `20260719_0010` | tenant-scoped fact identity indexes |
 
 ### Sync transport layer (`0006`)
 
@@ -188,6 +192,21 @@ Enqueued automatically by a successful sync commit, keyed by `raw_revision_id`. 
 | Missing revision, malformed payload, unparseable body | **Dead-letter** — none of these fix themselves on retry |
 | Tombstone revision | Skipped (vendor deletions use the deletion path, not a fabricated fact) |
 | Success | Facts written; identical content writes no new version |
+
+### Privacy deletion (`0009`)
+
+The phase-one **stub**: cancel the tenant's work, scrub its rows, write a minimal proof.
+
+Ordering is a **safety property**, not bookkeeping — jobs are cancelled first, in their own committed transaction, so no in-flight sync can re-insert rows the scrub is about to delete. The state machine rejects skipping a stage:
+
+```
+requested -> jobs_cancelled -> rows_scrubbed -> backups_scheduled -> completed
+                    (any stage may transition to failed)
+```
+
+`deletion_requests` deliberately has **no FK to `tenants`** — the request must outlive the tenant it scrubs, or completing a deletion would erase its own audit trail. The completion proof stores **counts only**: no tenant id, no display name, no health values.
+
+**Not built:** the restoration-suppression ledger (needs a dedicated deletion key with access separation — an empty table would imply a guarantee the system cannot make), and actual backup expiry (no backup provider is wired; the pipeline records the stage only).
 
 ### Local driver limitation: BLOB binding
 
