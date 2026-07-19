@@ -30,6 +30,7 @@ from akunaki.adapters.db.models import Connection, RawPayload, RawRevision, Sync
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.sync_handlers import (
     INITIAL_SYNC_JOB_TYPE,
+    NORMALIZE_JOB_TYPE,
     InitialSyncHandler,
     SyncConfig,
 )
@@ -234,15 +235,22 @@ def test_rerunning_the_same_sync_is_idempotent(factory: sessionmaker[Session]) -
         payload_json='{"connection_id":"conn-1"}',
         now=T0,
     )
-    JobWorker(
+    # The first sync also enqueued a raw.normalize job, so drain until the
+    # second sync job has actually run.
+    worker = JobWorker(
         repository,
         owner="worker-2",
         config=WorkerConfig(lease_ttl=timedelta(seconds=60)),
-        registry=HandlerRegistry({INITIAL_SYNC_JOB_TYPE: handler}),
+        registry=HandlerRegistry(
+            {INITIAL_SYNC_JOB_TYPE: handler, NORMALIZE_JOB_TYPE: lambda _claim: None}
+        ),
         clock=lambda: T0,
         sleep=lambda _s: None,
         jitter=lambda: 0.0,
-    ).run_once()
+    )
+    for _ in range(4):
+        if not worker.run_once():
+            break
 
     with factory() as session:
         payloads = session.scalars(select(RawPayload)).all()
