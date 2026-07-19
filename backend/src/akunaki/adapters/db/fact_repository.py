@@ -57,6 +57,9 @@ class FactRepository:
         with self._session_factory() as session, session.begin():
             current = session.execute(
                 select(FactRecord).where(
+                    # Tenant-scoped: the same vendor record id can legitimately
+                    # appear for two tenants and must never collide.
+                    FactRecord.tenant_id == tenant_id,
                     FactRecord.fact_key == fact.fact_key,
                     FactRecord.is_current == 1,
                 )

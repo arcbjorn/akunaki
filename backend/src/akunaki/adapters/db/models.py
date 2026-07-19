@@ -721,12 +721,20 @@ class FactRecord(Base):
             "local_health_day IS NULL OR length(local_health_day) = 10",
             name="fact_local_day_format",
         ),
-        UniqueConstraint("fact_key", "version_n", name="uq_fact_records_key_version"),
+        # Tenant-scoped: a vendor record id is only unique within a tenant.
         Index(
             "ux_fact_records_current",
+            "tenant_id",
             "fact_key",
             unique=True,
             sqlite_where=text("is_current = 1"),
+        ),
+        Index(
+            "ux_fact_records_tenant_key_version",
+            "tenant_id",
+            "fact_key",
+            "version_n",
+            unique=True,
         ),
         Index(
             "ix_fact_records_day_lookup",
@@ -766,4 +774,58 @@ class SleepSession(Base):
             "efficiency_pct IS NULL OR (efficiency_pct >= 0 AND efficiency_pct <= 100)",
             name="sleep_session_efficiency_range",
         ),
+    )
+
+
+class DeletionRequest(Base):
+    """Privacy deletion pipeline state for one tenant.
+
+    Deliberately has **no** FK to ``tenants``: the request must outlive the
+    tenant row it scrubs, or completing a deletion would erase its own audit
+    trail.
+    """
+
+    __tablename__ = "deletion_requests"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_at: Mapped[str] = mapped_column(Text, nullable=False)
+    jobs_cancelled_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rows_scrubbed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    backups_scheduled_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_class: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('requested', 'jobs_cancelled', 'rows_scrubbed', "
+            "'backups_scheduled', 'completed', 'failed')",
+            name="deletion_request_status",
+        ),
+        UniqueConstraint("tenant_id", "requested_at", name="uq_deletion_requests_tenant_time"),
+        Index("ix_deletion_requests_status", "status", "requested_at"),
+    )
+
+
+class DeletionCompletionProof(Base):
+    """Minimal, non-identifying proof that a deletion completed.
+
+    Counts only: no tenant id, no identity, no health values.
+    """
+
+    __tablename__ = "deletion_completion_proofs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    deletion_request_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("deletion_requests.id", ondelete="CASCADE"), nullable=False
+    )
+    completed_at: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    scrub_counts_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('completed', 'partial')", name="deletion_proof_status"),
+        CheckConstraint("json_valid(scrub_counts_json)", name="deletion_proof_counts_json_valid"),
+        UniqueConstraint("deletion_request_id", name="uq_deletion_proofs_request"),
     )

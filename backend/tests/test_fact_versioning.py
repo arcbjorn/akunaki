@@ -328,3 +328,47 @@ def test_current_facts_query_returns_only_current(
         tenant_id="tenant-1", local_health_day="2026-07-19"
     )
     assert len(ids) == 1
+
+
+def test_same_vendor_id_across_tenants_does_not_collide(
+    factory: sessionmaker[Session],
+) -> None:
+    """A vendor record id is unique only *within* a tenant.
+
+    Regression: the one-current index was originally keyed on ``fact_key``
+    alone, so a second tenant's fact was treated as a new version of the
+    first tenant's and its data was never stored.
+    """
+    with factory() as session, session.begin():
+        session.add(
+            Tenant(
+                id="tenant-2",
+                created_at=NOW_S,
+                status="active",
+                primary_timezone="UTC",
+                display_name="Other",
+            )
+        )
+
+    fact = _fact()
+    repository = FactRepository(factory)
+    for tenant_id in ("tenant-1", "tenant-2"):
+        repository.write_sleep_fact(
+            fact_record_id=f"fact-{tenant_id}",
+            tenant_id=tenant_id,
+            connection_id=None,
+            fact=fact,
+            raw_revision_id=None,
+            raw_payload_id=None,
+            schema_version="oura.v2",
+            now=T0,
+        )
+
+    with factory() as session:
+        records = session.scalars(select(FactRecord)).all()
+
+    # Two independent facts, each current for its own tenant.
+    assert len(records) == 2
+    assert {r.tenant_id for r in records} == {"tenant-1", "tenant-2"}
+    assert all(r.is_current == 1 for r in records)
+    assert all(r.version_n == 1 for r in records)
