@@ -41,16 +41,25 @@ def install_signal_handlers(stop_event: threading.Event) -> None:
         signal.signal(sig, _request_stop)
 
 
+def configure_logging() -> None:
+    """Install process-wide structured logging.
+
+    Called from :func:`main` only. ``run_worker`` deliberately does **not**
+    configure logging: it is imported by tests and other callers, and a
+    ``basicConfig`` there mutates the root logger for the whole process.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
+    )
+
+
 def run_worker(*, stop_event: threading.Event | None = None) -> int:
     """Boot core wiring and run the durable job claim loop.
 
     Returns the process exit code (0 on clean shutdown, 1 when the database is
     not ready at boot).
     """
-    logging.basicConfig(
-        level=logging.INFO,
-        format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
-    )
     settings = get_settings()
     engine = create_db_engine(settings)
     try:
@@ -86,6 +95,7 @@ def run_worker(*, stop_event: threading.Event | None = None) -> int:
 
 def main() -> None:
     """Process entry."""
+    configure_logging()
     raise SystemExit(run_worker())
 
 
