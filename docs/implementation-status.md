@@ -26,7 +26,7 @@ Legend:
 | SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
-| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts, revision slices, deletion pipeline, users/sessions) | yes | yes (up/down/up through `0011`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
+| Alembic env + migrations (`tenants`, `jobs`, leases, attempts, dead letters, connections, oauth states, sync transport, sleep facts, revision slices, deletion pipeline, users/sessions, login states) | yes | yes (up/down/up through `0012`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |
 | Connection lifecycle schema (`connections`, `connection_secrets`, `connection_health`) | yes | yes | migration `0004`; one connection per provider per tenant; provider/status vocabularies; ciphertext-only token storage; cascade delete |
 | libSQL-compatible `Blob` column type | yes | yes | driver exposes no DBAPI `Binary`, so stock `LargeBinary` cannot bind — see Turso evidence note 4 |
 | ORM models agree with migration (columns/FKs/indexes) | yes | yes | IDs caller-supplied TEXT; no UUIDv7 helper |
@@ -52,7 +52,9 @@ Legend:
 | Core-only boot proven without dev deps | yes | yes | CI installs with `--no-dev` and asserts no model SDK is importable, then boots API + worker with no `MODEL_*` config |
 | Frontend / web | no | no | deferred |
 | Session layer (`users`, `sessions`: issue, validate, rotate, revoke, purge) | yes | yes | migration `0011`; **hash-only** storage of cookie token and CSRF secret; expiry + revocation enforced; rotation revokes the predecessor |
-| OIDC handshake (authorize, callback, token/nonce validation) | no | no | **unblocked**: IdP decided (self-hosted Authelia, 2026-07-19). Still to build: discovery, PKCE, `state`/`nonce`, JWKS validation, and user upsert. No way to *create* a session until then |
+| OIDC login state (`login_states`: hashed `state` + `nonce`, sealed PKCE verifier) | yes | yes | migration `0012`; separate from `oauth_states` because login has **no tenant yet** and needs a nonce; single-use, expiring, exact redirect match |
+| `id_token` claim validation (iss, aud, nonce, exp/nbf/iat, sub) | yes | yes | pure and clock-injected; 60s skew tolerance; rejected tokens never yield an identity; email redacted in `repr` |
+| OIDC HTTP legs (discovery, JWKS signature verification, token exchange, user upsert) | no | no | **the remaining gap**: claim validation assumes the signature was already checked. No discovery fetch, no JWKS client, no `/auth/login` or `/auth/callback` routes, so a session still cannot be created |
 | Session cookie wiring + CSRF enforcement | yes | yes | `Secure`/`HttpOnly`/`SameSite=Lax`; CSRF required on POST/PUT/PATCH/DELETE; one generic 401 so unknown/expired/revoked are indistinguishable |
 | `GET /v1/session`, `POST /v1/session/logout` | yes | yes | tenant comes from the validated session, never a request parameter; logout revokes server-side **and** clears the cookie |
 | Connectors (Oura, Google Health, Polar) | partial | partial | Oura OAuth, fetch, initial sync, and sleep normalization ship; no webhooks or incremental sync; Google Health and Polar not started |
