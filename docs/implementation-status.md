@@ -47,14 +47,16 @@ Legend:
 | Ruff / mypy / import-linter / pytest / pip-audit gates | yes | yes | see evidence docs |
 | Frontend / web | no | no | deferred |
 | Auth / OIDC / sessions product | no | no | deferred |
-| Connectors (Oura, Google Health, Polar) | no | no | connection schema + OAuth state/PKCE primitives exist; no provider HTTP client, sync, or normalization code |
+| Connectors (Oura, Google Health, Polar) | partial | partial | Oura **OAuth client** done; no sync, fetch, webhook, or normalization code for any provider |
 | Agent / model packages | no | no | forbidden in core |
 | Full data-model schema | no | no | tenants, durable-job lifecycle, connection lifecycle, and OAuth state tables exist; raw/sync transport, facts, and scores pending |
 | Envelope encryption (AES-256-GCM, KEK/DEK, rotation, AAD binding) | yes | yes | fresh DEK+nonces per seal; versioned KEK registry; fail-fast boot without keys; mutation-checked randomness |
 | Sealed tokens persisted to `connection_secrets` | yes | yes | raw column holds no readable token; envelope bound to its connection; cascade delete |
 | KEK sourcing from external KMS / secret manager | no | no | keys load from `AKUNAKI_SECRET_KEKS` only; no KMS client, rotation runbook, or key-use audit |
 | OAuth state / PKCE handshake primitives (`oauth_states`) | yes | yes | migration `0005`; hashed state only, sealed PKCE verifier, exact redirect match, single-use + expiry, purge sweep |
-| OAuth HTTP legs (authorize/callback endpoints, token exchange, refresh) | no | no | handshake primitives exist; **no** provider client, HTTP routes, or token acquisition |
+| Oura OAuth client (authorize URL, PKCE code exchange, refresh) | yes | yes | S256 only; typed failure vocabulary (`invalid_grant` → reauth vs retryable); secrets never logged; mock-transport + real-HTTP verified |
+| OAuth HTTP routes (authorize/callback endpoints) | no | no | client + state primitives exist; **no** FastAPI routes, session binding, or connection-status transitions |
+| Google Health / Polar OAuth clients | no | no | only Oura implemented; both gated on unstarted phase-zero spikes |
 | Concurrent worker runtimes (exactly-once execution, single leader, stolen-lease safety) | yes | yes | bounded local stress: 3 workers/24 jobs, 4 contending reapers, independent engines |
 | Sustained multi-process fleet under production load | no | no | in-process threads with independent engines only; no long-running or cross-host soak |
 | Product job handlers (connectors, normalization, scoring) | no | no | only `system.noop` exists; registry is ready for them |
