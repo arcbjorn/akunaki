@@ -30,6 +30,8 @@ from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import (
     FactRecord,
     Job,
+    RawObject,
+    RawPayload,
     RawRevision,
     SleepSession,
     Tenant,
@@ -375,3 +377,109 @@ def test_tombstone_revision_is_skipped_not_normalized(
     assert worker.stats.dead_lettered == 0
     with factory() as session:
         assert session.scalars(select(FactRecord)).all() == []
+
+
+# ---------------------------------------------------------------------------
+# Per-record raw identity
+# ---------------------------------------------------------------------------
+
+
+TWO_SESSIONS = json.dumps(
+    {
+        "data": [
+            {
+                "id": "night-1",
+                "bedtime_start": "2026-07-18T23:00:00+02:00",
+                "bedtime_end": "2026-07-19T07:00:00+02:00",
+                "total_sleep_duration": 27000,
+                "type": "long_sleep",
+            },
+            {
+                "id": "nap-1",
+                "bedtime_start": "2026-07-19T14:00:00+02:00",
+                "bedtime_end": "2026-07-19T14:40:00+02:00",
+                "total_sleep_duration": 2400,
+                "type": "nap",
+            },
+        ],
+        "next_token": None,
+    }
+)
+
+
+def test_one_page_yields_one_object_per_record(factory: sessionmaker[Session]) -> None:
+    """Raw identity is per record, not per response page."""
+    _start_sync(factory)
+    _drain(factory, _registry(factory, _ok(TWO_SESSIONS)))
+
+    with factory() as session:
+        objects = session.scalars(select(RawObject)).all()
+        revisions = session.scalars(select(RawRevision)).all()
+        payloads = session.scalars(select(RawPayload)).all()
+
+    # One transport page retained...
+    assert len(payloads) == 1
+    # ...split into two logical records.
+    assert {o.vendor_record_id for o in objects} == {"sleep:night-1", "sleep:nap-1"}
+    assert len(revisions) == 2
+
+
+def test_each_revision_carries_only_its_own_record(
+    factory: sessionmaker[Session],
+) -> None:
+    """A normalize job must not re-parse the whole page."""
+    _start_sync(factory)
+    _drain(factory, _registry(factory, _ok(TWO_SESSIONS)))
+
+    reader = RevisionReader(factory)
+    with factory() as session:
+        revisions = session.scalars(select(RawRevision)).all()
+        bodies = {
+            revision.vendor_record_id: reader.get_revision(revision_id=revision.id)
+            for revision in revisions
+        }
+
+    for vendor_id, body in bodies.items():
+        assert body is not None
+        parsed = json.loads(body.payload_text)
+        assert "data" not in parsed, "page envelope leaked into a record slice"
+        assert vendor_id.endswith(parsed["id"])
+
+
+def test_correcting_one_night_does_not_revision_the_other(
+    factory: sessionmaker[Session],
+) -> None:
+    """Per-record identity means a correction is surgically scoped."""
+    _start_sync(factory, job_id="sync-1")
+    _drain(factory, _registry(factory, _ok(TWO_SESSIONS)))
+
+    corrected = TWO_SESSIONS.replace(
+        '"total_sleep_duration": 27000', '"total_sleep_duration": 28800'
+    )
+    _start_sync(factory, job_id="sync-2")
+    _drain(factory, _registry(factory, _ok(corrected)))
+
+    with factory() as session:
+        by_record: dict[str, int] = {}
+        for revision in session.scalars(select(RawRevision)).all():
+            by_record[revision.vendor_record_id] = by_record.get(revision.vendor_record_id, 0) + 1
+
+    # The corrected night gains a revision; the untouched nap does not.
+    assert by_record["sleep:night-1"] == 2
+    assert by_record["sleep:nap-1"] == 1
+
+
+def test_both_records_produce_independent_facts(
+    factory: sessionmaker[Session],
+) -> None:
+    _start_sync(factory)
+    _drain(factory, _registry(factory, _ok(TWO_SESSIONS)))
+
+    with factory() as session:
+        facts = session.scalars(select(FactRecord)).all()
+
+    assert {f.fact_key for f in facts} == {
+        "sleep_session:night-1",
+        "sleep_session:nap-1",
+    }
+    assert all(f.is_current == 1 for f in facts)
