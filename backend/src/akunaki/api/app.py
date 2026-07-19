@@ -47,6 +47,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.probe_database_ready = lambda: probe_database_ready(engine)
 
     app.include_router(health_router)
+
+    if resolved.debug_routes_enabled:
+        # Imported lazily so the unauthenticated router cannot be reached at
+        # all — not even as a registered-but-guarded path — unless explicitly
+        # enabled. It serves tenant health data with no session check.
+        from akunaki.api.routes.debug import router as debug_router
+
+        app.include_router(debug_router)
+
     return app
 
 
