@@ -239,7 +239,17 @@ sessions.rotate(old_token=..., new_session_id=..., now=now)  # revokes the prede
 
 `validate` returns a typed `SessionRejection` (`not_found` / `expired` / `revoked`) so callers surface one generic `401` without revealing which check failed. Rotation issues the successor **before** revoking the old session, so a crash between the two leaves the user logged in rather than stranded.
 
-**Not built:** the OIDC handshake itself (authorize, callback, nonce/token validation) is blocked on the final IdP choice — roadmap open decision 1 — and route-level cookie/CSRF wiring does not exist yet. This revision is the storage those flows will write to.
+Cookie and CSRF enforcement live in `akunaki.api.security`:
+
+| Rule | Behavior |
+|------|----------|
+| Cookie | `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/` — Lax rather than Strict so an IdP redirect back to us still carries the cookie |
+| CSRF | Required on `POST`/`PUT`/`PATCH`/`DELETE` via `X-Akunaki-CSRF`, checked against the session's own secret; a **403**, since the caller is authenticated but the request is not attributable |
+| Rejections | One generic `401` for unknown / expired / revoked, so valid tokens cannot be enumerated |
+| Tenant | Taken from the validated session, never from a request parameter |
+| Logout | Server-side revoke **and** cookie clear; clearing alone would leave a captured token usable |
+
+**Not built:** the OIDC handshake itself (discovery, PKCE, `state`/`nonce`, JWKS validation, user upsert). The IdP is decided — **self-hosted Authelia** — but until the handshake exists there is no way to *create* a session, so `/v1` has no login path.
 
 ### Local driver limitation: BLOB binding
 
