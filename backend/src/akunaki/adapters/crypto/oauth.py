@@ -37,6 +37,16 @@ def generate_state() -> str:
     return _b64url(secrets.token_bytes(_STATE_ENTROPY_BYTES))
 
 
+def generate_nonce() -> str:
+    """Return a fresh OIDC ``nonce``.
+
+    Distinct from ``state``: ``state`` protects the redirect against CSRF,
+    while ``nonce`` is echoed inside the ``id_token`` and binds that token to
+    this specific authorization request.
+    """
+    return _b64url(secrets.token_bytes(_STATE_ENTROPY_BYTES))
+
+
 def generate_code_verifier() -> str:
     """Return a fresh PKCE ``code_verifier`` (RFC 7636 length range)."""
     return _b64url(secrets.token_bytes(_VERIFIER_ENTROPY_BYTES))
