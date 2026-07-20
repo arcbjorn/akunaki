@@ -17,7 +17,12 @@ from __future__ import annotations
 from typing import Protocol
 
 from akunaki.domain.baseline import MetricFamily, baseline_window_days
-from akunaki.domain.recovery import DEFAULT_SLEEP_TARGET_MIN, ComponentCode, RecoveryComponent
+from akunaki.domain.recovery import (
+    DEFAULT_SLEEP_TARGET_MIN,
+    ComponentCode,
+    Direction,
+    RecoveryComponent,
+)
 from akunaki.domain.recovery_components import (
     BaselineInput,
     map_baseline_component,
@@ -50,6 +55,12 @@ class FeatureSource(Protocol):
 
     def daily_resting_hr(self, *, tenant_id: str, local_health_days: list[str]) -> dict[str, float]:
         """Overnight resting HR (bpm) per day where it is known."""
+        ...
+
+    def daily_temperature_deviation(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
+        """Overnight temperature deviation (°C) per day where it is known."""
         ...
 
 
@@ -95,7 +106,7 @@ class RecoveryInputService:
             local_health_day=local_health_day,
             window=window,
             family=MetricFamily.OTHER,
-            direction=1.0,
+            direction=Direction.HIGHER_BETTER,
         )
         self._add_baseline_component(
             components,
@@ -104,7 +115,7 @@ class RecoveryInputService:
             local_health_day=local_health_day,
             window=window,
             family=MetricFamily.HRV,
-            direction=1.0,  # higher HRV is better recovery
+            direction=Direction.HIGHER_BETTER,
         )
         self._add_baseline_component(
             components,
@@ -113,7 +124,19 @@ class RecoveryInputService:
             local_health_day=local_health_day,
             window=window,
             family=MetricFamily.RHR,
-            direction=-1.0,  # lower resting HR is better recovery
+            direction=Direction.LOWER_BETTER,
+        )
+        self._add_baseline_component(
+            components,
+            code=ComponentCode.TEMPERATURE,
+            series=self._features.daily_temperature_deviation(
+                tenant_id=tenant_id, local_health_days=span
+            ),
+            local_health_day=local_health_day,
+            window=window,
+            family=MetricFamily.TEMPERATURE,
+            # Any deviation from baseline, in either direction, is worse.
+            direction=Direction.DEVIATION_WORSE,
         )
 
         return components
@@ -127,7 +150,7 @@ class RecoveryInputService:
         local_health_day: str,
         window: list[str],
         family: MetricFamily,
-        direction: float,
+        direction: Direction,
     ) -> None:
         """Append a baseline component when today's value and a baseline exist."""
         today = series.get(local_health_day)

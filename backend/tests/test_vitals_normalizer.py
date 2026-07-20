@@ -74,6 +74,36 @@ def test_only_rhr_present_is_medium_quality() -> None:
     assert facts[0].quality == "medium"
 
 
+def test_flat_temperature_deviation_is_extracted() -> None:
+    facts = normalize_vitals_payload(_page(_record(temperature_deviation=-0.3)))
+    assert facts[0].temperature_deviation_c == pytest.approx(-0.3)
+    # HRV, RHR, and temp all present -> high quality.
+    assert facts[0].quality == "high"
+
+
+def test_nested_readiness_temperature_is_extracted() -> None:
+    facts = normalize_vitals_payload(_page(_record(readiness={"temperature_deviation": 0.42})))
+    assert facts[0].temperature_deviation_c == pytest.approx(0.42)
+
+
+def test_temperature_only_record_is_kept() -> None:
+    # No HRV/RHR but a temperature reading: still a valid vitals fact.
+    facts = normalize_vitals_payload(
+        _page(_record(average_hrv=None, lowest_heart_rate=None, temperature_deviation=-0.5))
+    )
+    assert len(facts) == 1
+    assert facts[0].temperature_deviation_c == pytest.approx(-0.5)
+    assert facts[0].hrv_ms is None
+    assert facts[0].quality == "medium"  # only one signal present
+
+
+def test_out_of_range_temperature_is_dropped() -> None:
+    facts = normalize_vitals_payload(_page(_record(temperature_deviation=99.0)))
+    assert facts[0].temperature_deviation_c is None
+    # HRV and RHR remain.
+    assert facts[0].hrv_ms == 62.0
+
+
 # ---------------------------------------------------------------------------
 # Skipping
 # ---------------------------------------------------------------------------

@@ -263,6 +263,7 @@ def _seed_vitals(
     fact_id: str,
     hrv_ms: float | None = 60.0,
     resting_hr_bpm: float | None = 50.0,
+    temperature_deviation_c: float | None = None,
 ) -> None:
     with factory() as session, session.begin():
         session.add(
@@ -306,8 +307,35 @@ def _seed_vitals(
                 tenant_id="tenant-1",
                 hrv_ms=hrv_ms,
                 resting_hr_bpm=resting_hr_bpm,
+                temperature_deviation_c=temperature_deviation_c,
             )
         )
+
+
+def test_temperature_component_appears_with_mature_baseline(
+    factory: sessionmaker[Session],
+) -> None:
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}", temperature_deviation_c=0.0)
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="tv", temperature_deviation_c=0.6)
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    codes = {c.code for c in components}
+    assert ComponentCode.TEMPERATURE in codes
+    # A departure from a flat baseline lowers the temperature component below 50.
+    temp = next(c for c in components if c.code is ComponentCode.TEMPERATURE)
+    assert temp.c < 50.0
+
+
+def test_temperature_query_omits_days_with_no_reading(factory: sessionmaker[Session]) -> None:
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="v1", temperature_deviation_c=None)
+    temps = FactRepository(factory).daily_temperature_deviation(
+        tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+    )
+    assert TARGET_DAY not in temps
 
 
 def test_hrv_query_omits_days_with_no_reading(factory: sessionmaker[Session]) -> None:

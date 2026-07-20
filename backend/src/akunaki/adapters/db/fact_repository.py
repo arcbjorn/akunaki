@@ -253,6 +253,7 @@ class FactRepository:
                     tenant_id=tenant_id,
                     hrv_ms=fact.hrv_ms,
                     resting_hr_bpm=fact.resting_hr_bpm,
+                    temperature_deviation_c=fact.temperature_deviation_c,
                 )
             )
 
@@ -381,6 +382,19 @@ class FactRepository:
             tenant_id=tenant_id,
             local_health_days=local_health_days,
             column=OvernightVitals.resting_hr_bpm,
+        )
+
+    def daily_temperature_deviation(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, float]:
+        """Overnight temperature deviation (°C) per local day; omit days with none."""
+        return self._daily_vital(
+            tenant_id=tenant_id,
+            local_health_days=local_health_days,
+            column=OvernightVitals.temperature_deviation_c,
         )
 
     def _daily_vital(

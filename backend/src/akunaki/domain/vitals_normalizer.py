@@ -33,6 +33,10 @@ NAP_MAX_MINUTES = 180.0
 _HRV_MAX_MS = 500.0
 _RHR_MIN_BPM = 20.0
 _RHR_MAX_BPM = 200.0
+# Temperature deviation is already relative to the user's own baseline; a
+# plausible overnight departure is well within a few degrees Celsius.
+_TEMP_DEV_MIN_C = -5.0
+_TEMP_DEV_MAX_C = 5.0
 
 
 class NormalizationError(Exception):
@@ -50,6 +54,7 @@ class VitalsFact:
     source_offset_minutes: int | None
     hrv_ms: float | None
     resting_hr_bpm: float | None
+    temperature_deviation_c: float | None
     quality: str
     confidence: float
     content_hash: str
@@ -123,13 +128,16 @@ def _normalize_record(record: dict[str, Any]) -> VitalsFact | None:
 
     hrv_ms = _bounded(record.get("average_hrv"), low=0.0, high=_HRV_MAX_MS)
     resting_hr_bpm = _bounded(record.get("lowest_heart_rate"), low=_RHR_MIN_BPM, high=_RHR_MAX_BPM)
-    if hrv_ms is None and resting_hr_bpm is None:
+    temperature_deviation_c = _bounded(
+        _temperature_deviation(record), low=_TEMP_DEV_MIN_C, high=_TEMP_DEV_MAX_C
+    )
+    if hrv_ms is None and resting_hr_bpm is None and temperature_deviation_c is None:
         # No overnight signal on this record; nothing to persist.
         return None
 
     offset_minutes = _offset_minutes(bedtime_end)
     local_day = _wake_local_date(end, offset_minutes)
-    quality, confidence = _quality_for(hrv=hrv_ms, rhr=resting_hr_bpm)
+    quality, confidence = _quality_for(hrv=hrv_ms, rhr=resting_hr_bpm, temp=temperature_deviation_c)
 
     fact = VitalsFact(
         vendor_record_id=vendor_id,
@@ -139,11 +147,27 @@ def _normalize_record(record: dict[str, Any]) -> VitalsFact | None:
         source_offset_minutes=offset_minutes,
         hrv_ms=hrv_ms,
         resting_hr_bpm=resting_hr_bpm,
+        temperature_deviation_c=temperature_deviation_c,
         quality=quality,
         confidence=confidence,
         content_hash="",
     )
     return _with_content_hash(fact)
+
+
+def _temperature_deviation(record: dict[str, Any]) -> object:
+    """Read the temperature deviation from either the flat or nested field.
+
+    Oura reports it under ``readiness.temperature_deviation`` on the daily
+    readiness object, but a per-record slice may carry it flat.
+    """
+    flat = record.get("temperature_deviation")
+    if flat is not None:
+        return flat
+    readiness = record.get("readiness")
+    if isinstance(readiness, dict):
+        return readiness.get("temperature_deviation")
+    return None
 
 
 def _with_content_hash(fact: VitalsFact) -> VitalsFact:
@@ -156,6 +180,7 @@ def _with_content_hash(fact: VitalsFact) -> VitalsFact:
             "local_health_day": fact.local_health_day,
             "hrv_ms": fact.hrv_ms,
             "resting_hr_bpm": fact.resting_hr_bpm,
+            "temperature_deviation_c": fact.temperature_deviation_c,
         },
         sort_keys=True,
     )
@@ -168,6 +193,7 @@ def _with_content_hash(fact: VitalsFact) -> VitalsFact:
         source_offset_minutes=fact.source_offset_minutes,
         hrv_ms=fact.hrv_ms,
         resting_hr_bpm=fact.resting_hr_bpm,
+        temperature_deviation_c=fact.temperature_deviation_c,
         quality=fact.quality,
         confidence=fact.confidence,
         content_hash=digest,
@@ -202,8 +228,9 @@ def _bounded(value: object, *, low: float, high: float) -> float | None:
     return as_float
 
 
-def _quality_for(*, hrv: float | None, rhr: float | None) -> tuple[str, float]:
-    """Grade a reading: both metrics present is high; one is medium."""
-    if hrv is not None and rhr is not None:
+def _quality_for(*, hrv: float | None, rhr: float | None, temp: float | None) -> tuple[str, float]:
+    """Grade a reading by how many of the three overnight signals are present."""
+    present = sum(1 for value in (hrv, rhr, temp) if value is not None)
+    if present >= 2:
         return "high", 0.95
     return "medium", 0.7
