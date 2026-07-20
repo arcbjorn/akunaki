@@ -35,6 +35,7 @@ from akunaki.domain.record_split import split_page
 from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.secrets import SecretDecryptionError
 from akunaki.domain.sleep_normalizer import NormalizationError, normalize_sleep_payload
+from akunaki.domain.vitals_normalizer import normalize_vitals_payload
 from akunaki.ports.connections import ConnectionRepositoryPort
 from akunaki.ports.facts import FactWriterPort, RevisionReaderPort
 from akunaki.ports.fetch import ConnectorFetchPort, IngestionRepositoryPort
@@ -295,14 +296,18 @@ class NormalizeHandler:
             return
 
         try:
-            facts = normalize_sleep_payload(revision.payload_text)
+            sleep_facts = normalize_sleep_payload(revision.payload_text)
+            # Overnight vitals ride along on the same sleep payload; extracting
+            # them here means one page yields both the sleep and the HRV/RHR
+            # facts a night produces, with shared lineage.
+            vitals_facts = normalize_vitals_payload(revision.payload_text)
         except NormalizationError as exc:
             # A body that cannot be parsed will not parse on retry either.
             msg = "raw payload could not be normalized"
             raise PermanentJobError(msg) from exc
 
         written = 0
-        for fact in facts:
+        for fact in sleep_facts:
             outcome = self._facts.write_sleep_fact(
                 fact_record_id=self._new_id(),
                 tenant_id=claim.tenant_id,
@@ -315,12 +320,25 @@ class NormalizeHandler:
             )
             if outcome.is_new_version:
                 written += 1
+        for vitals in vitals_facts:
+            outcome = self._facts.write_vitals_fact(
+                fact_record_id=self._new_id(),
+                tenant_id=claim.tenant_id,
+                connection_id=revision.connection_id,
+                fact=vitals,
+                raw_revision_id=revision_id,
+                raw_payload_id=revision.raw_payload_id,
+                schema_version=revision.schema_version,
+                now=now,
+            )
+            if outcome.is_new_version:
+                written += 1
 
         logger.info(
             "normalized raw revision",
             extra={
                 "raw_revision_id": revision_id,
-                "facts_seen": len(facts),
+                "facts_seen": len(sleep_facts) + len(vitals_facts),
                 "versions_written": written,
             },
         )

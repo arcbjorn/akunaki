@@ -30,6 +30,7 @@ from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import (
     FactRecord,
     Job,
+    OvernightVitals,
     RawObject,
     RawPayload,
     RawRevision,
@@ -68,6 +69,24 @@ SLEEP_PAGE = json.dumps(
                 "awake_time": 2400,
                 "efficiency": 92,
                 "type": "long_sleep",
+            }
+        ],
+        "next_token": None,
+    }
+)
+
+SLEEP_PAGE_WITH_VITALS = json.dumps(
+    {
+        "data": [
+            {
+                "id": "sleep-vit",
+                "bedtime_start": "2026-07-18T23:10:00+02:00",
+                "bedtime_end": "2026-07-19T07:20:00+02:00",
+                "total_sleep_duration": 27000,
+                "time_in_bed": 29400,
+                "type": "long_sleep",
+                "average_hrv": 58.0,
+                "lowest_heart_rate": 47.0,
             }
         ],
         "next_token": None,
@@ -214,6 +233,26 @@ def test_sync_enqueues_normalize_and_facts_are_written(
     assert facts[0].is_current == 1
     assert len(detail) == 1
     assert detail[0].duration_min == 450.0
+
+
+def test_vitals_facts_flow_through_the_loop(factory: sessionmaker[Session]) -> None:
+    """A sleep page carrying HRV/RHR yields an overnight-vitals fact too."""
+    _start_sync(factory)
+    _drain(factory, _registry(factory, _ok(SLEEP_PAGE_WITH_VITALS)))
+
+    with factory() as session:
+        facts = session.scalars(select(FactRecord)).all()
+        vitals = session.scalars(select(OvernightVitals)).all()
+
+    entity_types = {f.entity_type for f in facts}
+    assert entity_types == {"sleep_session", "overnight_vitals"}
+    assert len(vitals) == 1
+    assert vitals[0].hrv_ms == 58.0
+    assert vitals[0].resting_hr_bpm == 47.0
+    # Vitals share the sleep session's wake-date and lineage.
+    vitals_fact = next(f for f in facts if f.entity_type == "overnight_vitals")
+    assert vitals_fact.local_health_day == "2026-07-19"
+    assert vitals_fact.raw_revision_id is not None
 
 
 def test_normalize_job_is_enqueued_in_the_same_commit(
