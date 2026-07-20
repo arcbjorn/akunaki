@@ -28,6 +28,7 @@ from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.ingestion_repository import IngestionRepository, RevisionReader
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import (
+    DailyHealthScore,
     FactRecord,
     Job,
     OvernightVitals,
@@ -37,7 +38,11 @@ from akunaki.adapters.db.models import (
     SleepSession,
     Tenant,
 )
+from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.application.handlers import HandlerRegistry
+from akunaki.application.recovery_inputs import RecoveryInputService
+from akunaki.application.recovery_surface import RecoverySurfaceService
+from akunaki.application.score_handlers import SCORE_RECOMPUTE_JOB_TYPE, ScoreRecomputeHandler
 from akunaki.application.sync_handlers import (
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
@@ -164,10 +169,25 @@ def _registry(
     normalize = NormalizeHandler(
         revisions=RevisionReader(factory),
         facts=FactRepository(factory),
+        jobs=JobRepository(factory),
         new_id=new_id,
         clock=lambda: T0,
     )
-    return HandlerRegistry({INITIAL_SYNC_JOB_TYPE: sync, NORMALIZE_JOB_TYPE: normalize})
+    recompute = ScoreRecomputeHandler(
+        recovery=RecoverySurfaceService(
+            inputs=RecoveryInputService(features=FactRepository(factory))
+        ),
+        scores=ScoreRepository(factory),
+        new_id=new_id,
+        clock=lambda: T0,
+    )
+    return HandlerRegistry(
+        {
+            INITIAL_SYNC_JOB_TYPE: sync,
+            NORMALIZE_JOB_TYPE: normalize,
+            SCORE_RECOMPUTE_JOB_TYPE: recompute,
+        }
+    )
 
 
 def _drain(
@@ -220,8 +240,9 @@ def test_sync_enqueues_normalize_and_facts_are_written(
     _start_sync(factory)
     worker = _drain(factory, _registry(factory, _ok(SLEEP_PAGE)))
 
-    # Sync job plus the normalize job it enqueued.
-    assert worker.stats.succeeded == 2
+    # Sync, the normalize job it enqueued, and the recompute that normalize
+    # chained.
+    assert worker.stats.succeeded == 3
 
     with factory() as session:
         facts = session.scalars(select(FactRecord)).all()
@@ -253,6 +274,40 @@ def test_vitals_facts_flow_through_the_loop(factory: sessionmaker[Session]) -> N
     vitals_fact = next(f for f in facts if f.entity_type == "overnight_vitals")
     assert vitals_fact.local_health_day == "2026-07-19"
     assert vitals_fact.raw_revision_id is not None
+
+
+def test_normalize_chains_a_recompute_that_persists_a_score(
+    factory: sessionmaker[Session],
+) -> None:
+    """The full chain: sync -> normalize -> recompute writes a score row."""
+    _start_sync(factory)
+    _drain(factory, _registry(factory, _ok(SLEEP_PAGE_WITH_VITALS)))
+
+    with factory() as session:
+        scores = session.scalars(select(DailyHealthScore)).all()
+
+    assert len(scores) == 1
+    assert scores[0].score_code == "recovery"
+    assert scores[0].local_health_day == "2026-07-19"
+    # One night of vitals is not a mature baseline, so the honest outcome is
+    # insufficient — but it is computed and stored, which is the point.
+    assert scores[0].status == "insufficient"
+
+
+def test_recompute_is_enqueued_once_per_revision(
+    factory: sessionmaker[Session],
+) -> None:
+    """A normalize retry must not stack duplicate recompute jobs."""
+    _start_sync(factory)
+    _drain(factory, _registry(factory, _ok(SLEEP_PAGE)))
+
+    with factory() as session:
+        recompute_jobs = session.scalars(
+            select(Job).where(Job.job_type == SCORE_RECOMPUTE_JOB_TYPE)
+        ).all()
+
+    # One revision -> one recompute, deduplicated by its idempotency key.
+    assert len(recompute_jobs) == 1
 
 
 def test_normalize_job_is_enqueued_in_the_same_commit(

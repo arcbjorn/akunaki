@@ -29,6 +29,7 @@ from akunaki.domain.fetch import FetchFailure
 from akunaki.domain.jobs import (
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
+    SCORE_RECOMPUTE_JOB_TYPE,
     JobClaim,
 )
 from akunaki.domain.record_split import split_page
@@ -39,6 +40,7 @@ from akunaki.domain.vitals_normalizer import normalize_vitals_payload
 from akunaki.ports.connections import ConnectionRepositoryPort
 from akunaki.ports.facts import FactWriterPort, RevisionReaderPort
 from akunaki.ports.fetch import ConnectorFetchPort, IngestionRepositoryPort
+from akunaki.ports.jobs import JobRepositoryPort
 from akunaki.ports.secrets import SecretSealerPort
 
 logger = logging.getLogger("akunaki.sync_handlers")
@@ -265,11 +267,13 @@ class NormalizeHandler:
         *,
         revisions: RevisionReaderPort,
         facts: FactWriterPort,
+        jobs: JobRepositoryPort,
         new_id: Callable[[], str],
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._revisions = revisions
         self._facts = facts
+        self._jobs = jobs
         self._new_id = new_id
         self._clock = clock
 
@@ -333,6 +337,26 @@ class NormalizeHandler:
             )
             if outcome.is_new_version:
                 written += 1
+
+        # Chain a score recompute for each affected local health day. One
+        # revision carries one record (per-record slicing), so this is normally
+        # a single day. Keyed by revision, so a normalize retry does not stack
+        # duplicate recomputes, while a *new* revision (a correction) enqueues a
+        # fresh recompute. Enqueued regardless of ``written``: a re-normalization
+        # that produced no new fact version still safely dedupes at the score
+        # layer, and enqueuing is cheap and idempotent.
+        affected_days = {fact.local_health_day for fact in sleep_facts} | {
+            fact.local_health_day for fact in vitals_facts
+        }
+        for day in sorted(affected_days):
+            self._jobs.enqueue_job(
+                job_id=self._new_id(),
+                tenant_id=claim.tenant_id,
+                job_type=SCORE_RECOMPUTE_JOB_TYPE,
+                payload_json=json.dumps({"local_health_day": day}, sort_keys=True),
+                now=now,
+                idempotency_key=f"recompute:{revision_id}:{day}",
+            )
 
         logger.info(
             "normalized raw revision",
