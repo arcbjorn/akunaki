@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), and the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (currently `insufficient` for want of HRV/RHR data, disclosed honestly). Not implemented: other detail tables, HRV/RHR/temperature ingestion, source selection, score persistence, the `/v1/today` composite, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (currently `insufficient` for want of HRV/RHR data, disclosed honestly), and the composite **`/v1/today`** view stitching recovery and sleep. Not implemented: other detail tables, HRV/RHR/temperature ingestion, source selection, score persistence, the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -318,6 +318,24 @@ The sufficiency gate requires an authoritative sleep duration **and** HRV or ove
 | `application.recovery_surface` | evaluate + package with factors and gaps |
 
 An end-to-end test guards the cardinal rule at the HTTP boundary: an insufficient recovery must expose `score: null`.
+
+### `GET /v1/today` — the composite day view
+
+The primary product read surface. It stitches the two shipping blocks — the recovery score and the sleep summary — and discloses everything else rather than inventing it.
+
+```bash
+curl --cookie akunaki_session=<token> 'localhost:8000/v1/today?day=2026-07-20'
+```
+
+| Rule | Behavior |
+|------|----------|
+| Top-level `status` | Mirrors the recovery status (recovery is the day's headline score) |
+| Recovery block | The only 0-100 score; currently `insufficient` with a null score |
+| Sleep block | The deterministic summary; **absent** on a no-sleep day (no phantom zero-duration measurement) with `missing_authoritative_sleep` disclosed |
+| Strain / activity / training | **Do not ship** in v0.1.0 — absent from the body and named as `strain_not_available` / `activity_not_available` / `training_recommendation_not_available` gaps |
+| Gaps | Deduplicated across the composite and the recovery gate |
+
+The composite owns no formula: `akunaki.application.today_surface` delegates to the recovery and sleep surface services and combines their disclosures. Verified end to end, including that unshipped blocks never appear as fabricated data.
 
 ### Local driver limitation: BLOB binding
 
