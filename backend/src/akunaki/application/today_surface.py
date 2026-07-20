@@ -15,11 +15,23 @@ recovery status, since recovery is the day's headline score.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
-from akunaki.application.recovery_surface import RecoverySurface, RecoverySurfaceService
+from akunaki.application.recovery_surface import RecoverySurface
 from akunaki.application.sleep_surface import SleepSurfaceService
 from akunaki.domain.recovery import DEFAULT_SLEEP_TARGET_MIN, RecoveryGap
 from akunaki.domain.sleep_summary import SleepSummary
+
+
+class RecoverySource(Protocol):
+    """Port: produce the recovery surface for a day (stored or computed)."""
+
+    def recovery_for_day(
+        self, *, tenant_id: str, local_health_day: str, target_min: int = ...
+    ) -> RecoverySurface:
+        """Return the recovery surface for the tenant's local day."""
+        ...
+
 
 # Blocks named in the design's /v1/today body that do not ship in v0.1.0.
 _UNSHIPPED_BLOCK_GAPS = (
@@ -48,7 +60,7 @@ class TodaySurfaceService:
     def __init__(
         self,
         *,
-        recovery: RecoverySurfaceService,
+        recovery: RecoverySource,
         sleep: SleepSurfaceService,
     ) -> None:
         self._recovery = recovery

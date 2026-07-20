@@ -229,7 +229,18 @@ def recovery_data_gaps(components: list[RecoveryComponent]) -> tuple[RecoveryGap
     requirement so a client can explain *why* a score is withheld rather than
     showing a fabricated midpoint.
     """
-    present = {comp.code for comp in components}
+    return recovery_data_gaps_from_codes({comp.code for comp in components})
+
+
+def recovery_data_gaps_from_codes(
+    present: set[ComponentCode],
+) -> tuple[RecoveryGap, ...]:
+    """Disclosed gate shortfalls given the set of present component codes.
+
+    The pure core shared by the live evaluation and the stored read path, so a
+    score served from storage discloses exactly the same gaps it was computed
+    with.
+    """
     available_weight = sum(COMPONENT_WEIGHTS[code] for code in present)
     gaps: list[RecoveryGap] = []
 

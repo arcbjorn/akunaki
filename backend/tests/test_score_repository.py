@@ -191,3 +191,32 @@ def test_new_current_replaces_old_in_reader(factory: sessionmaker[Session]) -> N
     )
     assert row is not None
     assert row.score == 90
+
+
+def test_read_with_factors_reconstructs_the_disclosure(
+    factory: sessionmaker[Session],
+) -> None:
+    factors = (
+        RecoveryFactor(factor_code="hrv", present=True, weight=0.25, magnitude=80.0),
+        RecoveryFactor(factor_code="sleep_adherence", present=True, weight=0.20, magnitude=90.0),
+        RecoveryFactor(factor_code="resting_hr", present=False, weight=0.15, magnitude=0.0),
+    )
+    _write(factory, _surface(score=77, available_weight=0.45, factors=factors), score_id="s1")
+
+    stored = ScoreRepository(factory).current_recovery_with_factors(
+        tenant_id="tenant-1", local_health_day=DAY
+    )
+    assert stored is not None
+    assert stored.score == 77
+    assert stored.version_n == 1
+    assert stored.freshness_at is not None
+    by_code = {f.factor_code: f for f in stored.factors}
+    assert by_code["hrv"].present is True
+    assert by_code["resting_hr"].present is False
+
+
+def test_read_with_factors_is_none_when_absent(factory: sessionmaker[Session]) -> None:
+    stored = ScoreRepository(factory).current_recovery_with_factors(
+        tenant_id="tenant-1", local_health_day=DAY
+    )
+    assert stored is None

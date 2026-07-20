@@ -21,8 +21,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.models import (
+    DailyHealthScore,
     FactRecord,
     OvernightVitals,
+    ScoreFactor,
     SleepSession,
     Tenant,
     User,
@@ -293,3 +295,58 @@ def test_hrv_and_rhr_yield_a_real_score(client: TestClient, factory: sessionmake
     assert 0 <= body["score"] <= 100
     factor_codes = {f["factor_code"] for f in body["factors"]}
     assert {"hrv", "resting_hr", "sleep_adherence"} <= factor_codes
+
+
+def _seed_score(
+    factory: sessionmaker[Session],
+    *,
+    day: str,
+    score: int,
+) -> None:
+    with factory() as session, session.begin():
+        session.add(
+            DailyHealthScore(
+                id=f"score-{day}",
+                tenant_id="tenant-1",
+                local_health_day=day,
+                score_code="recovery",
+                status="partial",
+                score=score,
+                available_weight=0.60,
+                confidence=0.7,
+                formula_version="general_recovery_v0.1.0",
+                dependency_hash="seeded",
+                freshness_at=NOW_S,
+                as_of_at=NOW_S,
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                created_at=NOW_S,
+            )
+        )
+        session.add(
+            ScoreFactor(
+                id=f"sf-{day}",
+                daily_health_score_id=f"score-{day}",
+                tenant_id="tenant-1",
+                factor_code="hrv",
+                sign=1,
+                magnitude=80.0,
+                weight=0.25,
+                present=1,
+            )
+        )
+
+
+def test_stored_score_is_served(client: TestClient, factory: sessionmaker[Session]) -> None:
+    # A persisted score is served verbatim, without recomputing from facts.
+    # No facts are seeded, so a compute path would return insufficient; the
+    # stored partial score proves the surface reads from storage.
+    _seed_score(factory, day=TARGET_DAY, score=81)
+    _login(client, factory)
+
+    body = client.get("/v1/recovery", params={"day": TARGET_DAY}).json()
+    assert body["status"] == "partial"
+    assert body["score"] == 81
+    assert {f["factor_code"] for f in body["factors"]} == {"hrv"}

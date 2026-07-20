@@ -17,10 +17,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.fact_repository import FactRepository
+from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.api.app import get_session_factory
 from akunaki.api.security import CurrentSession
 from akunaki.application.recovery_inputs import RecoveryInputService
-from akunaki.application.recovery_surface import RecoverySurfaceService
+from akunaki.application.recovery_surface import (
+    RecoverySurfaceService,
+    ServedRecoveryService,
+)
 from akunaki.application.sleep_surface import SleepSurfaceService
 from akunaki.application.today_surface import TodaySurfaceService
 
@@ -71,8 +75,10 @@ def _today_service(
     session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
 ) -> TodaySurfaceService:
     facts = FactRepository(session_factory)
+    compute = RecoverySurfaceService(inputs=RecoveryInputService(features=facts))
+    served = ServedRecoveryService(stored=ScoreRepository(session_factory), compute=compute)
     return TodaySurfaceService(
-        recovery=RecoverySurfaceService(inputs=RecoveryInputService(features=facts)),
+        recovery=served,
         sleep=SleepSurfaceService(durations=facts),
     )
 

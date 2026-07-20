@@ -22,7 +22,11 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.models import DailyHealthScore, ScoreFactor
-from akunaki.application.recovery_surface import RecoverySurface
+from akunaki.application.recovery_surface import (
+    RecoverySurface,
+    StoredRecoveryScore,
+    StoredScoreFactor,
+)
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
 
 
@@ -159,6 +163,57 @@ class ScoreRepository:
                     DailyHealthScore.is_current == 1,
                 )
             ).scalar_one_or_none()
+
+    def current_recovery_with_factors(
+        self, *, tenant_id: str, local_health_day: str
+    ) -> StoredRecoveryScore | None:
+        """Return the current recovery score and its factor rows, or None.
+
+        A single read: the score header plus every ``score_factor`` row that
+        belongs to it, so the read surface can reconstruct the disclosed view
+        (factors and gaps) without recomputing.
+        """
+        with self._session_factory() as session:
+            row = session.execute(
+                select(DailyHealthScore).where(
+                    DailyHealthScore.tenant_id == tenant_id,
+                    DailyHealthScore.local_health_day == local_health_day,
+                    DailyHealthScore.score_code == "recovery",
+                    DailyHealthScore.is_current == 1,
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            factor_rows = (
+                session.execute(
+                    select(ScoreFactor).where(
+                        ScoreFactor.daily_health_score_id == row.id,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            factors = tuple(
+                StoredScoreFactor(
+                    factor_code=f.factor_code,
+                    present=bool(f.present),
+                    weight=f.weight,
+                    magnitude=f.magnitude,
+                )
+                for f in factor_rows
+            )
+            return StoredRecoveryScore(
+                local_health_day=row.local_health_day,
+                score_code=row.score_code,
+                status=row.status,
+                score=row.score,
+                available_weight=row.available_weight,
+                confidence=row.confidence,
+                formula_version=row.formula_version,
+                freshness_at=row.freshness_at,
+                version_n=row.version_n,
+                factors=factors,
+            )
 
 
 def _factor_sign(magnitude: float, *, present: bool) -> int:
