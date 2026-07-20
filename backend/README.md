@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR from the Oura sleep payload), and the composite **`/v1/today`** view stitching recovery and sleep. Not implemented: temperature/respiratory/activity/workout detail tables, source selection, score persistence, the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR from the Oura sleep payload), the composite **`/v1/today`** view stitching recovery and sleep, **versioned score persistence** (`daily_health_scores`/`score_factors`), and the **`score.recompute` handler chained after `raw.normalize`** so scores recompute automatically as data lands. Not implemented: temperature/respiratory/activity/workout detail tables, source selection, serving stored scores on read (surfaces still compute on read), the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -195,13 +195,17 @@ The normalizer (`akunaki.domain.sleep_normalizer`) is **pure**: no I/O and no cl
 
 ### Normalization (`raw.normalize`)
 
-Enqueued automatically by a successful sync commit, keyed by `raw_revision_id`. The handler reads the immutable revision, normalizes its body, and writes versioned facts.
+Enqueued automatically by a successful sync commit, keyed by `raw_revision_id`. The handler reads the immutable revision, normalizes its body into both **sleep** and **overnight-vitals** facts, writes versioned facts, and enqueues a `score.recompute` for each affected local health day.
 
 | Outcome | Behavior |
 |---------|----------|
 | Missing revision, malformed payload, unparseable body | **Dead-letter** — none of these fix themselves on retry |
 | Tombstone revision | Skipped (vendor deletions use the deletion path, not a fabricated fact) |
-| Success | Facts written; identical content writes no new version |
+| Success | Facts written; identical content writes no new version; recompute enqueued (keyed `recompute:<revision>:<day>`, so a retry dedupes but a correction re-scores) |
+
+### Score recompute (`score.recompute`)
+
+Chained after normalize. The handler assembles the recovery surface for the day (`general_recovery_v0.1.0`) and persists it as a versioned score row via `ScoreRepository`. Persistence is idempotent by `dependency_hash`, so a redundant recompute writes no new version. An `insufficient` day is a real, stored outcome — not an absence. The full chain **sync → normalize → recompute → persisted score** is proven end to end through the real worker runtime.
 
 ### Privacy deletion (`0009`)
 
