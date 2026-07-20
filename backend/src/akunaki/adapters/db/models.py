@@ -796,6 +796,7 @@ class OvernightVitals(Base):
     )
     hrv_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     resting_hr_bpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    temperature_deviation_c: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         CheckConstraint("hrv_ms IS NULL OR hrv_ms >= 0", name="overnight_vitals_hrv_nonneg"),
@@ -803,8 +804,10 @@ class OvernightVitals(Base):
             "resting_hr_bpm IS NULL OR resting_hr_bpm >= 0",
             name="overnight_vitals_rhr_nonneg",
         ),
+        # A row must carry at least one signal; a row with none holds nothing.
         CheckConstraint(
-            "hrv_ms IS NOT NULL OR resting_hr_bpm IS NOT NULL",
+            "hrv_ms IS NOT NULL OR resting_hr_bpm IS NOT NULL "
+            "OR temperature_deviation_c IS NOT NULL",
             name="overnight_vitals_at_least_one",
         ),
     )
