@@ -26,6 +26,7 @@ from akunaki.domain.baseline import BaselineMaturity as StatMaturity
 from akunaki.domain.recovery import BaselineMaturity as RecoveryMaturity
 from akunaki.domain.recovery import (
     ComponentCode,
+    Direction,
     RecoveryComponent,
     baseline_component_score,
     sleep_target_adherence,
@@ -36,15 +37,15 @@ from akunaki.domain.recovery import (
 class BaselineInput:
     """A baseline-dependent component's current value and its prior series.
 
-    ``direction`` is the component's directed mapping: ``+1`` better-when-higher
-    (HRV, efficiency), ``-1`` better-when-lower (RHR). ``samples`` is the
-    present, quality-eligible prior-day series (missing days already excluded).
+    ``direction`` is the component's directed mapping (see :class:`Direction`).
+    ``samples`` is the present, quality-eligible prior-day series (missing days
+    already excluded).
     """
 
     value: float
     samples: list[float]
     family: MetricFamily
-    direction: float
+    direction: Direction
     quality: str = "unknown"
     freshness_hours: float | None = None
 

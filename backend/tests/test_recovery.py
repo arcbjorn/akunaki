@@ -15,6 +15,7 @@ from akunaki.domain.recovery import (
     COMPONENT_WEIGHTS,
     BaselineMaturity,
     ComponentCode,
+    Direction,
     RecoveryComponent,
     RecoveryStatus,
     baseline_component_score,
@@ -65,11 +66,30 @@ def test_positive_z_better_when_higher() -> None:
     assert baseline_component_score(2.0) == pytest.approx(50 + 50 * math.tanh(1.0))
 
 
-def test_direction_negative_inverts() -> None:
+def test_lower_better_inverts() -> None:
     # RHR is better-when-lower: a high z (bad) maps below 50.
-    higher = baseline_component_score(2.0, direction=-1.0)
+    higher = baseline_component_score(2.0, direction=Direction.LOWER_BETTER)
     assert higher == pytest.approx(50 + 50 * math.tanh(-1.0))
     assert higher < 50.0
+
+
+def test_deviation_worse_penalizes_both_directions() -> None:
+    # Temperature: any departure from baseline lowers the score equally.
+    above = baseline_component_score(2.0, direction=Direction.DEVIATION_WORSE)
+    below = baseline_component_score(-2.0, direction=Direction.DEVIATION_WORSE)
+    assert above == pytest.approx(below)  # symmetric penalty
+    assert above < 50.0
+    # z_dir = -|2| = -2 -> 50 + 50*tanh(-1).
+    assert above == pytest.approx(50 + 50 * math.tanh(-1.0))
+
+
+def test_elevated_worse_only_penalizes_above() -> None:
+    # Respiratory: above baseline hurts; below is not rewarded (stays at 50).
+    above = baseline_component_score(2.0, direction=Direction.ELEVATED_WORSE)
+    below = baseline_component_score(-2.0, direction=Direction.ELEVATED_WORSE)
+    assert above == pytest.approx(50 + 50 * math.tanh(-1.0))
+    assert above < 50.0
+    assert below == 50.0  # z_dir = -max(-2, 0) = 0 -> midpoint
 
 
 def test_z_is_clamped_to_three() -> None:

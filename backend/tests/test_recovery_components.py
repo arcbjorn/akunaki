@@ -15,6 +15,7 @@ from akunaki.domain.baseline import MetricFamily
 from akunaki.domain.recovery import (
     BaselineMaturity,
     ComponentCode,
+    Direction,
     RecoveryStatus,
     evaluate_recovery,
 )
@@ -35,7 +36,7 @@ def test_higher_is_better_maps_above_midpoint() -> None:
         value=120.0,
         samples=[90.0, 110.0] * 14,  # center 100, robust_scale 14.826
         family=MetricFamily.HRV,
-        direction=1.0,
+        direction=Direction.HIGHER_BETTER,
     )
     component = map_baseline_component(ComponentCode.HRV, signal)
     assert component is not None
@@ -52,7 +53,7 @@ def test_lower_is_better_inverts_direction() -> None:
         value=120.0,
         samples=[90.0, 110.0] * 14,
         family=MetricFamily.RHR,
-        direction=-1.0,
+        direction=Direction.LOWER_BETTER,
     )
     component = map_baseline_component(ComponentCode.RESTING_HR, signal)
     assert component is not None
@@ -65,7 +66,7 @@ def test_insufficient_baseline_omits_component() -> None:
         value=100.0,
         samples=[100.0] * 10,
         family=MetricFamily.HRV,
-        direction=1.0,
+        direction=Direction.HIGHER_BETTER,
     )
     assert map_baseline_component(ComponentCode.HRV, signal) is None
 
@@ -76,7 +77,7 @@ def test_min_maturity_is_propagated() -> None:
         value=100.0,
         samples=[90.0, 110.0] * 7,  # 14 samples
         family=MetricFamily.HRV,
-        direction=1.0,
+        direction=Direction.HIGHER_BETTER,
     )
     component = map_baseline_component(ComponentCode.HRV, signal)
     assert component is not None
@@ -88,7 +89,7 @@ def test_quality_and_freshness_pass_through() -> None:
         value=100.0,
         samples=[90.0, 110.0] * 14,
         family=MetricFamily.HRV,
-        direction=1.0,
+        direction=Direction.HIGHER_BETTER,
         quality="medium",
         freshness_hours=30.0,
     )
@@ -123,7 +124,7 @@ def test_sleep_only_inputs_are_insufficient() -> None:
         value=90.0,
         samples=[85.0, 95.0] * 14,
         family=MetricFamily.OTHER,
-        direction=1.0,
+        direction=Direction.HIGHER_BETTER,
     )
     efficiency = map_baseline_component(ComponentCode.SLEEP_EFFICIENCY, efficiency_signal)
     assert efficiency is not None
@@ -143,7 +144,7 @@ def test_adding_hrv_clears_the_gate() -> None:
             value=110.0,
             samples=[90.0, 110.0] * 14,
             family=MetricFamily.HRV,
-            direction=1.0,
+            direction=Direction.HIGHER_BETTER,
             quality="high",
             freshness_hours=0.0,
         ),
@@ -154,7 +155,7 @@ def test_adding_hrv_clears_the_gate() -> None:
             value=50.0,
             samples=[48.0, 52.0] * 14,
             family=MetricFamily.RHR,
-            direction=-1.0,
+            direction=Direction.LOWER_BETTER,
             quality="high",
             freshness_hours=0.0,
         ),

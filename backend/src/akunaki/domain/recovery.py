@@ -47,6 +47,23 @@ class RecoveryStatus(StrEnum):
     INSUFFICIENT = "insufficient"
 
 
+class Direction(StrEnum):
+    """A component's directed z mapping (exact v0.1.0), applied before the curve.
+
+    - ``HIGHER_BETTER`` (HRV): ``z_dir = +z``.
+    - ``LOWER_BETTER`` (RHR): ``z_dir = -z``.
+    - ``DEVIATION_WORSE`` (temperature): ``z_dir = -|z|`` — any departure from
+      baseline, in either direction, lowers the score.
+    - ``ELEVATED_WORSE`` (respiratory): ``z_dir = -max(z, 0)`` — being above
+      baseline hurts; being below is not rewarded.
+    """
+
+    HIGHER_BETTER = "higher_better"
+    LOWER_BETTER = "lower_better"
+    DEVIATION_WORSE = "deviation_worse"
+    ELEVATED_WORSE = "elevated_worse"
+
+
 class ComponentCode(StrEnum):
     """The recovery composite's contributing components."""
 
@@ -139,14 +156,25 @@ class RecoveryResult:
     formula_version: str = FORMULA_VERSION
 
 
-def baseline_component_score(z: float, *, direction: float = 1.0) -> float:
+def apply_direction(z: float, direction: Direction) -> float:
+    """Apply a component's directed mapping to a raw z-score (exact v0.1.0)."""
+    if direction is Direction.HIGHER_BETTER:
+        return z
+    if direction is Direction.LOWER_BETTER:
+        return -z
+    if direction is Direction.DEVIATION_WORSE:
+        return -abs(z)
+    # ELEVATED_WORSE: above baseline hurts, below is not rewarded.
+    return -max(z, 0.0)
+
+
+def baseline_component_score(z: float, *, direction: Direction = Direction.HIGHER_BETTER) -> float:
     """Map a baseline z-score to a 0-100 component score (exact v0.1.0).
 
-    ``direction`` applies the component's directed mapping before the curve:
-    ``+1`` for better-when-higher, ``-1`` for better-when-lower. The directed
-    z is clamped to [-3, 3], then ``c = clamp(50 + 50*tanh(z_dir/2), 0, 100)``.
+    The component's directed mapping is applied first, the directed z is clamped
+    to [-3, 3], then ``c = clamp(50 + 50*tanh(z_dir/2), 0, 100)``.
     """
-    z_dir = _clamp(direction * z, -3.0, 3.0)
+    z_dir = _clamp(apply_direction(z, direction), -3.0, 3.0)
     return _clamp(50.0 + 50.0 * math.tanh(z_dir / 2.0), 0.0, 100.0)
 
 
