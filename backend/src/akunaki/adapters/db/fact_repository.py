@@ -196,3 +196,48 @@ class FactRepository:
                 .group_by(FactRecord.local_health_day)
             ).all()
         return {day: float(total) for day, total in rows if day is not None}
+
+    def daily_sleep_efficiency(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, float]:
+        """Sleep efficiency percent per local day: total sleep / total in-bed * 100.
+
+        Efficiency is defined only when both totals are known, so a day is
+        included only when **every** contributing session has a non-null
+        ``time_in_bed_min``; a day with any missing in-bed minutes is omitted
+        (absent, not imputed), matching how the baseline layer treats gaps. As
+        with durations, only current, load-eligible, active facts count.
+        """
+        if not local_health_days:
+            return {}
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(
+                    FactRecord.local_health_day,
+                    func.sum(SleepSession.duration_min),
+                    func.sum(SleepSession.time_in_bed_min),
+                    func.count().filter(SleepSession.time_in_bed_min.is_(None)),
+                )
+                .join(SleepSession, SleepSession.fact_record_id == FactRecord.id)
+                .where(
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.entity_type == ENTITY_TYPE,
+                    FactRecord.local_health_day.in_(local_health_days),
+                    FactRecord.is_current == 1,
+                    FactRecord.deletion_state == "active",
+                    FactRecord.exclude_from_load == 0,
+                )
+                .group_by(FactRecord.local_health_day)
+            ).all()
+
+        efficiency: dict[str, float] = {}
+        for day, duration_total, in_bed_total, missing_in_bed in rows:
+            if day is None or missing_in_bed > 0 or in_bed_total in (None, 0):
+                # Any session missing in-bed minutes, or a zero/absent total,
+                # leaves efficiency undefined for the day: omit it.
+                continue
+            efficiency[day] = float(duration_total) / float(in_bed_total) * 100.0
+        return efficiency

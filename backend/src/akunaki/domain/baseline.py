@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass
+from datetime import date, timedelta
 from enum import StrEnum
+
+# The rolling window spans this many calendar days prior to the target day.
+WINDOW_DAYS = 42
 
 # Sample-count thresholds (present, quality-eligible points in the window).
 MIN_SAMPLES = 14
@@ -82,6 +86,18 @@ class Baseline:
     def is_usable(self) -> bool:
         """Whether this baseline can produce a z-score for a recovery component."""
         return self.maturity is not BaselineMaturity.INSUFFICIENT
+
+
+def baseline_window_days(target_day: str) -> list[str]:
+    """The 42 prior calendar days for a target day's baseline, oldest-first.
+
+    The window is ``D-42 .. D-1`` as ``YYYY-MM-DD`` strings; the target day is
+    **excluded** from its own baseline center per the design. Pure calendar
+    arithmetic on the local health day — no timezone or clock.
+    """
+    anchor = date.fromisoformat(target_day)
+    days = [anchor - timedelta(days=offset) for offset in range(1, WINDOW_DAYS + 1)]
+    return [day.isoformat() for day in reversed(days)]
 
 
 def compute_baseline(

@@ -13,8 +13,10 @@ import pytest
 from akunaki.domain.baseline import (
     MATURE_SAMPLES,
     MIN_SAMPLES,
+    WINDOW_DAYS,
     BaselineMaturity,
     MetricFamily,
+    baseline_window_days,
     compute_baseline,
     z_score,
 )
@@ -41,6 +43,26 @@ def test_14_to_27_samples_is_min() -> None:
 def test_28_or_more_samples_is_mature() -> None:
     assert compute_baseline([50.0] * MATURE_SAMPLES).maturity is BaselineMaturity.MATURE
     assert compute_baseline([50.0] * 42).maturity is BaselineMaturity.MATURE
+
+
+# ---------------------------------------------------------------------------
+# Baseline window (calendar arithmetic)
+# ---------------------------------------------------------------------------
+
+
+def test_window_is_42_prior_days_excluding_target() -> None:
+    window = baseline_window_days("2026-07-20")
+    assert len(window) == WINDOW_DAYS
+    assert window[-1] == "2026-07-19"  # D-1, the most recent prior day
+    assert window[0] == "2026-06-08"  # D-42
+    assert "2026-07-20" not in window  # target excluded from its own baseline
+    assert window == sorted(window)  # oldest-first
+
+
+def test_window_crosses_year_boundary() -> None:
+    window = baseline_window_days("2026-01-10")
+    assert window[-1] == "2026-01-09"
+    assert window[0] == "2025-11-29"
 
 
 # ---------------------------------------------------------------------------
