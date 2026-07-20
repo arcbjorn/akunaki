@@ -96,7 +96,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260719_0012   # drop overnight vitals
+uv run alembic downgrade 20260720_0013   # drop daily health scores
+uv run alembic downgrade 20260719_0012   # also drop overnight vitals
 uv run alembic downgrade 20260719_0011   # also drop oidc login states
 uv run alembic downgrade 20260719_0010   # also drop users and sessions
 uv run alembic downgrade 20260719_0009   # also revert tenant-scoped fact indexes
@@ -128,6 +129,7 @@ uv run alembic current
 | `20260719_0011` | `users`, `sessions` (hash-only token storage) |
 | `20260719_0012` | `login_states` (hashed state + nonce, sealed PKCE verifier) |
 | `20260720_0013` | `overnight_vitals` (HRV, resting HR detail) |
+| `20260720_0014` | `daily_health_scores`, `score_factors` (versioned scores) |
 
 ### Sync transport layer (`0006`)
 
