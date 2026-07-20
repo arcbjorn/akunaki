@@ -810,6 +810,100 @@ class OvernightVitals(Base):
     )
 
 
+class DailyHealthScore(Base):
+    """A computed daily score for one ``score_code``.
+
+    Versioned, never rewritten in place: a changed value supersedes the prior
+    row (``is_current`` 0/1 with a partial unique index), so score history stays
+    auditable across formula/policy changes. Only score codes with an accepted
+    formula may be written; ``recovery`` under ``general_recovery_v0.1.0`` is the
+    only one that ships in v0.1.0.
+    """
+
+    __tablename__ = "daily_health_scores"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    local_health_day: Mapped[str] = mapped_column(Text, nullable=False)
+    score_code: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    available_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    formula_version: Mapped[str] = mapped_column(Text, nullable=False)
+    dependency_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    freshness_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    as_of_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version_n: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_current: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    superseded_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    superseded_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "score_code IN ('recovery', 'sleep', 'strain', 'activity', 'readiness')",
+            name="score_code_registry",
+        ),
+        CheckConstraint(
+            "status IN ('ok', 'partial', 'insufficient')",
+            name="score_status",
+        ),
+        CheckConstraint(
+            "score IS NULL OR (score >= 0 AND score <= 100)",
+            name="score_range",
+        ),
+        # A null score is exactly the insufficient case, and vice versa.
+        CheckConstraint(
+            "(status = 'insufficient') = (score IS NULL)",
+            name="score_null_iff_insufficient",
+        ),
+        CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="score_confidence_range"),
+        CheckConstraint("version_n >= 1", name="score_version_n_pos"),
+        CheckConstraint("is_current IN (0, 1)", name="score_is_current_bool"),
+        CheckConstraint(
+            "(superseded_by IS NULL AND superseded_at IS NULL) OR "
+            "(superseded_by IS NOT NULL AND superseded_at IS NOT NULL AND is_current = 0)",
+            name="score_supersede_pair",
+        ),
+        CheckConstraint("length(local_health_day) = 10", name="score_local_day_format"),
+        Index(
+            "ux_daily_health_scores_current",
+            "tenant_id",
+            "local_health_day",
+            "score_code",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+    )
+
+
+class ScoreFactor(Base):
+    """A signed contributor to a score's derivation, for disclosure."""
+
+    __tablename__ = "score_factors"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    daily_health_score_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("daily_health_scores.id", ondelete="CASCADE"), nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    factor_code: Mapped[str] = mapped_column(Text, nullable=False)
+    sign: Mapped[int] = mapped_column(Integer, nullable=False)
+    magnitude: Mapped[float] = mapped_column(Float, nullable=False)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    present: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("sign IN (-1, 0, 1)", name="score_factor_sign"),
+        CheckConstraint("present IN (0, 1)", name="score_factor_present_bool"),
+    )
+
+
 class DeletionRequest(Base):
     """Privacy deletion pipeline state for one tenant.
 
