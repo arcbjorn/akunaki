@@ -777,6 +777,39 @@ class SleepSession(Base):
     )
 
 
+class OvernightVitals(Base):
+    """Typed overnight-vitals detail, one-to-one with its fact header.
+
+    Overnight HRV (RMSSD ms) and resting heart rate (bpm) are scalar metrics
+    measured across the principal sleep and keyed to the wake-date. They feed
+    the two highest-weight recovery components. At least one of the two is
+    present on any row (a row with neither carries no signal).
+    """
+
+    __tablename__ = "overnight_vitals"
+
+    fact_record_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("fact_records.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    hrv_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    resting_hr_bpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("hrv_ms IS NULL OR hrv_ms >= 0", name="overnight_vitals_hrv_nonneg"),
+        CheckConstraint(
+            "resting_hr_bpm IS NULL OR resting_hr_bpm >= 0",
+            name="overnight_vitals_rhr_nonneg",
+        ),
+        CheckConstraint(
+            "hrv_ms IS NOT NULL OR resting_hr_bpm IS NOT NULL",
+            name="overnight_vitals_at_least_one",
+        ),
+    )
+
+
 class DeletionRequest(Base):
     """Privacy deletion pipeline state for one tenant.
 
