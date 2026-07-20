@@ -55,7 +55,7 @@ class RecoverySurfaceService:
         target_min: int = DEFAULT_SLEEP_TARGET_MIN,
     ) -> RecoverySurface:
         """Assemble, evaluate, and disclose the day's recovery."""
-        components = self._inputs.sleep_components(
+        components = self._inputs.recovery_components(
             tenant_id=tenant_id,
             local_health_day=local_health_day,
             target_min=target_min,

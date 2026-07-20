@@ -12,11 +12,20 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import func, select, update
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import InstrumentedAttribute, Session, sessionmaker
 
-from akunaki.adapters.db.models import FactRecord, SleepSession
+from akunaki.adapters.db.models import FactRecord, OvernightVitals, SleepSession
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
 from akunaki.domain.sleep_normalizer import ENTITY_TYPE, NORMALIZER_VERSION, SleepFact
+from akunaki.domain.vitals_normalizer import (
+    ENTITY_TYPE as VITALS_ENTITY_TYPE,
+)
+from akunaki.domain.vitals_normalizer import (
+    NORMALIZER_VERSION as VITALS_NORMALIZER_VERSION,
+)
+from akunaki.domain.vitals_normalizer import (
+    VitalsFact,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +157,112 @@ class FactRepository:
                 superseded_id=superseded_id,
             )
 
+    def write_vitals_fact(
+        self,
+        *,
+        fact_record_id: str,
+        tenant_id: str,
+        connection_id: str | None,
+        fact: VitalsFact,
+        raw_revision_id: str | None,
+        raw_payload_id: str | None,
+        schema_version: str,
+        now: datetime,
+    ) -> FactWriteOutcome:
+        """Write one overnight-vitals fact, superseding any differing version.
+
+        Parallels ``write_sleep_fact``: identical normalized content is a no-op,
+        changed content appends a version and retires the prior current row.
+        """
+        if not fact_record_id or not tenant_id:
+            msg = "fact_record_id and tenant_id must be non-empty"
+            raise ValueError(msg)
+
+        now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
+
+        with self._session_factory() as session, session.begin():
+            current = session.execute(
+                select(FactRecord).where(
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.fact_key == fact.fact_key,
+                    FactRecord.is_current == 1,
+                )
+            ).scalar_one_or_none()
+
+            if current is not None and current.content_hash == fact.content_hash:
+                return FactWriteOutcome(
+                    fact_record_id=current.id,
+                    version_n=current.version_n,
+                    is_new_version=False,
+                )
+
+            next_version = 1
+            superseded_id: str | None = None
+            if current is not None:
+                next_version = current.version_n + 1
+                superseded_id = current.id
+                session.execute(
+                    update(FactRecord)
+                    .where(FactRecord.id == current.id)
+                    .values(
+                        is_current=0,
+                        superseded_by=fact_record_id,
+                        superseded_at=now_s,
+                    )
+                )
+                session.flush()
+
+            session.add(
+                FactRecord(
+                    id=fact_record_id,
+                    tenant_id=tenant_id,
+                    connection_id=connection_id,
+                    provider="oura",
+                    entity_type=VITALS_ENTITY_TYPE,
+                    vendor_record_id=fact.vendor_record_id,
+                    origin=None,
+                    method="wearable",
+                    utc_instant=fact.start_utc,
+                    start_utc=fact.start_utc,
+                    end_utc=fact.end_utc,
+                    source_offset_minutes=fact.source_offset_minutes,
+                    iana_timezone=None,
+                    local_health_day=fact.local_health_day,
+                    unit=None,
+                    quality=fact.quality,
+                    confidence=fact.confidence,
+                    freshness_at=now_s,
+                    raw_revision_id=raw_revision_id,
+                    raw_payload_id=raw_payload_id,
+                    schema_version=schema_version,
+                    normalizer_version=VITALS_NORMALIZER_VERSION,
+                    content_hash=fact.content_hash,
+                    fact_key=fact.fact_key,
+                    version_n=next_version,
+                    is_current=1,
+                    superseded_by=None,
+                    superseded_at=None,
+                    deletion_state="active",
+                    exclude_from_load=0,
+                    created_at=now_s,
+                )
+            )
+            session.add(
+                OvernightVitals(
+                    fact_record_id=fact_record_id,
+                    tenant_id=tenant_id,
+                    hrv_ms=fact.hrv_ms,
+                    resting_hr_bpm=fact.resting_hr_bpm,
+                )
+            )
+
+            return FactWriteOutcome(
+                fact_record_id=fact_record_id,
+                version_n=next_version,
+                is_new_version=True,
+                superseded_id=superseded_id,
+            )
+
     def current_sleep_facts(self, *, tenant_id: str, local_health_day: str) -> list[str]:
         """Return current sleep fact ids for a local day (newest schema first)."""
         with self._session_factory() as session:
@@ -241,3 +356,60 @@ class FactRepository:
                 continue
             efficiency[day] = float(duration_total) / float(in_bed_total) * 100.0
         return efficiency
+
+    def daily_hrv(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, float]:
+        """Overnight HRV (ms) per local day; omit days with no HRV reading."""
+        return self._daily_vital(
+            tenant_id=tenant_id,
+            local_health_days=local_health_days,
+            column=OvernightVitals.hrv_ms,
+        )
+
+    def daily_resting_hr(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, float]:
+        """Overnight resting HR (bpm) per local day; omit days with none."""
+        return self._daily_vital(
+            tenant_id=tenant_id,
+            local_health_days=local_health_days,
+            column=OvernightVitals.resting_hr_bpm,
+        )
+
+    def _daily_vital(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+        column: InstrumentedAttribute[float | None],
+    ) -> dict[str, float]:
+        """One overnight-vitals scalar per local day, skipping null readings.
+
+        There is one main-sleep vitals fact per wake-date, so no aggregation is
+        needed; a day whose current fact has a null value for the requested
+        metric is omitted (absent, not imputed).
+        """
+        if not local_health_days:
+            return {}
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(FactRecord.local_health_day, column)
+                .join(OvernightVitals, OvernightVitals.fact_record_id == FactRecord.id)
+                .where(
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.entity_type == VITALS_ENTITY_TYPE,
+                    FactRecord.local_health_day.in_(local_health_days),
+                    FactRecord.is_current == 1,
+                    FactRecord.deletion_state == "active",
+                    FactRecord.exclude_from_load == 0,
+                    column.is_not(None),
+                )
+            ).all()
+        return {day: float(value) for day, value in rows if day is not None and value is not None}

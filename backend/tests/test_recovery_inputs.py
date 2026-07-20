@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
-from akunaki.adapters.db.models import FactRecord, SleepSession, Tenant
+from akunaki.adapters.db.models import FactRecord, OvernightVitals, SleepSession, Tenant
 from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
@@ -174,7 +174,7 @@ def test_adherence_present_when_duration_known(
     factory: sessionmaker[Session],
 ) -> None:
     _seed_session(factory, day=TARGET_DAY, duration_min=420.0, time_in_bed_min=None, fact_id="d")
-    components = RecoveryInputService(features=FactRepository(factory)).sleep_components(
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
         tenant_id="tenant-1", local_health_day=TARGET_DAY
     )
     codes = {c.code for c in components}
@@ -188,7 +188,7 @@ def test_efficiency_component_omitted_without_mature_baseline(
 ) -> None:
     # Efficiency known today but no prior series -> baseline insufficient -> omit.
     _seed_session(factory, day=TARGET_DAY, duration_min=432.0, time_in_bed_min=480.0, fact_id="t")
-    components = RecoveryInputService(features=FactRepository(factory)).sleep_components(
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
         tenant_id="tenant-1", local_health_day=TARGET_DAY
     )
     codes = {c.code for c in components}
@@ -212,7 +212,7 @@ def test_efficiency_component_present_with_mature_baseline(
     _seed_session(
         factory, day=TARGET_DAY, duration_min=460.0, time_in_bed_min=480.0, fact_id="today"
     )
-    components = RecoveryInputService(features=FactRepository(factory)).sleep_components(
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
         tenant_id="tenant-1", local_health_day=TARGET_DAY
     )
     codes = {c.code for c in components}
@@ -236,7 +236,7 @@ def test_sleep_only_recovery_is_insufficient(
     _seed_session(
         factory, day=TARGET_DAY, duration_min=460.0, time_in_bed_min=480.0, fact_id="today"
     )
-    components = RecoveryInputService(features=FactRepository(factory)).sleep_components(
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
         tenant_id="tenant-1", local_health_day=TARGET_DAY
     )
     result = evaluate_recovery(components)
@@ -245,7 +245,111 @@ def test_sleep_only_recovery_is_insufficient(
 
 
 def test_no_sleep_yields_no_components(factory: sessionmaker[Session]) -> None:
-    components = RecoveryInputService(features=FactRepository(factory)).sleep_components(
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
         tenant_id="tenant-1", local_health_day=TARGET_DAY
     )
     assert components == []
+
+
+# ---------------------------------------------------------------------------
+# Overnight vitals: the path to a real score
+# ---------------------------------------------------------------------------
+
+
+def _seed_vitals(
+    factory: sessionmaker[Session],
+    *,
+    day: str,
+    fact_id: str,
+    hrv_ms: float | None = 60.0,
+    resting_hr_bpm: float | None = 50.0,
+) -> None:
+    with factory() as session, session.begin():
+        session.add(
+            FactRecord(
+                id=fact_id,
+                tenant_id="tenant-1",
+                connection_id=None,
+                provider="oura",
+                entity_type="overnight_vitals",
+                vendor_record_id=fact_id,
+                origin=None,
+                method="wearable",
+                utc_instant=NOW_S,
+                start_utc=NOW_S,
+                end_utc=NOW_S,
+                source_offset_minutes=0,
+                iana_timezone="UTC",
+                local_health_day=day,
+                unit=None,
+                quality="high",
+                confidence=1.0,
+                freshness_at=NOW_S,
+                raw_revision_id=None,
+                raw_payload_id=None,
+                schema_version="v1",
+                normalizer_version="oura_vitals_v0.1.0",
+                content_hash=fact_id,
+                fact_key=f"overnight_vitals:{fact_id}",
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                deletion_state="active",
+                exclude_from_load=0,
+                created_at=NOW_S,
+            )
+        )
+        session.add(
+            OvernightVitals(
+                fact_record_id=fact_id,
+                tenant_id="tenant-1",
+                hrv_ms=hrv_ms,
+                resting_hr_bpm=resting_hr_bpm,
+            )
+        )
+
+
+def test_hrv_query_omits_days_with_no_reading(factory: sessionmaker[Session]) -> None:
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="v1", hrv_ms=55.0, resting_hr_bpm=None)
+    repo = FactRepository(factory)
+    hrv = repo.daily_hrv(tenant_id="tenant-1", local_health_days=[TARGET_DAY])
+    rhr = repo.daily_resting_hr(tenant_id="tenant-1", local_health_days=[TARGET_DAY])
+    assert hrv[TARGET_DAY] == 55.0
+    assert TARGET_DAY not in rhr  # this fact carries no RHR
+
+
+def test_hrv_and_rhr_components_appear_with_mature_baseline(
+    factory: sessionmaker[Session],
+) -> None:
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}", hrv_ms=60.0, resting_hr_bpm=50.0)
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="tv", hrv_ms=70.0, resting_hr_bpm=46.0)
+    _seed_session(factory, day=TARGET_DAY, duration_min=460.0, time_in_bed_min=None, fact_id="ts")
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    codes = {c.code for c in components}
+    assert ComponentCode.HRV in codes
+    assert ComponentCode.RESTING_HR in codes
+    assert ComponentCode.SLEEP_ADHERENCE in codes
+
+
+def test_full_coverage_reaches_a_real_score(factory: sessionmaker[Session]) -> None:
+    # Adherence (0.20) + HRV (0.25) + RHR (0.15) = 0.60 available weight, which
+    # clears the gate: the previously insufficient tenant now gets a score.
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}", hrv_ms=60.0, resting_hr_bpm=50.0)
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="tv", hrv_ms=62.0, resting_hr_bpm=49.0)
+    _seed_session(factory, day=TARGET_DAY, duration_min=470.0, time_in_bed_min=None, fact_id="ts")
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    result = evaluate_recovery(components)
+    assert result.status is not RecoveryStatus.INSUFFICIENT
+    assert result.score is not None
+    assert 0 <= result.score <= 100

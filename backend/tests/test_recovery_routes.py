@@ -1,9 +1,10 @@
 """End-to-end coverage of ``/v1/recovery`` over real HTTP.
 
-The whole assembled scoring path runs behind a real authenticated request. For
-any current (sleep-only) tenant the honest outcome is ``insufficient`` with a
-null score and disclosed data gaps; the tests pin that so a future regression
-that fabricates a score is caught. Facts are seeded as ORM rows.
+The whole assembled scoring path runs behind a real authenticated request. A
+sleep-only tenant is honestly ``insufficient`` with a null score and disclosed
+gaps (pinned so a fabricated-score regression is caught); a tenant with
+overnight HRV/RHR and a mature baseline gets a real score. Facts are seeded as
+ORM rows.
 """
 
 from __future__ import annotations
@@ -19,7 +20,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
-from akunaki.adapters.db.models import FactRecord, SleepSession, Tenant, User
+from akunaki.adapters.db.models import (
+    FactRecord,
+    OvernightVitals,
+    SleepSession,
+    Tenant,
+    User,
+)
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import SESSION_COOKIE_NAME
@@ -144,6 +151,60 @@ def _seed_sleep(
         )
 
 
+def _seed_vitals(
+    factory: sessionmaker[Session],
+    *,
+    day: str,
+    fact_id: str,
+    hrv_ms: float = 60.0,
+    resting_hr_bpm: float = 50.0,
+) -> None:
+    with factory() as session, session.begin():
+        session.add(
+            FactRecord(
+                id=fact_id,
+                tenant_id="tenant-1",
+                connection_id=None,
+                provider="oura",
+                entity_type="overnight_vitals",
+                vendor_record_id=fact_id,
+                origin=None,
+                method="wearable",
+                utc_instant=NOW_S,
+                start_utc=NOW_S,
+                end_utc=NOW_S,
+                source_offset_minutes=0,
+                iana_timezone="UTC",
+                local_health_day=day,
+                unit=None,
+                quality="high",
+                confidence=1.0,
+                freshness_at=NOW_S,
+                raw_revision_id=None,
+                raw_payload_id=None,
+                schema_version="v1",
+                normalizer_version="oura_vitals_v0.1.0",
+                content_hash=fact_id,
+                fact_key=f"overnight_vitals:{fact_id}",
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                deletion_state="active",
+                exclude_from_load=0,
+                created_at=NOW_S,
+            )
+        )
+        session.add(
+            OvernightVitals(
+                fact_record_id=fact_id,
+                tenant_id="tenant-1",
+                hrv_ms=hrv_ms,
+                resting_hr_bpm=resting_hr_bpm,
+            )
+        )
+
+
 def _login(client: TestClient, factory: sessionmaker[Session]) -> None:
     issued = SessionRepository(factory).issue(
         session_id="sess-user-1",
@@ -214,3 +275,21 @@ def test_response_never_carries_a_fabricated_score(
     _login(client, factory)
     body = client.get("/v1/recovery", params={"day": TARGET_DAY}).json()
     assert body["score"] is None
+
+
+def test_hrv_and_rhr_yield_a_real_score(client: TestClient, factory: sessionmaker[Session]) -> None:
+    # With overnight vitals and a mature baseline, the gate clears and the
+    # surface returns a real score with HRV/RHR among its factors.
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}")
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="tv", hrv_ms=64.0, resting_hr_bpm=48.0)
+    _seed_sleep(factory, day=TARGET_DAY, duration_min=470.0, fact_id="ts")
+    _login(client, factory)
+
+    body = client.get("/v1/recovery", params={"day": TARGET_DAY}).json()
+    assert body["status"] != "insufficient"
+    assert body["score"] is not None
+    assert 0 <= body["score"] <= 100
+    factor_codes = {f["factor_code"] for f in body["factors"]}
+    assert {"hrv", "resting_hr", "sleep_adherence"} <= factor_codes
