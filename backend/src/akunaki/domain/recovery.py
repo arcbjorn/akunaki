@@ -121,6 +121,13 @@ class RecoveryFactor:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryGap:
+    """A disclosed reason the recovery evaluation is incomplete."""
+
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryResult:
     """A recovery evaluation. ``score`` is None when the gate fails."""
 
@@ -213,6 +220,27 @@ def evaluate_recovery(components: list[RecoveryComponent]) -> RecoveryResult:
         confidence=confidence,
         factors=factors,
     )
+
+
+def recovery_data_gaps(components: list[RecoveryComponent]) -> tuple[RecoveryGap, ...]:
+    """Disclosed gate shortfalls for a component set, in a stable order.
+
+    Empty when the sufficiency gate passes. Each gap names a concrete missing
+    requirement so a client can explain *why* a score is withheld rather than
+    showing a fabricated midpoint.
+    """
+    present = {comp.code for comp in components}
+    available_weight = sum(COMPONENT_WEIGHTS[code] for code in present)
+    gaps: list[RecoveryGap] = []
+
+    if ComponentCode.SLEEP_ADHERENCE not in present:
+        gaps.append(RecoveryGap(code="missing_authoritative_sleep"))
+    if not (ComponentCode.HRV in present or ComponentCode.RESTING_HR in present):
+        gaps.append(RecoveryGap(code="missing_hrv_or_resting_hr"))
+    if available_weight < MIN_AVAILABLE_WEIGHT:
+        gaps.append(RecoveryGap(code="insufficient_component_coverage"))
+
+    return tuple(gaps)
 
 
 def _gate_passes(

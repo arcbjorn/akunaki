@@ -20,6 +20,7 @@ from akunaki.domain.recovery import (
     baseline_component_score,
     evaluate_recovery,
     freshness_one,
+    recovery_data_gaps,
     sleep_target_adherence,
 )
 
@@ -304,6 +305,47 @@ def test_factors_disclose_present_and_absent() -> None:
 
 def test_formula_version_pinned() -> None:
     assert evaluate_recovery(_sufficient_set()).formula_version == "general_recovery_v0.1.0"
+
+
+# ---------------------------------------------------------------------------
+# Data gaps
+# ---------------------------------------------------------------------------
+
+
+def test_no_gaps_when_gate_passes() -> None:
+    assert recovery_data_gaps(_sufficient_set()) == ()
+
+
+def test_sleep_only_reports_missing_hrv_or_rhr() -> None:
+    # Adherence present but no HRV/RHR: exactly the current-system gap.
+    gaps = recovery_data_gaps([_comp(ComponentCode.SLEEP_ADHERENCE, 80.0)])
+    codes = {g.code for g in gaps}
+    assert "missing_hrv_or_resting_hr" in codes
+    # Adherence alone is 0.20 < 0.60, so coverage is also flagged.
+    assert "insufficient_component_coverage" in codes
+    assert "missing_authoritative_sleep" not in codes
+
+
+def test_missing_sleep_is_reported() -> None:
+    gaps = recovery_data_gaps(
+        [
+            _comp(ComponentCode.HRV, 80.0),
+            _comp(ComponentCode.RESTING_HR, 80.0),
+            _comp(ComponentCode.TEMPERATURE, 80.0),
+        ]
+    )
+    codes = {g.code for g in gaps}
+    assert "missing_authoritative_sleep" in codes
+    assert "missing_hrv_or_resting_hr" not in codes
+
+
+def test_empty_components_report_all_gaps() -> None:
+    codes = {g.code for g in recovery_data_gaps([])}
+    assert codes == {
+        "missing_authoritative_sleep",
+        "missing_hrv_or_resting_hr",
+        "insufficient_component_coverage",
+    }
 
 
 def test_duplicate_component_rejected() -> None:
