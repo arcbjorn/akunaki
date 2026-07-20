@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (currently `insufficient` for want of HRV/RHR data, disclosed honestly), and the composite **`/v1/today`** view stitching recovery and sleep. Not implemented: other detail tables, HRV/RHR/temperature ingestion, source selection, score persistence, the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR from the Oura sleep payload), and the composite **`/v1/today`** view stitching recovery and sleep. Not implemented: temperature/respiratory/activity/workout detail tables, source selection, score persistence, the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -96,7 +96,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260719_0011   # drop oidc login states
+uv run alembic downgrade 20260719_0012   # drop overnight vitals
+uv run alembic downgrade 20260719_0011   # also drop oidc login states
 uv run alembic downgrade 20260719_0010   # also drop users and sessions
 uv run alembic downgrade 20260719_0009   # also revert tenant-scoped fact indexes
 uv run alembic downgrade 20260719_0008   # also drop deletion pipeline
@@ -126,6 +127,7 @@ uv run alembic current
 | `20260719_0010` | tenant-scoped fact identity indexes |
 | `20260719_0011` | `users`, `sessions` (hash-only token storage) |
 | `20260719_0012` | `login_states` (hashed state + nonce, sealed PKCE verifier) |
+| `20260720_0013` | `overnight_vitals` (HRV, resting HR detail) |
 
 ### Sync transport layer (`0006`)
 
@@ -307,7 +309,7 @@ Recovery is the **only** 0-100 score in v0.1.0 (`general_recovery_v0.1.0`). The 
 curl --cookie akunaki_session=<token> 'localhost:8000/v1/recovery?day=2026-07-20'
 ```
 
-The sufficiency gate requires an authoritative sleep duration **and** HRV or overnight RHR **and** ≥ 0.60 available weight. No fact table sources HRV/RHR yet, so **every current tenant returns `insufficient` with a null score**, disclosing `missing_hrv_or_resting_hr` in `data_gaps` — never a fabricated midpoint. This is the intended behavior, not a stub: when wearable HRV/RHR ingestion lands, the same path produces a real score with no route change.
+The sufficiency gate requires an authoritative sleep duration **and** HRV or overnight RHR **and** ≥ 0.60 available weight. Overnight HRV/RHR now ingest from the Oura sleep payload (`overnight_vitals`), so a tenant with a mature vitals baseline gets a real 0-100 score with HRV/RHR among its factors. A tenant without HRV/RHR is honestly `insufficient` with a null score, disclosing `missing_hrv_or_resting_hr` in `data_gaps` — never a fabricated midpoint.
 
 | Layer | Responsibility |
 |-------|----------------|
