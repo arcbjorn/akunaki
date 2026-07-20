@@ -60,6 +60,14 @@ class RecoveryResponse(BaseModel):
     factors: list[RecoveryFactorResponse]
     data_gaps: list[RecoveryDataGapResponse]
     formula_version: str
+    freshness_at: str | None = Field(
+        default=None,
+        description="UTC RFC3339 when the served score was computed; null if computed on read.",
+    )
+    version_n: int | None = Field(
+        default=None,
+        description="Version of the served score; null if computed on read.",
+    )
 
 
 def _recovery_service(
@@ -122,4 +130,6 @@ def recovery(
         ],
         data_gaps=[RecoveryDataGapResponse(code=gap.code) for gap in surface.data_gaps],
         formula_version=surface.formula_version,
+        freshness_at=surface.freshness_at,
+        version_n=surface.version_n,
     )

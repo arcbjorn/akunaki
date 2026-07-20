@@ -31,7 +31,12 @@ from akunaki.domain.recovery import (
 
 @dataclass(frozen=True, slots=True)
 class RecoverySurface:
-    """The recovery view for one local health day."""
+    """The recovery view for one local health day.
+
+    ``freshness_at`` and ``version_n`` are populated when the surface is served
+    from a persisted score; they are None for a surface computed on read (not
+    yet persisted, so it has no stored version or freshness to disclose).
+    """
 
     local_health_day: str
     score_code: str
@@ -42,6 +47,8 @@ class RecoverySurface:
     factors: tuple[RecoveryFactor, ...]
     data_gaps: tuple[RecoveryGap, ...]
     formula_version: str
+    freshness_at: str | None = None
+    version_n: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +203,8 @@ def _surface_from_stored(stored: StoredRecoveryScore) -> RecoverySurface:
         ),
         data_gaps=recovery_data_gaps_from_codes(present_codes),
         formula_version=stored.formula_version,
+        freshness_at=stored.freshness_at,
+        version_n=stored.version_n,
     )
 
 

@@ -350,3 +350,17 @@ def test_stored_score_is_served(client: TestClient, factory: sessionmaker[Sessio
     assert body["status"] == "partial"
     assert body["score"] == 81
     assert {f["factor_code"] for f in body["factors"]} == {"hrv"}
+    # Served metadata is disclosed for a stored score.
+    assert body["version_n"] == 1
+    assert body["freshness_at"] == NOW_S
+
+
+def test_computed_on_read_has_no_stored_metadata(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    # No score row: the surface computes on read, so version/freshness are null.
+    _seed_sleep(factory, day=TARGET_DAY, duration_min=420.0, fact_id="today")
+    _login(client, factory)
+    body = client.get("/v1/recovery", params={"day": TARGET_DAY}).json()
+    assert body["version_n"] is None
+    assert body["freshness_at"] is None

@@ -18,7 +18,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
-from akunaki.adapters.db.models import FactRecord, SleepSession, Tenant, User
+from akunaki.adapters.db.models import (
+    DailyHealthScore,
+    FactRecord,
+    SleepSession,
+    Tenant,
+    User,
+)
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import SESSION_COOKIE_NAME
@@ -153,10 +159,48 @@ def _login(client: TestClient, factory: sessionmaker[Session]) -> None:
     client.cookies.set(SESSION_COOKIE_NAME, issued.token)
 
 
+def _seed_score(factory: sessionmaker[Session], *, day: str, score: int) -> None:
+    with factory() as session, session.begin():
+        session.add(
+            DailyHealthScore(
+                id=f"score-{day}",
+                tenant_id="tenant-1",
+                local_health_day=day,
+                score_code="recovery",
+                status="partial",
+                score=score,
+                available_weight=0.60,
+                confidence=0.7,
+                formula_version="general_recovery_v0.1.0",
+                dependency_hash="seeded",
+                freshness_at=NOW_S,
+                as_of_at=NOW_S,
+                version_n=2,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                created_at=NOW_S,
+            )
+        )
+
+
 def test_requires_a_session() -> None:
     client = TestClient(create_app(Settings(database_url="sqlite+libsql:///:memory:")))
     response = client.get("/v1/today", params={"day": TARGET_DAY})
     assert response.status_code == 401
+
+
+def test_today_carries_served_score_freshness(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    _seed_score(factory, day=TARGET_DAY, score=77)
+    _seed_sleep(factory, day=TARGET_DAY, duration_min=420.0, fact_id="today")
+    _login(client, factory)
+
+    body = client.get("/v1/today", params={"day": TARGET_DAY}).json()
+    # The composite serves the stored recovery score and discloses its freshness.
+    assert body["recovery"]["score"] == 77
+    assert body["freshness_at"] == NOW_S
 
 
 def test_composite_carries_recovery_and_sleep(

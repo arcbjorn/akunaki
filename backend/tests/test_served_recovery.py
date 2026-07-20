@@ -85,6 +85,9 @@ def test_stored_score_is_served_without_computing() -> None:
     assert surface.score == 72
     assert surface.status is RecoveryStatus.PARTIAL
     assert compute.calls == 0  # never fell back to computing
+    # Served metadata flows through from the stored row.
+    assert surface.version_n == 3
+    assert surface.freshness_at == "2026-07-20T12:00:00Z"
 
 
 def test_stored_score_reconstructs_gaps_from_present_factors() -> None:

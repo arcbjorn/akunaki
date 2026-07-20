@@ -69,6 +69,10 @@ class TodayResponse(BaseModel):
     )
     data_gaps: list[TodayDataGap]
     formula_version: str
+    freshness_at: str | None = Field(
+        default=None,
+        description="UTC RFC3339 of the served recovery score; null if computed on read.",
+    )
 
 
 def _today_service(
@@ -135,4 +139,5 @@ def today(
         sleep=sleep_block,
         data_gaps=[TodayDataGap(code=gap.code) for gap in surface.data_gaps],
         formula_version=surface.formula_version,
+        freshness_at=surface.recovery.freshness_at,
     )
