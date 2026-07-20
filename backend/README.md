@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, and the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score). Not implemented: other detail tables, source selection and scoring, the `/v1/today` and `/v1/recovery` score surfaces, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), and the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (currently `insufficient` for want of HRV/RHR data, disclosed honestly). Not implemented: other detail tables, HRV/RHR/temperature ingestion, source selection, score persistence, the `/v1/today` composite, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -298,6 +298,26 @@ curl --cookie akunaki_session=<token> 'localhost:8000/v1/sleep?day=2026-07-19'
 | Recommendations | Gated on `>= 12` known days in the window |
 
 The arithmetic lives in the pure `akunaki.domain.sleep_summary` (golden-tested against hand-computed values); `akunaki.application.sleep_surface` fetches the window durations and the route only shapes the response. Verified end to end over real HTTP, including tenant isolation and the no-score-leak guarantee.
+
+### `GET /v1/recovery` — the one shipping score
+
+Recovery is the **only** 0-100 score in v0.1.0 (`general_recovery_v0.1.0`). The surface runs the full assembled scoring path — windowed baselines → robust z-scores → directed component mapping → weighted mean over present weights — and discloses everything: `status`, `score`, `confidence`, `available_weight`, the present `factors`, and any `data_gaps`.
+
+```bash
+curl --cookie akunaki_session=<token> 'localhost:8000/v1/recovery?day=2026-07-20'
+```
+
+The sufficiency gate requires an authoritative sleep duration **and** HRV or overnight RHR **and** ≥ 0.60 available weight. No fact table sources HRV/RHR yet, so **every current tenant returns `insufficient` with a null score**, disclosing `missing_hrv_or_resting_hr` in `data_gaps` — never a fabricated midpoint. This is the intended behavior, not a stub: when wearable HRV/RHR ingestion lands, the same path produces a real score with no route change.
+
+| Layer | Responsibility |
+|-------|----------------|
+| `domain.baseline` | 42-day rolling window, median center, MAD→robust_scale (IQR/floor fallback), maturity gate, clamped z |
+| `domain.recovery` | component weights, z→c curve, gate, weighted mean, confidence, and `recovery_data_gaps` |
+| `domain.recovery_components` | z→directed `c`; insufficient baseline → omit (never a midpoint) |
+| `application.recovery_inputs` | fetch windowed sleep features → present components |
+| `application.recovery_surface` | evaluate + package with factors and gaps |
+
+An end-to-end test guards the cardinal rule at the HTTP boundary: an insufficient recovery must expose `score: null`.
 
 ### Local driver limitation: BLOB binding
 
