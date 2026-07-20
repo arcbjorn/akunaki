@@ -151,10 +151,14 @@ def _seed_sleep(
 
 
 def _login(client: TestClient, factory: sessionmaker[Session], *, user_id: str) -> None:
+    # Issue against the real clock so the session is valid at request time; the
+    # request path validates the cookie against ``datetime.now(UTC)``. The
+    # seeded facts key off the ``day`` query parameter, not wall-clock time, so
+    # the fixed ``T0`` used for seeding is unaffected.
     issued = SessionRepository(factory).issue(
         session_id=f"sess-{user_id}",
         user_id=user_id,
-        now=T0,
+        now=datetime.now(UTC),
         ttl=timedelta(hours=12),
     )
     client.cookies.clear()
