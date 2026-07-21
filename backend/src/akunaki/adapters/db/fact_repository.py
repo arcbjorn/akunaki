@@ -467,6 +467,21 @@ class FactRepository:
             column=OvernightVitals.respiratory_rate_bpm,
         )
 
+    def daily_strain_load(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, float]:
+        """Daily strain-load per local day; empty until a load source exists.
+
+        Canonical load is computed from Polar HR-zone durations, which are not
+        ingested yet. With no load facts, every day is unknown — which is the
+        correct input for the prior-load component's strict coverage: ACWR is
+        undefined and the component is omitted, never invented.
+        """
+        return {}
+
     def _daily_vital(
         self,
         *,

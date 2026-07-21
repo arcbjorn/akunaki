@@ -23,6 +23,7 @@ from akunaki.domain.baseline import (
     z_score,
 )
 from akunaki.domain.baseline import BaselineMaturity as StatMaturity
+from akunaki.domain.prior_load import compute_acwr, prior_load_balance
 from akunaki.domain.recovery import BaselineMaturity as RecoveryMaturity
 from akunaki.domain.recovery import (
     ComponentCode,
@@ -114,6 +115,35 @@ def map_sleep_consistency_component(
     return RecoveryComponent(
         code=ComponentCode.SLEEP_CONSISTENCY,
         c=result.score,
+        quality=quality,
+        freshness_hours=freshness_hours,
+        baseline_maturity=None,
+    )
+
+
+def map_prior_load_component(
+    *,
+    acute_daily_loads: list[float | None],
+    chronic_daily_loads: list[float | None],
+    quality: str = "unknown",
+    freshness_hours: float | None = None,
+) -> RecoveryComponent | None:
+    """The prior-load balance component from descriptive ACWR, or None to omit.
+
+    Returns None when ACWR is undefined (insufficient coverage, or a zero
+    chronic denominator with nonzero acute) — the component is then absent from
+    the composite, never a midpoint. It is a direct 0-100 score with no baseline.
+    """
+    acwr = compute_acwr(
+        acute_daily_loads=acute_daily_loads,
+        chronic_daily_loads=chronic_daily_loads,
+    )
+    balance = prior_load_balance(acwr)
+    if not balance.present or balance.c is None:
+        return None
+    return RecoveryComponent(
+        code=ComponentCode.PRIOR_LOAD_BALANCE,
+        c=balance.c,
         quality=quality,
         freshness_hours=freshness_hours,
         baseline_maturity=None,

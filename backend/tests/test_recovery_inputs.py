@@ -544,3 +544,56 @@ def test_naps_are_not_valid_nights_for_consistency(
         tenant_id="tenant-1", local_health_days=[TARGET_DAY]
     )
     assert midpoints == {}
+
+
+def test_prior_load_omitted_without_a_load_source(
+    factory: sessionmaker[Session],
+) -> None:
+    # No daily-load data exists, so ACWR is undefined and the prior-load
+    # component is omitted for every tenant.
+    _seed_session(factory, day=TARGET_DAY, duration_min=420.0, time_in_bed_min=None, fact_id="ts")
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert ComponentCode.PRIOR_LOAD_BALANCE not in {c.code for c in components}
+
+
+def test_prior_load_present_when_load_is_fully_covered() -> None:
+    # A fake feature source with full 7/28 load coverage produces a defined
+    # ACWR and thus a present prior-load component.
+    from akunaki.application.recovery_inputs import FeatureSource
+
+    class _LoadOnly:
+        def daily_sleep_durations(self, *, tenant_id: str, local_health_days: list[str]):
+            return {}
+
+        def daily_sleep_efficiency(self, *, tenant_id: str, local_health_days: list[str]):
+            return {}
+
+        def daily_hrv(self, *, tenant_id: str, local_health_days: list[str]):
+            return {}
+
+        def daily_resting_hr(self, *, tenant_id: str, local_health_days: list[str]):
+            return {}
+
+        def daily_temperature_deviation(self, *, tenant_id: str, local_health_days: list[str]):
+            return {}
+
+        def daily_respiratory_rate(self, *, tenant_id: str, local_health_days: list[str]):
+            return {}
+
+        def daily_principal_sleep_midpoint(self, *, tenant_id: str, local_health_days: list[str]):
+            return {}
+
+        def daily_strain_load(self, *, tenant_id: str, local_health_days: list[str]):
+            # Every day in the 28-day window a known load of 100 -> balanced ACWR.
+            return dict.fromkeys(local_health_days, 100.0)
+
+    source: FeatureSource = _LoadOnly()
+    components = RecoveryInputService(features=source).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    by_code = {c.code: c for c in components}
+    assert ComponentCode.PRIOR_LOAD_BALANCE in by_code
+    # acute 700, chronic weekly 700 -> ACWR 1.0 -> balance band -> c = 100.
+    assert by_code[ComponentCode.PRIOR_LOAD_BALANCE].c == pytest.approx(100.0)

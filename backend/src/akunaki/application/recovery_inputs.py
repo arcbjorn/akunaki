@@ -14,9 +14,11 @@ without still returns ``insufficient``.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Protocol
 
 from akunaki.domain.baseline import MetricFamily, baseline_window_days
+from akunaki.domain.prior_load import ACUTE_WINDOW_DAYS, CHRONIC_WINDOW_DAYS
 from akunaki.domain.recovery import (
     DEFAULT_SLEEP_TARGET_MIN,
     ComponentCode,
@@ -26,6 +28,7 @@ from akunaki.domain.recovery import (
 from akunaki.domain.recovery_components import (
     BaselineInput,
     map_baseline_component,
+    map_prior_load_component,
     map_sleep_adherence_component,
     map_sleep_consistency_component,
 )
@@ -75,6 +78,12 @@ class FeatureSource(Protocol):
         self, *, tenant_id: str, local_health_days: list[str]
     ) -> dict[str, float]:
         """Principal-sleep local midpoint (minutes) per day where a valid night exists."""
+        ...
+
+    def daily_strain_load(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
+        """Daily strain-load per day where it is known (confirmed rest is 0.0)."""
         ...
 
 
@@ -178,6 +187,23 @@ class RecoveryInputService:
         if consistency is not None:
             components.append(consistency)
 
+        # Prior-load balance: descriptive ACWR over the 7-day acute and 28-day
+        # chronic windows (both ending on the target day). Strict coverage — any
+        # unknown day makes ACWR undefined and the component is omitted. Daily
+        # strain-load has no source yet (needs Polar zone data), so today every
+        # day is unknown and the component is always omitted, honestly.
+        chronic_window = _window_ending(local_health_day, CHRONIC_WINDOW_DAYS)
+        loads = self._features.daily_strain_load(
+            tenant_id=tenant_id, local_health_days=chronic_window
+        )
+        acute_window = chronic_window[-ACUTE_WINDOW_DAYS:]
+        prior_load = map_prior_load_component(
+            acute_daily_loads=[loads.get(day) for day in acute_window],
+            chronic_daily_loads=[loads.get(day) for day in chronic_window],
+        )
+        if prior_load is not None:
+            components.append(prior_load)
+
         return components
 
     @staticmethod
@@ -202,3 +228,10 @@ class RecoveryInputService:
         )
         if component is not None:
             components.append(component)
+
+
+def _window_ending(target_day: str, days: int) -> list[str]:
+    """The ``days`` calendar days ending on (and including) the target, oldest-first."""
+    anchor = date.fromisoformat(target_day)
+    span = [anchor - timedelta(days=offset) for offset in range(days)]
+    return [day.isoformat() for day in reversed(span)]
