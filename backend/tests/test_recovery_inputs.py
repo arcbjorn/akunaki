@@ -416,3 +416,131 @@ def test_full_coverage_reaches_a_real_score(factory: sessionmaker[Session]) -> N
     assert result.status is not RecoveryStatus.INSUFFICIENT
     assert result.score is not None
     assert 0 <= result.score <= 100
+
+
+def _seed_session_at(
+    factory: sessionmaker[Session],
+    *,
+    day: str,
+    start_utc: str,
+    duration_min: float,
+    fact_id: str,
+    is_nap: bool = False,
+) -> None:
+    """Seed a sleep session with an explicit onset instant (offset 0)."""
+    with factory() as session, session.begin():
+        session.add(
+            FactRecord(
+                id=fact_id,
+                tenant_id="tenant-1",
+                connection_id=None,
+                provider="oura",
+                entity_type="sleep_session",
+                vendor_record_id=fact_id,
+                origin=None,
+                method="wearable",
+                utc_instant=start_utc,
+                start_utc=start_utc,
+                end_utc=start_utc,
+                source_offset_minutes=0,
+                iana_timezone="UTC",
+                local_health_day=day,
+                unit=None,
+                quality="high",
+                confidence=1.0,
+                freshness_at=NOW_S,
+                raw_revision_id=None,
+                raw_payload_id=None,
+                schema_version="v1",
+                normalizer_version="sleep_v0.1.0",
+                content_hash=fact_id,
+                fact_key=f"sleep_session:{fact_id}",
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                deletion_state="active",
+                exclude_from_load=0,
+                created_at=NOW_S,
+            )
+        )
+        session.add(
+            SleepSession(
+                fact_record_id=fact_id,
+                tenant_id="tenant-1",
+                is_nap=1 if is_nap else 0,
+                duration_min=duration_min,
+                time_in_bed_min=None,
+                efficiency_pct=None,
+                light_min=None,
+                deep_min=None,
+                rem_min=None,
+                awake_min=None,
+            )
+        )
+
+
+def test_consistency_component_appears_with_regular_sleep(
+    factory: sessionmaker[Session],
+) -> None:
+    # Fourteen nights, each starting 23:00 UTC (offset 0) for 8h -> identical
+    # 03:00 midpoints -> R = 1 -> consistency 100.
+    for offset in range(14):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        prev = (datetime.fromisoformat(day) - timedelta(days=1)).date().isoformat()
+        _seed_session_at(
+            factory,
+            day=day,
+            start_utc=f"{prev}T23:00:00Z",
+            duration_min=480.0,
+            fact_id=f"s-{offset}",
+        )
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    by_code = {c.code: c for c in components}
+    assert ComponentCode.SLEEP_CONSISTENCY in by_code
+    assert by_code[ComponentCode.SLEEP_CONSISTENCY].c == pytest.approx(100.0)
+
+
+def test_consistency_omitted_below_seven_valid_nights(
+    factory: sessionmaker[Session],
+) -> None:
+    # Only six nights with a principal session: below the minimum -> omitted.
+    for offset in range(6):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        prev = (datetime.fromisoformat(day) - timedelta(days=1)).date().isoformat()
+        _seed_session_at(
+            factory,
+            day=day,
+            start_utc=f"{prev}T23:00:00Z",
+            duration_min=480.0,
+            fact_id=f"s-{offset}",
+        )
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert ComponentCode.SLEEP_CONSISTENCY not in {c.code for c in components}
+
+
+def test_naps_are_not_valid_nights_for_consistency(
+    factory: sessionmaker[Session],
+) -> None:
+    # Seven nap-only days: no principal (non-nap) session, so no valid night.
+    for offset in range(7):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_session_at(
+            factory,
+            day=day,
+            start_utc=f"{day}T13:00:00Z",
+            duration_min=40.0,
+            fact_id=f"nap-{offset}",
+            is_nap=True,
+        )
+
+    midpoints = FactRepository(factory).daily_principal_sleep_midpoint(
+        tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+    )
+    assert midpoints == {}

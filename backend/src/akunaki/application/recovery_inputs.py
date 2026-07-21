@@ -27,7 +27,9 @@ from akunaki.domain.recovery_components import (
     BaselineInput,
     map_baseline_component,
     map_sleep_adherence_component,
+    map_sleep_consistency_component,
 )
+from akunaki.domain.sleep_summary import debt_window_days
 
 
 class FeatureSource(Protocol):
@@ -67,6 +69,12 @@ class FeatureSource(Protocol):
         self, *, tenant_id: str, local_health_days: list[str]
     ) -> dict[str, float]:
         """Overnight respiration rate (breaths/min) per day where it is known."""
+        ...
+
+    def daily_principal_sleep_midpoint(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
+        """Principal-sleep local midpoint (minutes) per day where a valid night exists."""
         ...
 
 
@@ -156,6 +164,19 @@ class RecoveryInputService:
             # An elevated rate hurts; a low rate is not rewarded.
             direction=Direction.ELEVATED_WORSE,
         )
+
+        # Sleep consistency uses circular statistics over the 14-day debt window
+        # (not the 42-day baseline window) and no baseline; it needs >= 7 valid
+        # nights or it is omitted.
+        consistency_window = debt_window_days(local_health_day)
+        midpoints = self._features.daily_principal_sleep_midpoint(
+            tenant_id=tenant_id, local_health_days=consistency_window
+        )
+        consistency = map_sleep_consistency_component(
+            [midpoints[day] for day in consistency_window if day in midpoints]
+        )
+        if consistency is not None:
+            components.append(consistency)
 
         return components
 

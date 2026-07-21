@@ -9,13 +9,14 @@ makes re-normalization safely repeatable.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import InstrumentedAttribute, Session, sessionmaker
 
 from akunaki.adapters.db.models import FactRecord, OvernightVitals, SleepSession
-from akunaki.domain.jobs import require_aware, to_utc_rfc3339
+from akunaki.domain.jobs import parse_utc_rfc3339, require_aware, to_utc_rfc3339
+from akunaki.domain.sleep_consistency import midpoint_local_minutes
 from akunaki.domain.sleep_normalizer import ENTITY_TYPE, NORMALIZER_VERSION, SleepFact
 from akunaki.domain.vitals_normalizer import (
     ENTITY_TYPE as VITALS_ENTITY_TYPE,
@@ -358,6 +359,61 @@ class FactRepository:
                 continue
             efficiency[day] = float(duration_total) / float(in_bed_total) * 100.0
         return efficiency
+
+    def daily_principal_sleep_midpoint(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, float]:
+        """Principal-sleep local-time midpoint (minutes on [0, 1440)) per day.
+
+        The principal session is the **non-nap** session with the longest
+        duration (health-engine.md); a day with only naps has no valid night and
+        is omitted. The midpoint needs the onset instant and the source offset,
+        so a session missing either is skipped. Only current, load-eligible,
+        active facts are considered.
+        """
+        if not local_health_days:
+            return {}
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(
+                    FactRecord.local_health_day,
+                    FactRecord.start_utc,
+                    FactRecord.source_offset_minutes,
+                    SleepSession.duration_min,
+                )
+                .join(SleepSession, SleepSession.fact_record_id == FactRecord.id)
+                .where(
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.entity_type == ENTITY_TYPE,
+                    FactRecord.local_health_day.in_(local_health_days),
+                    FactRecord.is_current == 1,
+                    FactRecord.deletion_state == "active",
+                    FactRecord.exclude_from_load == 0,
+                    SleepSession.is_nap == 0,
+                )
+            ).all()
+
+        # Pick the longest non-nap session per day, then take its midpoint.
+        principal_duration: dict[str, float] = {}
+        midpoints: dict[str, float] = {}
+        for day, start_utc, offset_minutes, duration_min in rows:
+            if day is None or start_utc is None or offset_minutes is None:
+                continue
+            if duration_min <= principal_duration.get(day, -1.0):
+                continue
+            start_local = parse_utc_rfc3339(start_utc) + timedelta(minutes=offset_minutes)
+            start_local_minutes = (
+                start_local.hour * 60 + start_local.minute + start_local.second / 60.0
+            )
+            principal_duration[day] = float(duration_min)
+            midpoints[day] = midpoint_local_minutes(
+                start_local_minutes=start_local_minutes,
+                duration_minutes=float(duration_min),
+            )
+        return midpoints
 
     def daily_hrv(
         self,

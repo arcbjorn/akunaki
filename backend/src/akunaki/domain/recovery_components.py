@@ -31,6 +31,7 @@ from akunaki.domain.recovery import (
     baseline_component_score,
     sleep_target_adherence,
 )
+from akunaki.domain.sleep_consistency import sleep_consistency
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +90,30 @@ def map_sleep_adherence_component(
     return RecoveryComponent(
         code=ComponentCode.SLEEP_ADHERENCE,
         c=c,
+        quality=quality,
+        freshness_hours=freshness_hours,
+        baseline_maturity=None,
+    )
+
+
+def map_sleep_consistency_component(
+    midpoints_local_minutes: list[float],
+    *,
+    quality: str = "unknown",
+    freshness_hours: float | None = None,
+) -> RecoveryComponent | None:
+    """The sleep-consistency component: direct 0-100 (100*R), no baseline.
+
+    Returns None when the window has fewer than the required valid nights — the
+    component is then omitted, never a midpoint. Consistency uses circular
+    statistics, not a rolling baseline, so it carries no baseline maturity.
+    """
+    result = sleep_consistency(midpoints_local_minutes)
+    if not result.is_usable or result.score is None:
+        return None
+    return RecoveryComponent(
+        code=ComponentCode.SLEEP_CONSISTENCY,
+        c=result.score,
         quality=quality,
         freshness_hours=freshness_hours,
         baseline_maturity=None,
