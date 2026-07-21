@@ -104,6 +104,26 @@ def test_out_of_range_temperature_is_dropped() -> None:
     assert facts[0].hrv_ms == 62.0
 
 
+def test_respiratory_rate_is_extracted() -> None:
+    facts = normalize_vitals_payload(_page(_record(average_breath=14.5)))
+    assert facts[0].respiratory_rate_bpm == pytest.approx(14.5)
+
+
+def test_respiratory_only_record_is_kept() -> None:
+    facts = normalize_vitals_payload(
+        _page(_record(average_hrv=None, lowest_heart_rate=None, average_breath=15.0))
+    )
+    assert len(facts) == 1
+    assert facts[0].respiratory_rate_bpm == pytest.approx(15.0)
+    assert facts[0].hrv_ms is None
+
+
+def test_out_of_range_respiratory_is_dropped() -> None:
+    facts = normalize_vitals_payload(_page(_record(average_breath=999.0)))
+    assert facts[0].respiratory_rate_bpm is None
+    assert facts[0].hrv_ms == 62.0
+
+
 # ---------------------------------------------------------------------------
 # Skipping
 # ---------------------------------------------------------------------------

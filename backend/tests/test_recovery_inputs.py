@@ -264,6 +264,7 @@ def _seed_vitals(
     hrv_ms: float | None = 60.0,
     resting_hr_bpm: float | None = 50.0,
     temperature_deviation_c: float | None = None,
+    respiratory_rate_bpm: float | None = None,
 ) -> None:
     with factory() as session, session.begin():
         session.add(
@@ -308,8 +309,42 @@ def _seed_vitals(
                 hrv_ms=hrv_ms,
                 resting_hr_bpm=resting_hr_bpm,
                 temperature_deviation_c=temperature_deviation_c,
+                respiratory_rate_bpm=respiratory_rate_bpm,
             )
         )
+
+
+def test_respiratory_component_appears_with_mature_baseline(
+    factory: sessionmaker[Session],
+) -> None:
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}", respiratory_rate_bpm=14.0)
+    # Today's rate is elevated vs a flat baseline -> component below 50.
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="tv", respiratory_rate_bpm=17.0)
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    by_code = {c.code: c for c in components}
+    assert ComponentCode.RESPIRATORY in by_code
+    assert by_code[ComponentCode.RESPIRATORY].c < 50.0
+
+
+def test_below_baseline_respiratory_is_not_rewarded(
+    factory: sessionmaker[Session],
+) -> None:
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}", respiratory_rate_bpm=14.0)
+    # A lower-than-baseline rate is not rewarded: the component stays at 50.
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="tv", respiratory_rate_bpm=11.0)
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    resp = next(c for c in components if c.code is ComponentCode.RESPIRATORY)
+    assert resp.c == pytest.approx(50.0)
 
 
 def test_temperature_component_appears_with_mature_baseline(

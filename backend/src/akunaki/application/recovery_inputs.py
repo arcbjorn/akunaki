@@ -63,6 +63,12 @@ class FeatureSource(Protocol):
         """Overnight temperature deviation (°C) per day where it is known."""
         ...
 
+    def daily_respiratory_rate(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
+        """Overnight respiration rate (breaths/min) per day where it is known."""
+        ...
+
 
 class RecoveryInputService:
     """Build the present recovery components for a tenant's local day."""
@@ -137,6 +143,18 @@ class RecoveryInputService:
             family=MetricFamily.TEMPERATURE,
             # Any deviation from baseline, in either direction, is worse.
             direction=Direction.DEVIATION_WORSE,
+        )
+        self._add_baseline_component(
+            components,
+            code=ComponentCode.RESPIRATORY,
+            series=self._features.daily_respiratory_rate(
+                tenant_id=tenant_id, local_health_days=span
+            ),
+            local_health_day=local_health_day,
+            window=window,
+            family=MetricFamily.RESPIRATORY,
+            # An elevated rate hurts; a low rate is not rewarded.
+            direction=Direction.ELEVATED_WORSE,
         )
 
         return components

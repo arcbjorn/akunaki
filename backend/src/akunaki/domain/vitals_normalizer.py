@@ -3,14 +3,16 @@
 Pure: no I/O, no clock. Every timestamp comes from the payload, never
 ``now()`` — a re-run over the same raw revision produces byte-identical facts.
 
-Overnight HRV (RMSSD ms) and resting heart rate (bpm) ride along on Oura's main
-sleep record (``average_hrv``, ``lowest_heart_rate``). They are extracted into
-their own canonical entity, keyed to the **wake date** exactly as the sleep
-session is, so a night's vitals and its sleep share a local health day.
+Overnight HRV (RMSSD ms), resting heart rate (bpm), temperature deviation (°C),
+and respiration rate (breaths/min) ride along on Oura's main sleep record
+(``average_hrv``, ``lowest_heart_rate``, ``temperature_deviation`` /
+``readiness.temperature_deviation``, ``average_breath``). They are extracted
+into their own canonical entity, keyed to the **wake date** exactly as the
+sleep session is, so a night's vitals and its sleep share a local health day.
 
 Only the **main** sleep bout carries meaningful overnight vitals; naps are
-skipped. A record with neither HRV nor RHR yields no fact — an empty-signal row
-would violate the detail table's "at least one" invariant and carry nothing.
+skipped. A record with none of the four signals yields no fact — an empty-signal
+row would violate the detail table's "at least one" invariant and carry nothing.
 """
 
 from __future__ import annotations
@@ -37,6 +39,9 @@ _RHR_MAX_BPM = 200.0
 # plausible overnight departure is well within a few degrees Celsius.
 _TEMP_DEV_MIN_C = -5.0
 _TEMP_DEV_MAX_C = 5.0
+# Overnight respiration for a healthy adult sits well inside this range.
+_RESP_MIN_BPM = 3.0
+_RESP_MAX_BPM = 60.0
 
 
 class NormalizationError(Exception):
@@ -55,6 +60,7 @@ class VitalsFact:
     hrv_ms: float | None
     resting_hr_bpm: float | None
     temperature_deviation_c: float | None
+    respiratory_rate_bpm: float | None
     quality: str
     confidence: float
     content_hash: str
@@ -131,13 +137,26 @@ def _normalize_record(record: dict[str, Any]) -> VitalsFact | None:
     temperature_deviation_c = _bounded(
         _temperature_deviation(record), low=_TEMP_DEV_MIN_C, high=_TEMP_DEV_MAX_C
     )
-    if hrv_ms is None and resting_hr_bpm is None and temperature_deviation_c is None:
+    respiratory_rate_bpm = _bounded(
+        record.get("average_breath"), low=_RESP_MIN_BPM, high=_RESP_MAX_BPM
+    )
+    if (
+        hrv_ms is None
+        and resting_hr_bpm is None
+        and temperature_deviation_c is None
+        and respiratory_rate_bpm is None
+    ):
         # No overnight signal on this record; nothing to persist.
         return None
 
     offset_minutes = _offset_minutes(bedtime_end)
     local_day = _wake_local_date(end, offset_minutes)
-    quality, confidence = _quality_for(hrv=hrv_ms, rhr=resting_hr_bpm, temp=temperature_deviation_c)
+    quality, confidence = _quality_for(
+        hrv=hrv_ms,
+        rhr=resting_hr_bpm,
+        temp=temperature_deviation_c,
+        resp=respiratory_rate_bpm,
+    )
 
     fact = VitalsFact(
         vendor_record_id=vendor_id,
@@ -148,6 +167,7 @@ def _normalize_record(record: dict[str, Any]) -> VitalsFact | None:
         hrv_ms=hrv_ms,
         resting_hr_bpm=resting_hr_bpm,
         temperature_deviation_c=temperature_deviation_c,
+        respiratory_rate_bpm=respiratory_rate_bpm,
         quality=quality,
         confidence=confidence,
         content_hash="",
@@ -181,6 +201,7 @@ def _with_content_hash(fact: VitalsFact) -> VitalsFact:
             "hrv_ms": fact.hrv_ms,
             "resting_hr_bpm": fact.resting_hr_bpm,
             "temperature_deviation_c": fact.temperature_deviation_c,
+            "respiratory_rate_bpm": fact.respiratory_rate_bpm,
         },
         sort_keys=True,
     )
@@ -194,6 +215,7 @@ def _with_content_hash(fact: VitalsFact) -> VitalsFact:
         hrv_ms=fact.hrv_ms,
         resting_hr_bpm=fact.resting_hr_bpm,
         temperature_deviation_c=fact.temperature_deviation_c,
+        respiratory_rate_bpm=fact.respiratory_rate_bpm,
         quality=fact.quality,
         confidence=fact.confidence,
         content_hash=digest,
@@ -228,9 +250,11 @@ def _bounded(value: object, *, low: float, high: float) -> float | None:
     return as_float
 
 
-def _quality_for(*, hrv: float | None, rhr: float | None, temp: float | None) -> tuple[str, float]:
-    """Grade a reading by how many of the three overnight signals are present."""
-    present = sum(1 for value in (hrv, rhr, temp) if value is not None)
+def _quality_for(
+    *, hrv: float | None, rhr: float | None, temp: float | None, resp: float | None
+) -> tuple[str, float]:
+    """Grade a reading by how many overnight signals are present."""
+    present = sum(1 for value in (hrv, rhr, temp, resp) if value is not None)
     if present >= 2:
         return "high", 0.95
     return "medium", 0.7
