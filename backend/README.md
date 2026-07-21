@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR/temperature from the Oura sleep payload), the composite **`/v1/today`** view stitching recovery and sleep, **versioned score persistence** (`daily_health_scores`/`score_factors`), and the **`score.recompute` handler chained after `raw.normalize`** so scores recompute automatically as data lands. The recovery and today surfaces **serve the persisted score** (disclosing its version and freshness), falling back to compute-on-read only for a day never scored. Not implemented: temperature/respiratory/activity/workout detail tables, source selection, the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR/temperature/respiratory from the Oura sleep payload), the composite **`/v1/today`** view stitching recovery and sleep, **versioned score persistence** (`daily_health_scores`/`score_factors`), and the **`score.recompute` handler chained after `raw.normalize`** so scores recompute automatically as data lands. The recovery and today surfaces **serve the persisted score** (disclosing its version and freshness), falling back to compute-on-read only for a day never scored. Not implemented: temperature/respiratory/activity/workout detail tables, source selection, the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -96,7 +96,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260720_0014   # drop temperature column
+uv run alembic downgrade 20260720_0015   # drop respiratory column
+uv run alembic downgrade 20260720_0014   # also drop temperature column
 uv run alembic downgrade 20260720_0013   # also drop daily health scores
 uv run alembic downgrade 20260719_0012   # also drop overnight vitals
 uv run alembic downgrade 20260719_0011   # also drop oidc login states
@@ -132,6 +133,7 @@ uv run alembic current
 | `20260720_0013` | `overnight_vitals` (HRV, resting HR detail) |
 | `20260720_0014` | `daily_health_scores`, `score_factors` (versioned scores) |
 | `20260720_0015` | `overnight_vitals.temperature_deviation_c` (widened invariant) |
+| `20260720_0016` | `overnight_vitals.respiratory_rate_bpm` (widened invariant) |
 
 ### Sync transport layer (`0006`)
 
