@@ -53,6 +53,10 @@ class OAuthTokens:
     expires_at: str | None
     scopes: tuple[str, ...]
     token_type: str
+    # Some providers (Polar) return the vendor's user id alongside the token,
+    # which becomes the connection's ``external_user_id``. None when the
+    # provider does not disclose one.
+    external_user_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.access_token:

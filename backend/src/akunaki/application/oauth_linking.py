@@ -226,7 +226,9 @@ class OAuthLinkingService:
             provider=Provider(self._client.provider),
             sealed_secret=sealed_tokens,
             scopes=tokens.scopes,
-            external_user_id=None,
+            # None for a provider that discloses no user id (Oura); populated
+            # for one that returns it in the token body (Polar's x_user_id).
+            external_user_id=tokens.external_user_id,
             now=now,
         )
         logger.info(
