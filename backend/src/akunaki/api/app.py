@@ -55,12 +55,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from akunaki.api.routes.session import router as session_router
     from akunaki.api.routes.sleep import router as sleep_router
     from akunaki.api.routes.today import router as today_router
+    from akunaki.api.routes.tools import router as tools_router
 
     app.include_router(session_router)
     app.include_router(sleep_router)
     app.include_router(recovery_router)
     app.include_router(today_router)
     app.include_router(checkin_router)
+    app.include_router(tools_router)
 
     # Login routes only when OIDC is configured. An unconfigured deployment
     # exposes no half-built auth surface.
