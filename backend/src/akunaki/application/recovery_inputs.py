@@ -34,7 +34,11 @@ from akunaki.domain.anomalies import (
     detect_short_sleep,
 )
 from akunaki.domain.baseline import MetricFamily, baseline_window_days
-from akunaki.domain.prior_load import ACUTE_WINDOW_DAYS, CHRONIC_WINDOW_DAYS
+from akunaki.domain.prior_load import (
+    ACUTE_WINDOW_DAYS,
+    CHRONIC_WINDOW_DAYS,
+    compute_acwr,
+)
 from akunaki.domain.recovery import (
     DEFAULT_SLEEP_TARGET_MIN,
     ComponentCode,
@@ -224,16 +228,15 @@ class RecoveryInputService:
         # Prior-load balance: descriptive ACWR over the 7-day acute and 28-day
         # chronic windows (both ending on the target day). Strict coverage — any
         # unknown day makes ACWR undefined and the component is omitted. Daily
-        # strain-load has no source yet (needs Polar zone data), so today every
-        # day is unknown and the component is always omitted, honestly.
-        chronic_window = _window_ending(local_health_day, CHRONIC_WINDOW_DAYS)
-        loads = self._features.daily_strain_load(
-            tenant_id=tenant_id, local_health_days=chronic_window
+        # strain-load is sourced from Polar workout zone-load; a day with no
+        # workout fact is unknown (never a zero), so the window must be fully
+        # covered before the component contributes.
+        acute_loads, chronic_loads = self._acwr_windows(
+            tenant_id=tenant_id, local_health_day=local_health_day
         )
-        acute_window = chronic_window[-ACUTE_WINDOW_DAYS:]
         prior_load = map_prior_load_component(
-            acute_daily_loads=[loads.get(day) for day in acute_window],
-            chronic_daily_loads=[loads.get(day) for day in chronic_window],
+            acute_daily_loads=acute_loads,
+            chronic_daily_loads=chronic_loads,
         )
         if prior_load is not None:
             components.append(prior_load)
@@ -253,6 +256,42 @@ class RecoveryInputService:
                     )
 
         return components
+
+    def _acwr_windows(
+        self, *, tenant_id: str, local_health_day: str
+    ) -> tuple[list[float | None], list[float | None]]:
+        """The acute (7d) and chronic (28d) daily-load series ending on the day.
+
+        Each entry is a day's strain-load, or ``None`` for a day with no
+        workout fact (unknown, never a zero). The single source both the
+        prior-load recovery component and the training-label ACWR read from, so
+        they can never disagree on the ratio.
+        """
+        chronic_window = _window_ending(local_health_day, CHRONIC_WINDOW_DAYS)
+        loads = self._features.daily_strain_load(
+            tenant_id=tenant_id, local_health_days=chronic_window
+        )
+        acute_window = chronic_window[-ACUTE_WINDOW_DAYS:]
+        return (
+            [loads.get(day) for day in acute_window],
+            [loads.get(day) for day in chronic_window],
+        )
+
+    def acwr_for_day(self, *, tenant_id: str, local_health_day: str) -> float | None:
+        """The day's descriptive ACWR ratio, or None when undefined.
+
+        None covers both insufficient window coverage and the fully-rested
+        ``all_zero_rest`` case (defined as balanced, but with no numeric ratio).
+        The value the training-label and recommendation load rules read; it is
+        the same ratio the prior-load recovery component is derived from.
+        """
+        acute_loads, chronic_loads = self._acwr_windows(
+            tenant_id=tenant_id, local_health_day=local_health_day
+        )
+        return compute_acwr(
+            acute_daily_loads=acute_loads,
+            chronic_daily_loads=chronic_loads,
+        ).acwr
 
     def feature_signals(
         self,

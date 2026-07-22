@@ -706,3 +706,47 @@ def test_prior_load_omitted_with_a_coverage_gap(
         tenant_id="tenant-1", local_health_day=TARGET_DAY
     )
     assert ComponentCode.PRIOR_LOAD_BALANCE not in {c.code for c in components}
+
+
+def test_acwr_for_day_matches_full_coverage(factory: sessionmaker[Session]) -> None:
+    # Even load across the whole window -> acute 700, chronic weekly 700 ->
+    # ACWR exactly 1.0. This is the value the training-label load rules read.
+    for offset in range(28):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_workout(factory, day=day, fact_id=f"a-{offset}", session_load=100.0)
+
+    acwr = RecoveryInputService(features=FactRepository(factory)).acwr_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert acwr == pytest.approx(1.0)
+
+
+def test_acwr_for_day_reflects_an_overload_spike(factory: sessionmaker[Session]) -> None:
+    # A heavy last 7 days over a light chronic base pushes ACWR above the
+    # balance band -> the training-label load downshift can fire.
+    for offset in range(28):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        load = 200.0 if offset < 7 else 50.0
+        _seed_workout(factory, day=day, fact_id=f"o-{offset}", session_load=load)
+
+    acwr = RecoveryInputService(features=FactRepository(factory)).acwr_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert acwr is not None
+    # Acute = 7*200 = 1400; chronic = (7*200 + 21*50)/4 = 2450/4 = 612.5.
+    assert acwr == pytest.approx(1400.0 / 612.5)
+    assert acwr > 1.3  # past the descriptive balance band
+
+
+def test_acwr_for_day_is_none_without_coverage(factory: sessionmaker[Session]) -> None:
+    # One missing day -> undefined ACWR -> None, so load rules stay dormant.
+    for offset in range(28):
+        if offset == 10:
+            continue
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_workout(factory, day=day, fact_id=f"n-{offset}", session_load=100.0)
+
+    acwr = RecoveryInputService(features=FactRepository(factory)).acwr_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert acwr is None
