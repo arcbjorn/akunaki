@@ -818,6 +818,57 @@ class OvernightVitals(Base):
     )
 
 
+class Anomaly(Base):
+    """A tracked anomaly interval for one feature.
+
+    An anomaly opens when a detector's condition holds and clears only after the
+    clear condition has held for two consecutive local days. ``ended_on`` is
+    null while open; ``is_active`` mirrors that (1 while open). A partial unique
+    index keeps at most one **active** anomaly per ``(tenant_id, feature_code)``,
+    so re-detection continues the open interval rather than duplicating it.
+
+    ``consecutive_clear_days`` is engine bookkeeping for the 2-day clear rule.
+    """
+
+    __tablename__ = "anomalies"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    feature_code: Mapped[str] = mapped_column(Text, nullable=False)
+    started_on: Mapped[str] = mapped_column(Text, nullable=False)
+    ended_on: Mapped[str | None] = mapped_column(Text, nullable=True)
+    severity: Mapped[str] = mapped_column(Text, nullable=False)
+    z_like: Mapped[float | None] = mapped_column(Float, nullable=True)
+    formula_version: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    consecutive_clear_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("severity IN ('moderate', 'high')", name="anomaly_severity"),
+        CheckConstraint("is_active IN (0, 1)", name="anomaly_is_active_bool"),
+        # An active anomaly is open (no end); a closed one has an end date.
+        CheckConstraint(
+            "(is_active = 1 AND ended_on IS NULL) OR (is_active = 0 AND ended_on IS NOT NULL)",
+            name="anomaly_active_open_pair",
+        ),
+        CheckConstraint("consecutive_clear_days >= 0", name="anomaly_clear_days_nonneg"),
+        CheckConstraint("length(started_on) = 10", name="anomaly_started_format"),
+        Index(
+            "ux_anomalies_active",
+            "tenant_id",
+            "feature_code",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+        ),
+    )
+
+
 class SubjectiveCheckIn(Base):
     """A user's completed daily check-in, feeding the subjective component.
 
