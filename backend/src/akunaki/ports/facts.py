@@ -12,6 +12,7 @@ from typing import Protocol
 
 from akunaki.domain.sleep_normalizer import SleepFact
 from akunaki.domain.vitals_normalizer import VitalsFact
+from akunaki.domain.workout_normalizer import WorkoutFact
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,4 +75,19 @@ class FactWriterPort(Protocol):
         now: datetime,
     ) -> FactWriteOutcomeLike:
         """Write one overnight-vitals fact, superseding any differing version."""
+        ...
+
+    def write_workout_fact(
+        self,
+        *,
+        fact_record_id: str,
+        tenant_id: str,
+        connection_id: str | None,
+        fact: WorkoutFact,
+        raw_revision_id: str | None,
+        raw_payload_id: str | None,
+        schema_version: str,
+        now: datetime,
+    ) -> FactWriteOutcomeLike:
+        """Write one workout fact, superseding any differing current version."""
         ...
