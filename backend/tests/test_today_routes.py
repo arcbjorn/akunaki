@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.models import (
     DailyHealthScore,
+    DerivationRun,
     FactRecord,
     SleepSession,
     Tenant,
@@ -167,8 +168,29 @@ def _seed_score(
     status: str = "partial",
     confidence: float = 0.7,
     available_weight: float = 0.60,
+    provenance_token: str | None = None,
 ) -> None:
     with factory() as session, session.begin():
+        run_id: str | None = None
+        if provenance_token is not None:
+            run_id = f"run-{day}"
+            session.add(
+                DerivationRun(
+                    id=run_id,
+                    tenant_id="tenant-1",
+                    artifact_kind="score",
+                    local_health_day=day,
+                    formula_version="general_recovery_v0.1.0",
+                    dependency_hash="seeded",
+                    confidence=confidence,
+                    freshness_at=NOW_S,
+                    as_of_at=None,
+                    status=status,
+                    provenance_token=provenance_token,
+                    superseded_by=None,
+                    created_at=NOW_S,
+                )
+            )
         session.add(
             DailyHealthScore(
                 id=f"score-{day}",
@@ -183,6 +205,7 @@ def _seed_score(
                 dependency_hash="seeded",
                 freshness_at=NOW_S,
                 as_of_at=NOW_S,
+                derivation_run_id=run_id,
                 version_n=2,
                 is_current=1,
                 superseded_by=None,
@@ -231,6 +254,20 @@ def test_today_carries_served_score_freshness(
     # The composite serves the stored recovery score and discloses its freshness.
     assert body["recovery"]["score"] == 77
     assert body["freshness_at"] == NOW_S
+    # No linked derivation run: the day carries no provenance handle.
+    assert body["provenance_url"] is None
+
+
+def test_today_carries_provenance_url_when_score_has_a_run(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    _seed_score(factory, day=TARGET_DAY, score=77, provenance_token="opaque_tok_today")
+    _login(client, factory)
+
+    body = client.get("/v1/today", params={"day": TARGET_DAY}).json()
+    # The served score points at a run, so the day carries its opaque handle and
+    # never a raw id.
+    assert body["provenance_url"] == "/v1/provenance/opaque_tok_today"
 
 
 def test_composite_carries_recovery_and_sleep(

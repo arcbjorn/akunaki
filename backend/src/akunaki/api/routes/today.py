@@ -96,6 +96,19 @@ class TodayResponse(BaseModel):
         default=None,
         description="UTC RFC3339 of the served recovery score; null if computed on read.",
     )
+    provenance_url: str | None = Field(
+        default=None,
+        description=(
+            "Opaque lineage handle for the served recovery score; null when the "
+            "score was computed on read and has no persisted derivation run."
+        ),
+    )
+
+
+def _score_repository(
+    session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
+) -> ScoreRepository:
+    return ScoreRepository(session_factory)
 
 
 def _today_service(
@@ -121,6 +134,7 @@ def today(
     response: Response,
     session: CurrentSession,
     service: Annotated[TodaySurfaceService, Depends(_today_service)],
+    scores: Annotated[ScoreRepository, Depends(_score_repository)],
     day: Annotated[
         str,
         Query(
@@ -145,6 +159,11 @@ def today(
         tenant_id=session.tenant_id,
         local_health_day=day,
     )
+    token = scores.current_recovery_provenance_token(
+        tenant_id=session.tenant_id,
+        local_health_day=day,
+    )
+    provenance_url = f"/v1/provenance/{token}" if token is not None else None
     sleep_block = None
     if surface.sleep is not None:
         sleep_block = TodaySleepBlock(
@@ -179,6 +198,7 @@ def today(
         data_gaps=[TodayDataGap(code=gap.code) for gap in surface.data_gaps],
         formula_version=surface.formula_version,
         freshness_at=surface.recovery.freshness_at,
+        provenance_url=provenance_url,
     )
 
 
