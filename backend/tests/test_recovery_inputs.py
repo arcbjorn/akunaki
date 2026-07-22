@@ -18,7 +18,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
-from akunaki.adapters.db.models import FactRecord, OvernightVitals, SleepSession, Tenant
+from akunaki.adapters.db.models import (
+    FactRecord,
+    OvernightVitals,
+    SleepSession,
+    Tenant,
+    WorkoutSession,
+)
 from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
@@ -597,3 +603,106 @@ def test_prior_load_present_when_load_is_fully_covered() -> None:
     assert ComponentCode.PRIOR_LOAD_BALANCE in by_code
     # acute 700, chronic weekly 700 -> ACWR 1.0 -> balance band -> c = 100.
     assert by_code[ComponentCode.PRIOR_LOAD_BALANCE].c == pytest.approx(100.0)
+
+
+def _seed_workout(
+    factory: sessionmaker[Session],
+    *,
+    day: str,
+    fact_id: str,
+    session_load: float = 100.0,
+) -> None:
+    with factory() as session, session.begin():
+        session.add(
+            FactRecord(
+                id=fact_id,
+                tenant_id="tenant-1",
+                connection_id=None,
+                provider="polar",
+                entity_type="workout_session",
+                vendor_record_id=fact_id,
+                origin=None,
+                method="wearable",
+                utc_instant=NOW_S,
+                start_utc=NOW_S,
+                end_utc=NOW_S,
+                source_offset_minutes=0,
+                iana_timezone="UTC",
+                local_health_day=day,
+                unit=None,
+                quality="high",
+                confidence=0.9,
+                freshness_at=NOW_S,
+                raw_revision_id=None,
+                raw_payload_id=None,
+                schema_version="v1",
+                normalizer_version="polar_workout_v0.1.0",
+                content_hash=fact_id,
+                fact_key=f"workout_session:{fact_id}",
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                deletion_state="active",
+                exclude_from_load=0,
+                created_at=NOW_S,
+            )
+        )
+        session.add(
+            WorkoutSession(
+                fact_record_id=fact_id,
+                tenant_id="tenant-1",
+                session_load=session_load,
+                zone1_min=session_load,
+                zone2_min=0.0,
+                zone3_min=0.0,
+                zone4_min=0.0,
+                zone5_min=0.0,
+            )
+        )
+
+
+def test_strain_load_query_sums_included_sessions(
+    factory: sessionmaker[Session],
+) -> None:
+    _seed_workout(factory, day=TARGET_DAY, fact_id="w1", session_load=100.0)
+    _seed_workout(factory, day=TARGET_DAY, fact_id="w2", session_load=50.0)
+    loads = FactRepository(factory).daily_strain_load(
+        tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+    )
+    assert loads[TARGET_DAY] == pytest.approx(150.0)
+
+
+def test_prior_load_activates_with_full_workout_coverage(
+    factory: sessionmaker[Session],
+) -> None:
+    # Every day of the 28-day chronic window has a workout -> full coverage ->
+    # ACWR defined -> the prior-load component is present.
+    for offset in range(28):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_workout(factory, day=day, fact_id=f"w-{offset}", session_load=100.0)
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    by_code = {c.code: c for c in components}
+    assert ComponentCode.PRIOR_LOAD_BALANCE in by_code
+    # Acute 700, chronic weekly 700 -> ACWR 1.0 -> balance band -> c = 100.
+    assert by_code[ComponentCode.PRIOR_LOAD_BALANCE].c == pytest.approx(100.0)
+
+
+def test_prior_load_omitted_with_a_coverage_gap(
+    factory: sessionmaker[Session],
+) -> None:
+    # A single missing day in the 28-day window -> strict coverage fails ->
+    # ACWR undefined -> component omitted.
+    for offset in range(28):
+        if offset == 5:
+            continue  # leave day D-5 with no workout coverage
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_workout(factory, day=day, fact_id=f"w-{offset}", session_load=100.0)
+
+    components = RecoveryInputService(features=FactRepository(factory)).recovery_components(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert ComponentCode.PRIOR_LOAD_BALANCE not in {c.code for c in components}
