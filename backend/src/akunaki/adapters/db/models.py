@@ -818,6 +818,67 @@ class OvernightVitals(Base):
     )
 
 
+class SubjectiveCheckIn(Base):
+    """A user's completed daily check-in, feeding the subjective component.
+
+    Only a **completed** row (``completed_at`` non-null) is an engine input; an
+    absent or incomplete check-in omits the subjective component (never a
+    neutral midpoint). Versioned like facts: one current row per tenant/day.
+
+    Values are stored already-normalized to [0, 1]: energy higher is better,
+    stress higher is worse, symptom burden higher is worse. A null field is
+    unanswered (omit the component); ``symptom_burden_n = 0`` is a real "no
+    symptoms" reading.
+    """
+
+    __tablename__ = "subjective_check_ins"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    local_health_day: Mapped[str] = mapped_column(Text, nullable=False)
+    energy_n: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stress_n: Mapped[float | None] = mapped_column(Float, nullable=True)
+    symptom_burden_n: Mapped[float | None] = mapped_column(Float, nullable=True)
+    completed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version_n: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_current: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    superseded_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    superseded_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "energy_n IS NULL OR (energy_n >= 0 AND energy_n <= 1)",
+            name="checkin_energy_range",
+        ),
+        CheckConstraint(
+            "stress_n IS NULL OR (stress_n >= 0 AND stress_n <= 1)",
+            name="checkin_stress_range",
+        ),
+        CheckConstraint(
+            "symptom_burden_n IS NULL OR (symptom_burden_n >= 0 AND symptom_burden_n <= 1)",
+            name="checkin_symptom_range",
+        ),
+        CheckConstraint("version_n >= 1", name="checkin_version_n_pos"),
+        CheckConstraint("is_current IN (0, 1)", name="checkin_is_current_bool"),
+        CheckConstraint(
+            "(superseded_by IS NULL AND superseded_at IS NULL) OR "
+            "(superseded_by IS NOT NULL AND superseded_at IS NOT NULL AND is_current = 0)",
+            name="checkin_supersede_pair",
+        ),
+        CheckConstraint("length(local_health_day) = 10", name="checkin_local_day_format"),
+        Index(
+            "ux_subjective_check_ins_current",
+            "tenant_id",
+            "local_health_day",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+    )
+
+
 class DailyHealthScore(Base):
     """A computed daily score for one ``score_code``.
 
