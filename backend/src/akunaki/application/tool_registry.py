@@ -17,12 +17,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Generic, TypeVar
 
 from pydantic import BaseModel
-
-_In = TypeVar("_In", bound=BaseModel)
-_Out = TypeVar("_Out", bound=BaseModel)
 
 
 class Sensitivity(StrEnum):
@@ -56,7 +52,7 @@ class ToolContext:
 
 
 @dataclass(frozen=True, slots=True)
-class Tool(Generic[_In, _Out]):
+class Tool[In: BaseModel, Out: BaseModel]:
     """A typed capability plus its metadata.
 
     ``handler`` receives the validated input and the caller context and returns
@@ -65,9 +61,9 @@ class Tool(Generic[_In, _Out]):
     """
 
     name: str
-    input_model: type[_In]
-    output_model: type[_Out]
-    handler: Callable[[_In, ToolContext], _Out]
+    input_model: type[In]
+    output_model: type[Out]
+    handler: Callable[[In, ToolContext], Out]
     version: str = "v0.1.0"
     scopes: tuple[str, ...] = ()
     sensitivity: Sensitivity = Sensitivity.LOW
@@ -76,7 +72,7 @@ class Tool(Generic[_In, _Out]):
     requires_confirmation: bool = False
     audit: str | None = None
 
-    def invoke(self, raw_input: dict[str, object], context: ToolContext) -> _Out:
+    def invoke(self, raw_input: dict[str, object], context: ToolContext) -> Out:
         """Validate the raw input against the model and run the handler.
 
         Validation happens here so every adapter gets the same typed contract; a
@@ -96,7 +92,7 @@ class ToolRegistry:
 
     _tools: dict[str, Tool[BaseModel, BaseModel]] = field(default_factory=dict)
 
-    def register(self, tool: Tool[_In, _Out]) -> None:
+    def register[In: BaseModel, Out: BaseModel](self, tool: Tool[In, Out]) -> None:
         """Register a tool. A duplicate name is a wiring error, not a silent overwrite."""
         if tool.name in self._tools:
             msg = f"tool already registered: {tool.name}"
