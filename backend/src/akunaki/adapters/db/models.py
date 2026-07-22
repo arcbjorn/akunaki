@@ -853,6 +853,81 @@ class OvernightVitals(Base):
     )
 
 
+class DerivationRun(Base):
+    """One reproducible derivation of an artifact (a score, anomaly, …).
+
+    Records the exact inputs and versions a derived value was produced from, so
+    a served value can be traced without exposing table or raw ids. The opaque
+    ``provenance_token_hash`` is what a day-response URL references; the raw
+    token is returned once at creation and never stored, so a database dump
+    yields no usable token and lookup is an index probe on the hash.
+    """
+
+    __tablename__ = "derivation_runs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    artifact_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    local_health_day: Mapped[str | None] = mapped_column(Text, nullable=True)
+    formula_version: Mapped[str] = mapped_column(Text, nullable=False)
+    dependency_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    freshness_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    as_of_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance_token: Mapped[str] = mapped_column(Text, nullable=False)
+    superseded_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "artifact_kind IN ('feature', 'baseline', 'score', 'factor', "
+            "'anomaly', 'recommendation')",
+            name="derivation_artifact_kind",
+        ),
+        CheckConstraint(
+            "status IN ('ok', 'partial', 'insufficient')",
+            name="derivation_status",
+        ),
+        # The opaque token is the public handle in a day response — unguessable
+        # so it cannot be enumerated, but a stable reference, so it must be
+        # unique. It is not a secret credential; it is stored in the clear.
+        UniqueConstraint("provenance_token", name="uq_derivation_token"),
+    )
+
+
+class DerivationInput(Base):
+    """One typed input to a derivation run.
+
+    **No polymorphic pointer.** Each input names its source via a nullable typed
+    FK plus a ``role``; exactly one typed FK is non-null (SQL CHECK). Only the
+    fact FK is live today (features/baselines/selections are not persisted yet),
+    so the CHECK covers the columns that exist.
+    """
+
+    __tablename__ = "derivation_inputs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    derivation_run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("derivation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    fact_record_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("fact_records.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        # Exactly one typed FK non-null. Only the fact FK exists today, so this
+        # reduces to "the fact FK is present"; it widens with new typed columns.
+        CheckConstraint("fact_record_id IS NOT NULL", name="derivation_input_one_typed_fk"),
+    )
+
+
 class Anomaly(Base):
     """A tracked anomaly interval for one feature.
 
@@ -991,6 +1066,9 @@ class DailyHealthScore(Base):
     dependency_hash: Mapped[str] = mapped_column(Text, nullable=False)
     freshness_at: Mapped[str | None] = mapped_column(Text, nullable=True)
     as_of_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    derivation_run_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("derivation_runs.id", ondelete="SET NULL"), nullable=True
+    )
     version_n: Mapped[int] = mapped_column(Integer, nullable=False)
     is_current: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     superseded_by: Mapped[str | None] = mapped_column(Text, nullable=True)
