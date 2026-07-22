@@ -326,6 +326,33 @@ def test_second_logout_reports_already_revoked(
     assert authed.post("/v1/session/logout", headers=headers).status_code == 401
 
 
+def test_logout_everywhere_revokes_all_user_sessions(
+    factory: sessionmaker[Session], client: TestClient
+) -> None:
+    """One call ends every session the user holds, not just this browser's."""
+    first = _issue(factory, session_id="sess-a")
+    _issue(factory, session_id="sess-b")  # a second live session for the same user
+    _issue(factory, user_id="user-2", session_id="sess-other")  # another user's
+
+    response = _with_cookie(client, first.token).post(
+        "/v1/session/logout-everywhere", headers={CSRF_HEADER_NAME: first.csrf_secret}
+    )
+    assert response.status_code == 200
+    assert response.json()["revoked_count"] == 2  # both of user-1's, not user-2's
+    assert SESSION_COOKIE_NAME in response.headers["set-cookie"]
+
+    # Both of the user's sessions are dead; the other user's is untouched.
+    assert SessionRepository(factory).validate(token=first.token, now=datetime.now(UTC)).ok is False
+
+
+def test_logout_everywhere_requires_csrf(
+    factory: sessionmaker[Session], client: TestClient
+) -> None:
+    issued = _issue(factory)
+    response = _with_cookie(client, issued.token).post("/v1/session/logout-everywhere")
+    assert response.status_code == 403
+
+
 # ---------------------------------------------------------------------------
 # Tenant scoping
 # ---------------------------------------------------------------------------

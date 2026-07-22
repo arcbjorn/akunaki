@@ -39,6 +39,12 @@ class LogoutResponse(BaseModel):
     revoked: bool = Field(description="False when the session was already revoked.")
 
 
+class LogoutEverywhereResponse(BaseModel):
+    """Result of a logout-everywhere."""
+
+    revoked_count: int = Field(description="How many live sessions were revoked.")
+
+
 def _sessions(
     session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
 ) -> SessionRepository:
@@ -72,3 +78,21 @@ def logout(
     clear_session_cookie(response)
     response.headers["Cache-Control"] = "private, no-store"
     return LogoutResponse(revoked=revoked)
+
+
+@router.post("/logout-everywhere", response_model=LogoutEverywhereResponse)
+def logout_everywhere(
+    response: Response,
+    session: CurrentSession,
+    sessions: Annotated[SessionRepository, Depends(_sessions)],
+) -> LogoutEverywhereResponse:
+    """Revoke **every** live session for the user, and clear this cookie.
+
+    For a stolen-device or password-change scenario: one call ends every
+    session the user holds, not just this browser's. The current cookie is
+    cleared too, so the caller is logged out here as well.
+    """
+    count = sessions.revoke_all_for_user(user_id=session.user_id, now=datetime.now(UTC))
+    clear_session_cookie(response)
+    response.headers["Cache-Control"] = "private, no-store"
+    return LogoutEverywhereResponse(revoked_count=count)
