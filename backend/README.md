@@ -236,17 +236,22 @@ requested -> jobs_cancelled -> rows_scrubbed -> backups_scheduled -> completed
 
 ### Internal debug surface
 
-Phase one's vertical slice — "see raw sync success and latest sleep fact in API" — is served by an **internal, unauthenticated** router:
+A single **internal, unauthenticated** connection-status route remains as a local diagnostic aid:
 
 ```bash
 AKUNAKI_DEBUG_ROUTES_ENABLED=true uv run python -m akunaki.api
 curl 'localhost:8000/internal/debug/sync-status?tenant_id=t1'
-curl 'localhost:8000/internal/debug/latest-sleep?tenant_id=t1'
 ```
 
-**Off by default and fails closed**: with the flag unset the routes are not registered at all, so they are absent from the OpenAPI schema rather than merely guarded at request time. Responses carry `private, no-store`, and a cross-tenant read is a `404` — indistinguishable from "no data yet".
+**Off by default and fails closed**: with the flag unset the route is not registered at all, so it is absent from the OpenAPI schema rather than merely guarded at request time. Responses carry `private, no-store`.
 
-This is a deliberate stand-in for the authenticated `/v1` surface, which needs sessions. It should be **replaced**, not extended.
+The health-data readback (`latest-sleep`) has been **removed** — it is fully superseded by the authenticated `/v1/sleep`, so no unauthenticated route serves health values anymore. `sync-status` has no `/v1` equivalent yet; a future authenticated connection-status route would replace it.
+
+### Security headers and CORS
+
+Every response — including errors — carries a strict set of headers, applied by middleware so no route can forget them: a `default-src 'none'` CSP (this is a JSON API that renders no document), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and same-origin COOP/CORP.
+
+Cross-origin browser access is **opt-in** via `AKUNAKI_CORS_ALLOWED_ORIGINS`: credentialed CORS is granted only to the exact origins on the allow-list (never `*` with credentials), for `GET`/`POST` with the `content-type` and `x-akunaki-csrf` headers. An empty allow-list (the default) means no cross-origin browser access — a same-origin or server-to-server deployment.
 
 ### Sessions (`0011`)
 
@@ -270,6 +275,7 @@ Cookie and CSRF enforcement live in `akunaki.api.security`:
 | Rejections | One generic `401` for unknown / expired / revoked, so valid tokens cannot be enumerated |
 | Tenant | Taken from the validated session, never from a request parameter |
 | Logout | Server-side revoke **and** cookie clear; clearing alone would leave a captured token usable |
+| Logout everywhere | `POST /v1/session/logout-everywhere` revokes **every** live session for the user (stolen-device / password-change), leaving other users untouched |
 
 ### OIDC login primitives (`0012`)
 
