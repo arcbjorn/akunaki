@@ -111,6 +111,15 @@ class Settings(BaseSettings):
             "local HTTP development; a real deployment must keep it true."
         ),
     )
+    cors_allowed_origins: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Exact browser origins allowed to make credentialed cross-origin "
+            "requests (e.g. the PWA origin). Empty means no cross-origin browser "
+            "access — a same-origin or server-to-server deployment. Never '*' "
+            "with credentials."
+        ),
+    )
     debug_routes_enabled: bool = Field(
         default=False,
         description=(
