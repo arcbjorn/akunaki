@@ -115,17 +115,19 @@ def _today_service(
     session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
 ) -> TodaySurfaceService:
     facts = FactRepository(session_factory)
-    compute = RecoverySurfaceService(
-        inputs=RecoveryInputService(
-            features=facts,
-            subjective=CheckInRepository(session_factory),
-        )
+    inputs = RecoveryInputService(
+        features=facts,
+        subjective=CheckInRepository(session_factory),
     )
+    compute = RecoverySurfaceService(inputs=inputs)
     served = ServedRecoveryService(stored=ScoreRepository(session_factory), compute=compute)
     return TodaySurfaceService(
         recovery=served,
         sleep=SleepSurfaceService(durations=facts),
         anomalies=AnomalyRepository(session_factory),
+        # The same input service the recovery score reads load from, so the
+        # composite's ACWR ratio and the prior-load component never disagree.
+        load=inputs,
     )
 
 

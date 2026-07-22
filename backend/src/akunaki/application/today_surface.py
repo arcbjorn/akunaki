@@ -50,6 +50,14 @@ class AnomalySource(Protocol):
         ...
 
 
+class AcwrSource(Protocol):
+    """Port: the day's descriptive ACWR ratio, or None when undefined."""
+
+    def acwr_for_day(self, *, tenant_id: str, local_health_day: str) -> float | None:
+        """Return the day's ACWR, or None (undefined coverage or full rest)."""
+        ...
+
+
 # Blocks named in the design's /v1/today body that do not ship in v0.1.0.
 # (The training recommendation *does* ship — it is a deterministic label, not a
 # blocked score — so it is not listed here.)
@@ -85,10 +93,12 @@ class TodaySurfaceService:
         recovery: RecoverySource,
         sleep: SleepSurfaceService,
         anomalies: AnomalySource | None = None,
+        load: AcwrSource | None = None,
     ) -> None:
         self._recovery = recovery
         self._sleep = sleep
         self._anomalies = anomalies
+        self._load = load
 
     def today_for_day(
         self,
@@ -124,10 +134,17 @@ class TodaySurfaceService:
         deduped_gaps = _dedupe(gaps)
 
         # Training label and recommendations from the day's disclosed values.
-        # A persisted active high-severity anomaly floors the label at light;
-        # ACWR has no source, so load rules cannot fire — both honest today.
+        # A persisted active high-severity anomaly floors the label at light.
+        # ACWR is the descriptive prior-load ratio when the load windows are
+        # fully covered by Polar workouts; None (undefined coverage or full
+        # rest) leaves the load rules dormant, honestly.
         high_anomaly = self._anomalies is not None and self._anomalies.has_active_high_severity(
             tenant_id=tenant_id
+        )
+        acwr = (
+            self._load.acwr_for_day(tenant_id=tenant_id, local_health_day=local_health_day)
+            if self._load is not None
+            else None
         )
         hrv_c = _hrv_component_c(recovery)
         label = training_label(
@@ -138,7 +155,7 @@ class TodaySurfaceService:
                 has_high_severity_anomaly=high_anomaly,
                 symptom_burden_n=None,
                 severe_symptom_flag=False,
-                acwr=None,
+                acwr=acwr,
                 hrv_component_c=hrv_c,
             )
         )
@@ -147,7 +164,7 @@ class TodaySurfaceService:
                 sleep_debt_min=sleep.debt_14d_min if sleep_known else None,
                 debt_known_days=sleep.debt_known_days if sleep_known else 0,
                 sleep_adherence_pct=sleep.adherence_pct if sleep_known else None,
-                acwr=None,
+                acwr=acwr,
                 hrv_component_c=hrv_c,
                 training_label_is_rest=label.label is TrainingLabel.REST,
                 has_data_gap=bool(deduped_gaps),
