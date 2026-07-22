@@ -21,7 +21,7 @@ from datetime import datetime
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from akunaki.adapters.db.models import DailyHealthScore, ScoreFactor
+from akunaki.adapters.db.models import DailyHealthScore, DerivationRun, ScoreFactor
 from akunaki.application.recovery_surface import (
     RecoverySurface,
     StoredRecoveryScore,
@@ -55,6 +55,7 @@ class ScoreRepository:
         new_factor_id: Callable[[], str],
         as_of_at: datetime | None,
         now: datetime,
+        derivation_run_id: str | None = None,
     ) -> ScoreWriteOutcome:
         """Persist a recovery surface, superseding any differing current row.
 
@@ -122,6 +123,7 @@ class ScoreRepository:
                     dependency_hash=dependency_hash,
                     freshness_at=now_s,
                     as_of_at=as_of_s,
+                    derivation_run_id=derivation_run_id,
                     version_n=next_version,
                     is_current=1,
                     superseded_by=None,
@@ -157,6 +159,29 @@ class ScoreRepository:
         with self._session_factory() as session:
             return session.execute(
                 select(DailyHealthScore).where(
+                    DailyHealthScore.tenant_id == tenant_id,
+                    DailyHealthScore.local_health_day == local_health_day,
+                    DailyHealthScore.score_code == "recovery",
+                    DailyHealthScore.is_current == 1,
+                )
+            ).scalar_one_or_none()
+
+    def current_recovery_provenance_token(
+        self, *, tenant_id: str, local_health_day: str
+    ) -> str | None:
+        """The opaque provenance token of the current recovery score's run.
+
+        None when the day has no stored score, or its score predates the
+        derivation-run linkage (an on-read computed value has no run).
+        """
+        with self._session_factory() as session:
+            return session.execute(
+                select(DerivationRun.provenance_token)
+                .join(
+                    DailyHealthScore,
+                    DailyHealthScore.derivation_run_id == DerivationRun.id,
+                )
+                .where(
                     DailyHealthScore.tenant_id == tenant_id,
                     DailyHealthScore.local_health_day == local_health_day,
                     DailyHealthScore.score_code == "recovery",

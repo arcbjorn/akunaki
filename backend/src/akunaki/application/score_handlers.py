@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -27,7 +28,21 @@ from akunaki.domain.retry import PermanentJobError
 
 logger = logging.getLogger("akunaki.score_handlers")
 
-__all__ = ["SCORE_RECOMPUTE_JOB_TYPE", "ScoreRecomputeHandler", "ScoreWriterPort"]
+__all__ = [
+    "SCORE_RECOMPUTE_JOB_TYPE",
+    "DerivationInputSpec",
+    "DerivationWriterPort",
+    "ScoreRecomputeHandler",
+    "ScoreWriterPort",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationInputSpec:
+    """One typed input to record for a derivation run (role + fact id)."""
+
+    role: str
+    fact_record_id: str
 
 
 class ScoreWriteOutcomeLike(Protocol):
@@ -51,8 +66,43 @@ class ScoreWriterPort(Protocol):
         new_factor_id: Callable[[], str],
         as_of_at: datetime | None,
         now: datetime,
+        derivation_run_id: str | None = ...,
     ) -> ScoreWriteOutcomeLike:
         """Write the recovery score, superseding any differing current row."""
+        ...
+
+
+class RunCreatedLike(Protocol):
+    """A created derivation run with its opaque token."""
+
+    @property
+    def run_id(self) -> str:
+        """The run's id."""
+        ...
+
+
+class DerivationWriterPort(Protocol):
+    """Record a derivation run with its typed inputs and an opaque token."""
+
+    def create_run(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        artifact_kind: str,
+        local_health_day: str | None,
+        formula_version: str,
+        dependency_hash: str,
+        confidence: float | None,
+        freshness_at: str | None,
+        as_of_at: str | None,
+        status: str,
+        inputs: list[DerivationInputSpec],
+        generate_token: Callable[[], str],
+        new_input_id: Callable[[], str],
+        now: datetime,
+    ) -> RunCreatedLike:
+        """Create a run and mint its opaque provenance token."""
         ...
 
 
@@ -73,6 +123,8 @@ class ScoreRecomputeHandler:
         new_id: Callable[[], str],
         inputs: RecoveryInputService | None = None,
         tracker: AnomalyTracker | None = None,
+        derivations: DerivationWriterPort | None = None,
+        generate_token: Callable[[], str] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._recovery = recovery
@@ -80,6 +132,8 @@ class ScoreRecomputeHandler:
         self._new_id = new_id
         self._inputs = inputs
         self._tracker = tracker
+        self._derivations = derivations
+        self._generate_token = generate_token
         self._clock = clock
 
     def __call__(self, claim: JobClaim) -> None:
@@ -91,6 +145,32 @@ class ScoreRecomputeHandler:
             tenant_id=claim.tenant_id,
             local_health_day=local_health_day,
         )
+
+        # Record a derivation run for the score when the writer is wired, so the
+        # served value can be traced through an opaque provenance token. Typed
+        # fact-id inputs are not threaded yet (the input service exposes roles,
+        # not fact ids), so the run carries its versions/status/coverage as the
+        # traceable artifact and no per-input rows for now.
+        run_id: str | None = None
+        if self._derivations is not None and self._generate_token is not None:
+            created = self._derivations.create_run(
+                run_id=self._new_id(),
+                tenant_id=claim.tenant_id,
+                artifact_kind="score",
+                local_health_day=local_health_day,
+                formula_version=surface.formula_version,
+                dependency_hash="",
+                confidence=surface.confidence,
+                freshness_at=surface.freshness_at,
+                as_of_at=None,
+                status=surface.status.value,
+                inputs=[],
+                generate_token=self._generate_token,
+                new_input_id=self._new_id,
+                now=now,
+            )
+            run_id = created.run_id
+
         outcome = self._scores.write_recovery_score(
             score_id=self._new_id(),
             tenant_id=claim.tenant_id,
@@ -98,6 +178,7 @@ class ScoreRecomputeHandler:
             new_factor_id=self._new_id,
             as_of_at=now,
             now=now,
+            derivation_run_id=run_id,
         )
 
         # Detect and track anomalies for the day when both collaborators are

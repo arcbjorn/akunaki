@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from akunaki.adapters.connectors.oura_fetch import OuraFetchClient
 from akunaki.adapters.crypto.envelope import KEY_BYTES, EnvelopeSealer
 from akunaki.adapters.db.connection_repository import ConnectionRepository
+from akunaki.adapters.db.derivation_repository import DerivationRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.ingestion_repository import IngestionRepository, RevisionReader
@@ -179,6 +180,8 @@ def _registry(
         ),
         scores=ScoreRepository(factory),
         new_id=new_id,
+        derivations=DerivationRepository(factory),
+        generate_token=lambda: f"opaque_tok_{new_id()}",
         clock=lambda: T0,
     )
     return HandlerRegistry(

@@ -21,11 +21,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.anomaly_repository import AnomalyRepository
+from akunaki.adapters.db.derivation_repository import DerivationRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import (
     DailyHealthScore,
+    DerivationRun,
     FactRecord,
     OvernightVitals,
     ScoreFactor,
@@ -103,6 +105,8 @@ def _registry(factory: sessionmaker[Session]) -> HandlerRegistry:
             new_id=lambda: f"an-{next(_IDS)}",
             clock=lambda: T0,
         ),
+        derivations=DerivationRepository(factory),
+        generate_token=lambda: f"opaque_tok_{next(_IDS)}",
         clock=lambda: T0,
     )
     return HandlerRegistry({SCORE_RECOMPUTE_JOB_TYPE: handler})
@@ -262,6 +266,30 @@ def test_full_history_persists_a_real_score(factory: sessionmaker[Session]) -> N
     assert row.status != "insufficient"
     assert row.score is not None
     assert row.is_current == 1
+
+
+def test_recompute_creates_traceable_derivation_run(
+    factory: sessionmaker[Session],
+) -> None:
+    _seed_full_history(factory)
+    _run(factory)
+
+    with factory() as session:
+        score = session.scalars(select(DailyHealthScore)).one()
+        run = session.scalars(select(DerivationRun)).one()
+    # The persisted score points at its run, and the run carries a resolvable
+    # opaque token whose lineage matches the served score.
+    assert score.derivation_run_id == run.id
+    assert run.artifact_kind == "score"
+    assert run.provenance_token.startswith("opaque_tok_")
+
+    resolved = DerivationRepository(factory).resolve_token(
+        tenant_id="tenant-1", token=run.provenance_token
+    )
+    assert resolved is not None
+    assert resolved.artifact_kind == "score"
+    assert resolved.local_health_day == DAY
+    assert resolved.status == score.status
 
 
 def test_persisted_score_has_signed_factors(factory: sessionmaker[Session]) -> None:
