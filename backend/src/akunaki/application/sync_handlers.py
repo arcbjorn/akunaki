@@ -54,6 +54,7 @@ __all__ = [
     "InitialSyncHandler",
     "NormalizeHandler",
     "SyncConfig",
+    "sync_config_for_provider",
 ]
 
 
@@ -84,6 +85,48 @@ class SyncConfig:
         if self.max_pages < 1:
             msg = "max_pages must be >= 1"
             raise ValueError(msg)
+
+
+# The stream + schema version each provider backfills. The handler itself is
+# provider-agnostic (it takes a fetch client and a config); this is the one
+# place the per-provider stream/schema pairing lives, so wiring a connection's
+# initial sync is a lookup, not a bespoke config. A provider absent here has no
+# supported backfill and is a wiring error rather than a silent Oura fallback.
+_PROVIDER_STREAMS: dict[str, tuple[str, str]] = {
+    # Oura: the sleep stream carries both sleep and the overnight vitals the
+    # vitals normalizer extracts from the same payload.
+    "oura": ("sleep", "oura.v2"),
+    # Polar: the AccessLink exercises list, normalized to canonical workouts.
+    "polar": ("workout", "polar.v1"),
+}
+
+
+def sync_config_for_provider(
+    provider: str,
+    *,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    overlap: timedelta = DEFAULT_OVERLAP,
+    max_pages: int = MAX_PAGES,
+) -> SyncConfig:
+    """Return the backfill config for ``provider``'s supported stream.
+
+    Raises ``ValueError`` for a provider with no supported backfill, so a
+    typo or an unwired connector fails loudly instead of silently pulling the
+    Oura sleep stream.
+    """
+    try:
+        stream, schema_version = _PROVIDER_STREAMS[provider]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_PROVIDER_STREAMS))
+        msg = f"no backfill config for provider {provider!r} (supported: {supported})"
+        raise ValueError(msg) from exc
+    return SyncConfig(
+        lookback_days=lookback_days,
+        overlap=overlap,
+        max_pages=max_pages,
+        stream=stream,
+        schema_version=schema_version,
+    )
 
 
 class InitialSyncHandler:
