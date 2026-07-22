@@ -75,6 +75,20 @@ def map_baseline_component(
     )
 
 
+def baseline_z_for(signal: BaselineInput) -> float | None:
+    """The raw (undirected) robust z-score of a signal, or None if unusable.
+
+    Shares the exact baseline computation with :func:`map_baseline_component`,
+    so the z the anomaly detectors see is the same z the component score used.
+    Returns None when the baseline is insufficient — the anomaly path then has
+    no z to test, matching the component's omission.
+    """
+    baseline = compute_baseline(signal.samples, family=signal.family)
+    if not baseline.is_usable:
+        return None
+    return z_score(signal.value, baseline)
+
+
 def map_sleep_adherence_component(
     *,
     duration_min: float,

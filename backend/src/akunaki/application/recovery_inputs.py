@@ -14,9 +14,25 @@ without still returns ``insufficient``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Protocol
 
+from akunaki.application.anomaly_tracker import FeatureSignal
+from akunaki.domain.anomalies import (
+    Anomaly,
+    AnomalyCode,
+    clears_deviant_temperature,
+    clears_elevated_respiration,
+    clears_elevated_rhr,
+    clears_low_hrv,
+    clears_short_sleep,
+    detect_deviant_temperature,
+    detect_elevated_respiration,
+    detect_elevated_rhr,
+    detect_low_hrv,
+    detect_short_sleep,
+)
 from akunaki.domain.baseline import MetricFamily, baseline_window_days
 from akunaki.domain.prior_load import ACUTE_WINDOW_DAYS, CHRONIC_WINDOW_DAYS
 from akunaki.domain.recovery import (
@@ -27,6 +43,7 @@ from akunaki.domain.recovery import (
 )
 from akunaki.domain.recovery_components import (
     BaselineInput,
+    baseline_z_for,
     map_baseline_component,
     map_prior_load_component,
     map_sleep_adherence_component,
@@ -236,6 +253,137 @@ class RecoveryInputService:
                     )
 
         return components
+
+    def feature_signals(
+        self,
+        *,
+        tenant_id: str,
+        local_health_day: str,
+        target_min: int = DEFAULT_SLEEP_TARGET_MIN,
+    ) -> list[FeatureSignal]:
+        """Per-feature anomaly inputs for the day (z, detector open, clear check).
+
+        Uses the same windowed series and baseline computation as the recovery
+        components, so a feature's anomaly z is exactly the z its component saw.
+        A feature with an insufficient baseline (or no value today) yields no
+        signal — the anomaly path has nothing to test for it that day.
+        """
+        window = baseline_window_days(local_health_day)
+        span = [*window, local_health_day]
+        signals: list[FeatureSignal] = []
+
+        self._vital_signal(
+            signals,
+            code=AnomalyCode.LOW_HRV,
+            series=self._features.daily_hrv(tenant_id=tenant_id, local_health_days=span),
+            local_health_day=local_health_day,
+            window=window,
+            family=MetricFamily.HRV,
+            direction=Direction.HIGHER_BETTER,
+            detect=detect_low_hrv,
+            clears=clears_low_hrv,
+        )
+        self._vital_signal(
+            signals,
+            code=AnomalyCode.ELEVATED_RHR,
+            series=self._features.daily_resting_hr(tenant_id=tenant_id, local_health_days=span),
+            local_health_day=local_health_day,
+            window=window,
+            family=MetricFamily.RHR,
+            direction=Direction.LOWER_BETTER,
+            detect=detect_elevated_rhr,
+            clears=clears_elevated_rhr,
+        )
+        self._vital_signal(
+            signals,
+            code=AnomalyCode.DEVIANT_TEMPERATURE,
+            series=self._features.daily_temperature_deviation(
+                tenant_id=tenant_id, local_health_days=span
+            ),
+            local_health_day=local_health_day,
+            window=window,
+            family=MetricFamily.TEMPERATURE,
+            direction=Direction.DEVIATION_WORSE,
+            detect=detect_deviant_temperature,
+            clears=clears_deviant_temperature,
+        )
+        self._vital_signal(
+            signals,
+            code=AnomalyCode.ELEVATED_RESPIRATION,
+            series=self._features.daily_respiratory_rate(
+                tenant_id=tenant_id, local_health_days=span
+            ),
+            local_health_day=local_health_day,
+            window=window,
+            family=MetricFamily.RESPIRATORY,
+            direction=Direction.ELEVATED_WORSE,
+            detect=detect_elevated_respiration,
+            clears=clears_elevated_respiration,
+        )
+
+        # Short sleep: shortfall vs target OR a low sleep-duration z, cleared
+        # only when both the shortfall and the z recover.
+        durations = self._features.daily_sleep_durations(
+            tenant_id=tenant_id, local_health_days=span
+        )
+        today_duration = durations.get(local_health_day)
+        if today_duration is not None:
+            z = baseline_z_for(
+                BaselineInput(
+                    value=today_duration,
+                    samples=[durations[d] for d in window if d in durations],
+                    family=MetricFamily.SLEEP_DURATION,
+                    direction=Direction.HIGHER_BETTER,
+                )
+            )
+            if z is not None:
+                shortfall = max(0.0, target_min - today_duration)
+                signals.append(
+                    FeatureSignal(
+                        feature_code=AnomalyCode.SHORT_SLEEP.value,
+                        open_today=detect_short_sleep(shortfall_min=shortfall, z_sleep_duration=z),
+                        clear_today=clears_short_sleep(shortfall_min=shortfall, z_sleep_duration=z),
+                        z_like=z,
+                    )
+                )
+
+        return signals
+
+    @staticmethod
+    def _vital_signal(
+        signals: list[FeatureSignal],
+        *,
+        code: AnomalyCode,
+        series: dict[str, float],
+        local_health_day: str,
+        window: list[str],
+        family: MetricFamily,
+        direction: Direction,
+        detect: Callable[[float], Anomaly | None],
+        clears: Callable[[float], bool],
+    ) -> None:
+        """Append one scalar vital's anomaly signal when today's z is defined."""
+        today = series.get(local_health_day)
+        if today is None:
+            return
+        z = baseline_z_for(
+            BaselineInput(
+                value=today,
+                samples=[series[d] for d in window if d in series],
+                family=family,
+                direction=direction,
+            )
+        )
+        if z is None:
+            return
+        signals.append(
+            FeatureSignal(
+                feature_code=code.value,
+                open_today=detect(z),
+                clear_today=clears(z),
+                z_like=z,
+            )
+        )
 
     @staticmethod
     def _add_baseline_component(
