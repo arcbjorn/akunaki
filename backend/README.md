@@ -4,7 +4,7 @@ Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
 This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR/temperature/respiratory from the Oura sleep payload), the composite **`/v1/today`** view stitching recovery and sleep, **versioned score persistence** (`daily_health_scores`/`score_factors`), and the **`score.recompute` handler chained after `raw.normalize`** so scores recompute automatically as data lands. The recovery and today surfaces **serve the persisted score** (disclosing its version and freshness), falling back to compute-on-read only for a day never scored. Not implemented: activity/workout detail tables, prior-load (ACWR) and subjective components, source selection, the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR/temperature/respiratory from the Oura sleep payload), the composite **`/v1/today`** view stitching recovery and sleep, **versioned score persistence** (`daily_health_scores`/`score_factors`), and the **`score.recompute` handler chained after `raw.normalize`** so scores recompute automatically as data lands. the authenticated **`POST /v1/checkin`** write path feeding the subjective component, and recovery/today surfaces that **serve the persisted score** (disclosing its version and freshness), falling back to compute-on-read only for a day never scored. All nine recovery components have their formulas; prior-load awaits a load-ingestion stream (Polar). Not implemented: activity/workout detail tables, source selection, the strain/activity/training blocks, HTTP authorize/callback routes (deferred pending auth), webhooks, incremental sync, and the Google Health / Polar connectors.
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -96,7 +96,8 @@ Deduplication is on `(tenant_id, idempotency_key)` via an atomic `INSERT ... ON 
 ```bash
 export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run alembic upgrade head
-uv run alembic downgrade 20260720_0015   # drop respiratory column
+uv run alembic downgrade 20260720_0016   # drop subjective check-ins
+uv run alembic downgrade 20260720_0015   # also drop respiratory column
 uv run alembic downgrade 20260720_0014   # also drop temperature column
 uv run alembic downgrade 20260720_0013   # also drop daily health scores
 uv run alembic downgrade 20260719_0012   # also drop overnight vitals
@@ -134,6 +135,7 @@ uv run alembic current
 | `20260720_0014` | `daily_health_scores`, `score_factors` (versioned scores) |
 | `20260720_0015` | `overnight_vitals.temperature_deviation_c` (widened invariant) |
 | `20260720_0016` | `overnight_vitals.respiratory_rate_bpm` (widened invariant) |
+| `20260721_0017` | `subjective_check_ins` (versioned; the first user write) |
 
 ### Sync transport layer (`0006`)
 
@@ -350,6 +352,19 @@ curl --cookie akunaki_session=<token> 'localhost:8000/v1/today?day=2026-07-20'
 | Gaps | Deduplicated across the composite and the recovery gate |
 
 The composite owns no formula: `akunaki.application.today_surface` delegates to the recovery and sleep surface services and combines their disclosures. Verified end to end, including that unshipped blocks never appear as fabricated data.
+
+### `POST /v1/checkin` — the first write path
+
+A user's completed daily check-in, feeding the subjective recovery component. This is the first authenticated **write**, so it requires both the session cookie and the CSRF header (`X-Akunaki-CSRF`, echoed from login) — `require_session` enforces CSRF on state-changing methods automatically.
+
+```bash
+curl -X POST --cookie akunaki_session=<token> -H 'X-Akunaki-CSRF: <secret>' \
+  -H 'content-type: application/json' \
+  -d '{"local_health_day":"2026-07-22","energy_n":0.6,"stress_n":0.4,"symptom_burden_n":0.2}' \
+  localhost:8000/v1/checkin
+```
+
+The three inputs are normalized to [0, 1] (energy higher is better, stress and symptom burden higher are worse). The write is **versioned** — a re-submission for the same day supersedes the prior one. All three fields are required for the subjective component; per the design, a missing check-in or blank field omits the component rather than assuming a benign 50. An end-to-end test confirms a recorded check-in surfaces as the `subjective` factor in `/v1/recovery`.
 
 ### Local driver limitation: BLOB binding
 
