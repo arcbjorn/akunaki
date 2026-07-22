@@ -33,6 +33,7 @@ from akunaki.domain.recovery_components import (
     map_sleep_consistency_component,
 )
 from akunaki.domain.sleep_summary import debt_window_days
+from akunaki.domain.subjective import SubjectiveInputs, subjective_component
 
 
 class FeatureSource(Protocol):
@@ -87,11 +88,27 @@ class FeatureSource(Protocol):
         ...
 
 
+class SubjectiveSource(Protocol):
+    """Port: the current completed check-in's normalized inputs for a day."""
+
+    def current_check_in_inputs(
+        self, *, tenant_id: str, local_health_day: str
+    ) -> SubjectiveInputs | None:
+        """Return the day's completed check-in inputs, or None when absent."""
+        ...
+
+
 class RecoveryInputService:
     """Build the present recovery components for a tenant's local day."""
 
-    def __init__(self, *, features: FeatureSource) -> None:
+    def __init__(
+        self,
+        *,
+        features: FeatureSource,
+        subjective: SubjectiveSource | None = None,
+    ) -> None:
         self._features = features
+        self._subjective = subjective
 
     def recovery_components(
         self,
@@ -203,6 +220,20 @@ class RecoveryInputService:
         )
         if prior_load is not None:
             components.append(prior_load)
+
+        # Subjective: only a completed check-in with all three normalized fields
+        # present contributes; a missing check-in or blank field omits it (never
+        # a neutral midpoint). Absent unless a subjective source is wired.
+        if self._subjective is not None:
+            inputs = self._subjective.current_check_in_inputs(
+                tenant_id=tenant_id, local_health_day=local_health_day
+            )
+            if inputs is not None:
+                subjective = subjective_component(inputs)
+                if subjective.present and subjective.c is not None:
+                    components.append(
+                        RecoveryComponent(code=ComponentCode.SUBJECTIVE, c=subjective.c)
+                    )
 
         return components
 

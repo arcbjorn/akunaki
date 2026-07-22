@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.db.checkin_repository import CheckInRepository
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.api.app import get_session_factory
@@ -75,7 +76,10 @@ def _recovery_service(
 ) -> ServedRecoveryService:
     # Serve the persisted score; fall back to computing for a day never scored.
     compute = RecoverySurfaceService(
-        inputs=RecoveryInputService(features=FactRepository(session_factory))
+        inputs=RecoveryInputService(
+            features=FactRepository(session_factory),
+            subjective=CheckInRepository(session_factory),
+        )
     )
     return ServedRecoveryService(
         stored=ScoreRepository(session_factory),
