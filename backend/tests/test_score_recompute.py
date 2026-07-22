@@ -20,6 +20,7 @@ from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.db.anomaly_repository import AnomalyRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.job_repository import JobRepository
@@ -32,6 +33,7 @@ from akunaki.adapters.db.models import (
     Tenant,
 )
 from akunaki.adapters.db.score_repository import ScoreRepository
+from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.application.recovery_surface import RecoverySurfaceService
@@ -90,10 +92,17 @@ def factory(db_url: str) -> Iterator[sessionmaker[Session]]:
 
 def _registry(factory: sessionmaker[Session]) -> HandlerRegistry:
     facts = FactRepository(factory)
+    inputs = RecoveryInputService(features=facts)
     handler = ScoreRecomputeHandler(
-        recovery=RecoverySurfaceService(inputs=RecoveryInputService(features=facts)),
+        recovery=RecoverySurfaceService(inputs=inputs),
         scores=ScoreRepository(factory),
         new_id=lambda: f"id-{next(_IDS)}",
+        inputs=inputs,
+        tracker=AnomalyTracker(
+            store=AnomalyRepository(factory),
+            new_id=lambda: f"an-{next(_IDS)}",
+            clock=lambda: T0,
+        ),
         clock=lambda: T0,
     )
     return HandlerRegistry({SCORE_RECOMPUTE_JOB_TYPE: handler})
@@ -175,7 +184,13 @@ def _seed_sleep(factory: sessionmaker[Session], *, day: str, fact_id: str) -> No
         )
 
 
-def _seed_vitals(factory: sessionmaker[Session], *, day: str, fact_id: str) -> None:
+def _seed_vitals(
+    factory: sessionmaker[Session],
+    *,
+    day: str,
+    fact_id: str,
+    hrv_ms: float = 60.0,
+) -> None:
     with factory() as session, session.begin():
         session.add(
             FactRecord(
@@ -216,7 +231,7 @@ def _seed_vitals(factory: sessionmaker[Session], *, day: str, fact_id: str) -> N
             OvernightVitals(
                 fact_record_id=fact_id,
                 tenant_id="tenant-1",
-                hrv_ms=60.0,
+                hrv_ms=hrv_ms,
                 resting_hr_bpm=50.0,
             )
         )
@@ -311,3 +326,46 @@ def test_malformed_payload_dead_letters(factory: sessionmaker[Session]) -> None:
         job = session.get(Job, "rc-bad")
         assert job is not None
         assert job.status == JobStatus.DEAD_LETTER.value
+
+
+def test_recompute_detects_and_persists_an_anomaly(
+    factory: sessionmaker[Session],
+) -> None:
+    # A mature HRV baseline centered near 60 with small spread, then today's
+    # HRV far below -> low-HRV anomaly opens during recompute.
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(DAY) - timedelta(days=offset)).date().isoformat()
+        hrv = 58.0 if offset % 2 else 62.0  # spread so robust_scale > 0
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}", hrv_ms=hrv)
+    _seed_vitals(factory, day=DAY, fact_id="tv", hrv_ms=20.0)
+    _seed_sleep(factory, day=DAY, fact_id="ts")
+
+    worker = _run(factory)
+    assert worker.stats.succeeded == 1
+
+    with factory() as session:
+        from akunaki.adapters.db.models import Anomaly as AnomalyRow
+
+        anomalies = session.scalars(select(AnomalyRow)).all()
+    codes = {a.feature_code for a in anomalies}
+    assert "low_hrv" in codes
+    low_hrv = next(a for a in anomalies if a.feature_code == "low_hrv")
+    assert low_hrv.is_active == 1
+    assert low_hrv.started_on == DAY
+
+
+def test_recompute_opens_no_anomaly_when_in_range(
+    factory: sessionmaker[Session],
+) -> None:
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(DAY) - timedelta(days=offset)).date().isoformat()
+        hrv = 58.0 if offset % 2 else 62.0
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}", hrv_ms=hrv)
+    _seed_vitals(factory, day=DAY, fact_id="tv", hrv_ms=61.0)  # normal
+    _seed_sleep(factory, day=DAY, fact_id="ts")
+
+    _run(factory)
+    with factory() as session:
+        from akunaki.adapters.db.models import Anomaly as AnomalyRow
+
+        assert session.scalars(select(AnomalyRow)).all() == []

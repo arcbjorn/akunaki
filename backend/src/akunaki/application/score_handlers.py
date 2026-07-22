@@ -19,6 +19,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
+from akunaki.application.anomaly_tracker import AnomalyTracker
+from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.application.recovery_surface import RecoverySurface, RecoverySurfaceService
 from akunaki.domain.jobs import SCORE_RECOMPUTE_JOB_TYPE, JobClaim
 from akunaki.domain.retry import PermanentJobError
@@ -69,11 +71,15 @@ class ScoreRecomputeHandler:
         recovery: RecoverySurfaceService,
         scores: ScoreWriterPort,
         new_id: Callable[[], str],
+        inputs: RecoveryInputService | None = None,
+        tracker: AnomalyTracker | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._recovery = recovery
         self._scores = scores
         self._new_id = new_id
+        self._inputs = inputs
+        self._tracker = tracker
         self._clock = clock
 
     def __call__(self, claim: JobClaim) -> None:
@@ -93,6 +99,19 @@ class ScoreRecomputeHandler:
             as_of_at=now,
             now=now,
         )
+
+        # Detect and track anomalies for the day when both collaborators are
+        # wired. The anomaly state machine advances one day per recompute.
+        if self._inputs is not None and self._tracker is not None:
+            signals = self._inputs.feature_signals(
+                tenant_id=claim.tenant_id,
+                local_health_day=local_health_day,
+            )
+            self._tracker.track(
+                tenant_id=claim.tenant_id,
+                local_health_day=local_health_day,
+                signals=signals,
+            )
 
         logger.info(
             "recomputed recovery score",
