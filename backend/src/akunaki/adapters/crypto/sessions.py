@@ -38,6 +38,15 @@ def generate_csrf_secret() -> str:
     return _b64url(secrets.token_bytes(_CSRF_ENTROPY_BYTES))
 
 
+def generate_provenance_token() -> str:
+    """Return a fresh opaque provenance token for a day-response URL.
+
+    Like the session token, only its hash is stored; the raw token is the
+    unguessable public handle to a derivation run, exposing no table or run id.
+    """
+    return "opaque_tok_" + _b64url(secrets.token_bytes(_TOKEN_ENTROPY_BYTES))
+
+
 def hash_token(token: str) -> str:
     """Return the stored hash of a session token or CSRF secret."""
     if not token:
