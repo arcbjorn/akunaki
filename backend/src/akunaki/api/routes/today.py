@@ -1,10 +1,10 @@
 """The composite ``/v1/today`` day view.
 
-Authenticated and tenant-scoped. It carries the two shipping blocks — the
-recovery score and the sleep summary — and discloses everything else as gaps.
-Strain, activity, and the training recommendation do not ship in v0.1.0 and are
-absent by design, not fabricated. Recovery is the only 0-100 score; the
-top-level ``status`` mirrors the recovery status.
+Authenticated and tenant-scoped. It carries the shipping blocks — the recovery
+score, the sleep summary, the deterministic training label, and the primary /
+supporting recommendations — and discloses everything else as gaps. Strain and
+activity do not ship in v0.1.0 and are absent by design, not fabricated.
+Recovery is the only 0-100 score; the top-level ``status`` mirrors it.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from akunaki.application.recovery_surface import (
 )
 from akunaki.application.sleep_surface import SleepSurfaceService
 from akunaki.application.today_surface import TodaySurfaceService
+from akunaki.domain.recommendations import Recommendation
 
 router = APIRouter(prefix="/v1/today", tags=["today"])
 
@@ -59,6 +60,21 @@ class TodayDataGap(BaseModel):
     code: str
 
 
+class TrainingRecommendationBlock(BaseModel):
+    """The deterministic training label (not a numeric readiness score)."""
+
+    label: str = Field(description="'hard', 'moderate', 'light', 'rest', or 'insufficient'.")
+    ruleset_version: str
+
+
+class RecommendationBlock(BaseModel):
+    """A selected recommendation."""
+
+    rule_id: str
+    role: str
+    priority: int
+
+
 class TodayResponse(BaseModel):
     """The composite day view for one local health day."""
 
@@ -68,6 +84,11 @@ class TodayResponse(BaseModel):
     sleep: TodaySleepBlock | None = Field(
         description="Absent when the day has no recorded sleep; see data_gaps."
     )
+    training_recommendation: TrainingRecommendationBlock
+    primary_recommendation: RecommendationBlock | None = Field(
+        description="At most one; null when no rule fired."
+    )
+    supporting_recommendations: list[RecommendationBlock]
     data_gaps: list[TodayDataGap]
     formula_version: str
     freshness_at: str | None = Field(
@@ -143,7 +164,25 @@ def today(
             available_weight=surface.recovery.available_weight,
         ),
         sleep=sleep_block,
+        training_recommendation=TrainingRecommendationBlock(
+            label=surface.training_label.value,
+            ruleset_version=surface.ruleset_version,
+        ),
+        primary_recommendation=(
+            _rec_block(surface.primary_recommendation)
+            if surface.primary_recommendation is not None
+            else None
+        ),
+        supporting_recommendations=[_rec_block(rec) for rec in surface.supporting_recommendations],
         data_gaps=[TodayDataGap(code=gap.code) for gap in surface.data_gaps],
         formula_version=surface.formula_version,
         freshness_at=surface.recovery.freshness_at,
+    )
+
+
+def _rec_block(rec: Recommendation) -> RecommendationBlock:
+    return RecommendationBlock(
+        rule_id=rec.rule_id.value,
+        role=rec.role.value,
+        priority=rec.priority,
     )

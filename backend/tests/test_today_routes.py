@@ -227,6 +227,23 @@ def test_composite_carries_recovery_and_sleep(
     assert body["formula_version"] == "general_recovery_v0.1.0"
 
 
+def test_training_label_and_recommendation_ship(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    # A sleep-only tenant: recovery insufficient -> training label insufficient,
+    # and (with data gaps) the data-gap reconnect rule is the primary.
+    _seed_sleep(factory, day=TARGET_DAY, duration_min=420.0, fact_id="today")
+    _login(client, factory)
+
+    body = client.get("/v1/today", params={"day": TARGET_DAY}).json()
+    assert body["training_recommendation"]["label"] == "insufficient"
+    assert body["training_recommendation"]["ruleset_version"] == "training_label_v0.1.0"
+    # The recovery gate failed (missing HRV/RHR) -> a data gap -> reconnect rule.
+    assert body["primary_recommendation"] is not None
+    assert body["primary_recommendation"]["rule_id"] == "data_gap_reconnect"
+    assert body["primary_recommendation"]["role"] == "primary"
+
+
 def test_unshipped_blocks_are_disclosed_not_fabricated(
     client: TestClient, factory: sessionmaker[Session]
 ) -> None:
@@ -234,15 +251,16 @@ def test_unshipped_blocks_are_disclosed_not_fabricated(
     _login(client, factory)
     body = client.get("/v1/today", params={"day": TARGET_DAY}).json()
 
-    # Strain, activity, and training recommendation must not appear as blocks.
+    # Strain and activity must not appear as blocks (unshipped in v0.1.0).
     assert "strain" not in body
     assert "activity" not in body
-    assert "training_recommendation" not in body
+    # The training recommendation *does* ship (a deterministic label).
+    assert "training_recommendation" in body
 
     gap_codes = {g["code"] for g in body["data_gaps"]}
     assert "strain_not_available" in gap_codes
     assert "activity_not_available" in gap_codes
-    assert "training_recommendation_not_available" in gap_codes
+    assert "training_recommendation_not_available" not in gap_codes
     assert "missing_hrv_or_resting_hr" in gap_codes
 
 

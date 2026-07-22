@@ -19,8 +19,18 @@ from typing import Protocol
 
 from akunaki.application.recovery_surface import RecoverySurface
 from akunaki.application.sleep_surface import SleepSurfaceService
-from akunaki.domain.recovery import DEFAULT_SLEEP_TARGET_MIN, RecoveryGap
+from akunaki.domain.recommendations import (
+    Recommendation,
+    RecommendationInputs,
+    select_recommendations,
+)
+from akunaki.domain.recovery import DEFAULT_SLEEP_TARGET_MIN, ComponentCode, RecoveryGap
 from akunaki.domain.sleep_summary import SleepSummary
+from akunaki.domain.training_label import (
+    TrainingInputs,
+    TrainingLabel,
+    training_label,
+)
 
 
 class RecoverySource(Protocol):
@@ -34,10 +44,11 @@ class RecoverySource(Protocol):
 
 
 # Blocks named in the design's /v1/today body that do not ship in v0.1.0.
+# (The training recommendation *does* ship — it is a deterministic label, not a
+# blocked score — so it is not listed here.)
 _UNSHIPPED_BLOCK_GAPS = (
     RecoveryGap(code="strain_not_available"),
     RecoveryGap(code="activity_not_available"),
-    RecoveryGap(code="training_recommendation_not_available"),
 )
 
 
@@ -50,6 +61,10 @@ class TodaySurface:
     recovery: RecoverySurface
     sleep: SleepSummary | None
     """None when the day has no known sleep at all (disclosed via a data gap)."""
+    training_label: TrainingLabel
+    ruleset_version: str
+    primary_recommendation: Recommendation | None
+    supporting_recommendations: tuple[Recommendation, ...]
     data_gaps: tuple[RecoveryGap, ...]
     formula_version: str
 
@@ -97,15 +112,57 @@ class TodaySurfaceService:
         # Carry the recovery gate's own disclosures through unchanged.
         gaps.extend(recovery.data_gaps)
         gaps.extend(_UNSHIPPED_BLOCK_GAPS)
+        deduped_gaps = _dedupe(gaps)
+
+        # Training label and recommendations from the day's disclosed values.
+        # Anomaly detection is not yet threaded into this path, so no active
+        # high-severity anomaly is asserted; ACWR has no source, so load rules
+        # cannot fire — both honest given the current data.
+        hrv_c = _hrv_component_c(recovery)
+        label = training_label(
+            TrainingInputs(
+                recovery_score=recovery.score,
+                recovery_status=recovery.status.value,
+                confidence=recovery.confidence,
+                has_high_severity_anomaly=False,
+                symptom_burden_n=None,
+                severe_symptom_flag=False,
+                acwr=None,
+                hrv_component_c=hrv_c,
+            )
+        )
+        recs = select_recommendations(
+            RecommendationInputs(
+                sleep_debt_min=sleep.debt_14d_min if sleep_known else None,
+                debt_known_days=sleep.debt_known_days if sleep_known else 0,
+                sleep_adherence_pct=sleep.adherence_pct if sleep_known else None,
+                acwr=None,
+                hrv_component_c=hrv_c,
+                training_label_is_rest=label.label is TrainingLabel.REST,
+                has_data_gap=bool(deduped_gaps),
+            )
+        )
 
         return TodaySurface(
             local_health_day=local_health_day,
             status=recovery.status.value,
             recovery=recovery,
             sleep=sleep_block,
-            data_gaps=_dedupe(gaps),
+            training_label=label.label,
+            ruleset_version=label.ruleset_version,
+            primary_recommendation=recs.primary,
+            supporting_recommendations=recs.supporting,
+            data_gaps=deduped_gaps,
             formula_version=recovery.formula_version,
         )
+
+
+def _hrv_component_c(recovery: RecoverySurface) -> float | None:
+    """The HRV component's 0-100 score from the recovery factors, if present."""
+    for factor in recovery.factors:
+        if factor.factor_code == ComponentCode.HRV.value and factor.present:
+            return factor.magnitude
+    return None
 
 
 def _day_has_known_sleep(sleep: SleepSummary) -> bool:
