@@ -777,6 +777,41 @@ class SleepSession(Base):
     )
 
 
+class WorkoutSession(Base):
+    """Typed workout detail with canonical zone-load, one-to-one with a header.
+
+    ``session_load`` is the **canonical** load computed internally from the HR-
+    zone minutes (never a vendor-provided load). Zone minutes are retained so
+    the load can be recomputed under a new zone-weight/formula version. The
+    daily strain-load is the sum of a day's included sessions (``exclude_from_
+    load = 0`` on the fact header), which feeds the prior-load / ACWR path.
+    """
+
+    __tablename__ = "workout_sessions"
+
+    fact_record_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("fact_records.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    session_load: Mapped[float] = mapped_column(Float, nullable=False)
+    zone1_min: Mapped[float] = mapped_column(Float, nullable=False)
+    zone2_min: Mapped[float] = mapped_column(Float, nullable=False)
+    zone3_min: Mapped[float] = mapped_column(Float, nullable=False)
+    zone4_min: Mapped[float] = mapped_column(Float, nullable=False)
+    zone5_min: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("session_load >= 0", name="workout_load_nonneg"),
+        CheckConstraint(
+            "zone1_min >= 0 AND zone2_min >= 0 AND zone3_min >= 0 "
+            "AND zone4_min >= 0 AND zone5_min >= 0",
+            name="workout_zone_minutes_nonneg",
+        ),
+    )
+
+
 class OvernightVitals(Base):
     """Typed overnight-vitals detail, one-to-one with its fact header.
 
