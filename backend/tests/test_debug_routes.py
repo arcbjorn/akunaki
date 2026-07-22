@@ -129,7 +129,6 @@ def test_debug_routes_are_absent_by_default(debug_db: str) -> None:
     client = TestClient(create_app(Settings(database_url=debug_db)))
 
     assert client.get("/internal/debug/sync-status?tenant_id=tenant-1").status_code == 404
-    assert client.get("/internal/debug/latest-sleep?tenant_id=tenant-1").status_code == 404
 
 
 def test_debug_routes_are_not_even_registered_by_default(debug_db: str) -> None:
@@ -146,7 +145,8 @@ def test_enabling_mounts_the_router(debug_db: str) -> None:
     app = create_app(Settings(database_url=debug_db, debug_routes_enabled=True))
     paths = app.openapi()["paths"]
     assert "/internal/debug/sync-status" in paths
-    assert "/internal/debug/latest-sleep" in paths
+    # latest-sleep was removed: it is superseded by the authenticated /v1/sleep.
+    assert "/internal/debug/latest-sleep" not in paths
 
 
 # ---------------------------------------------------------------------------
@@ -171,81 +171,6 @@ def test_sync_status_reports_connection_progress(
     assert connection["consecutive_failures"] == 0
 
 
-def test_latest_sleep_returns_the_current_fact(
-    factory: sessionmaker[Session], debug_db: str
-) -> None:
-    """The slice's payoff: a normalized night, readable over HTTP."""
-    _populate(factory)
-    response = _enabled_client(debug_db).get(
-        "/internal/debug/latest-sleep", params={"tenant_id": "tenant-1"}
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["local_health_day"] == "2026-07-19"
-    assert body["duration_min"] == 450.0
-    # medium, not high: this fixture omits stage durations, and the normalizer
-    # downgrades quality rather than presenting a partial night as complete.
-    assert body["quality"] == "medium"
-    assert body["version_n"] == 1
-    # The lineage field is served (null here: this fixture writes the fact
-    # directly rather than through the ingestion path).
-    assert "raw_revision_id" in body
-
-
-def test_latest_sleep_prefers_the_most_recent_day(
-    factory: sessionmaker[Session], debug_db: str
-) -> None:
-    _populate(factory)
-    [later] = normalize_sleep_payload(
-        _sleep_page("sleep-2", end="2026-07-20T07:00:00+02:00", total=28800)
-    )
-    FactRepository(factory).write_sleep_fact(
-        fact_record_id="fact-2",
-        tenant_id="tenant-1",
-        connection_id="conn-1",
-        fact=later,
-        raw_revision_id=None,
-        raw_payload_id=None,
-        schema_version="oura.v2",
-        now=T0,
-    )
-
-    body = (
-        _enabled_client(debug_db)
-        .get("/internal/debug/latest-sleep", params={"tenant_id": "tenant-1"})
-        .json()
-    )
-    assert body["local_health_day"] == "2026-07-20"
-    assert body["duration_min"] == 480.0
-
-
-def test_superseded_versions_are_not_served(factory: sessionmaker[Session], debug_db: str) -> None:
-    """Only the current version is a valid answer."""
-    _populate(factory)
-    [corrected] = normalize_sleep_payload(
-        _sleep_page("sleep-1", end="2026-07-19T07:00:00+02:00", total=28800)
-    )
-    FactRepository(factory).write_sleep_fact(
-        fact_record_id="fact-1b",
-        tenant_id="tenant-1",
-        connection_id="conn-1",
-        fact=corrected,
-        raw_revision_id=None,
-        raw_payload_id=None,
-        schema_version="oura.v2",
-        now=T0,
-    )
-
-    body = (
-        _enabled_client(debug_db)
-        .get("/internal/debug/latest-sleep", params={"tenant_id": "tenant-1"})
-        .json()
-    )
-    assert body["version_n"] == 2
-    assert body["duration_min"] == 480.0
-
-
 # ---------------------------------------------------------------------------
 # Tenant scoping and absence
 # ---------------------------------------------------------------------------
@@ -257,9 +182,6 @@ def test_other_tenants_data_is_not_returned(factory: sessionmaker[Session], debu
     client = _enabled_client(debug_db)
 
     assert (
-        client.get("/internal/debug/latest-sleep", params={"tenant_id": "other"}).status_code == 404
-    )
-    assert (
         client.get("/internal/debug/sync-status", params={"tenant_id": "other"}).json()[
             "connections"
         ]
@@ -267,17 +189,8 @@ def test_other_tenants_data_is_not_returned(factory: sessionmaker[Session], debu
     )
 
 
-def test_missing_fact_is_a_404(factory: sessionmaker[Session], debug_db: str) -> None:
-    response = _enabled_client(debug_db).get(
-        "/internal/debug/latest-sleep", params={"tenant_id": "tenant-1"}
-    )
-    assert response.status_code == 404
-    assert response.json()["detail"]["code"] == "not_found"
-
-
 def test_tenant_id_is_required(debug_db: str) -> None:
     client = _enabled_client(debug_db)
-    assert client.get("/internal/debug/latest-sleep").status_code == 422
     assert client.get("/internal/debug/sync-status", params={"tenant_id": ""}).status_code == 422
 
 
@@ -286,10 +199,9 @@ def test_tenant_id_is_required(debug_db: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_health_responses_are_never_cached(factory: sessionmaker[Session], debug_db: str) -> None:
+def test_status_responses_are_never_cached(factory: sessionmaker[Session], debug_db: str) -> None:
     _populate(factory)
-    client = _enabled_client(debug_db)
-
-    for path in ("/internal/debug/sync-status", "/internal/debug/latest-sleep"):
-        response = client.get(path, params={"tenant_id": "tenant-1"})
-        assert response.headers["cache-control"] == "private, no-store", path
+    response = _enabled_client(debug_db).get(
+        "/internal/debug/sync-status", params={"tenant_id": "tenant-1"}
+    )
+    assert response.headers["cache-control"] == "private, no-store"

@@ -14,12 +14,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from akunaki.adapters.db.models import (
     Connection,
     ConnectionHealth,
-    FactRecord,
     RawPayload,
     RawRevision,
-    SleepSession,
 )
-from akunaki.domain.sleep_normalizer import ENTITY_TYPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,25 +31,6 @@ class ConnectionSyncStatus:
     consecutive_failures: int
     transport_pages: int
     raw_revisions: int
-
-
-@dataclass(frozen=True, slots=True)
-class LatestSleepFact:
-    """The most recent current sleep fact for a tenant."""
-
-    fact_record_id: str
-    local_health_day: str | None
-    start_utc: str | None
-    end_utc: str | None
-    duration_min: float
-    time_in_bed_min: float | None
-    efficiency_pct: float | None
-    is_nap: bool
-    quality: str
-    confidence: float
-    normalizer_version: str
-    raw_revision_id: str | None
-    version_n: int
 
 
 class DebugQueries:
@@ -109,44 +87,6 @@ class DebugQueries:
                     )
                 )
             return statuses
-
-    def latest_sleep_fact(self, *, tenant_id: str) -> LatestSleepFact | None:
-        """The most recent current sleep fact, or None when there is none."""
-        with self._session_factory() as session:
-            row = session.execute(
-                select(FactRecord, SleepSession)
-                .join(SleepSession, SleepSession.fact_record_id == FactRecord.id)
-                .where(
-                    FactRecord.tenant_id == tenant_id,
-                    FactRecord.entity_type == ENTITY_TYPE,
-                    FactRecord.is_current == 1,
-                )
-                # Most recent night first; local day is the user-facing bucket.
-                .order_by(
-                    FactRecord.local_health_day.desc(),
-                    FactRecord.start_utc.desc(),
-                )
-                .limit(1)
-            ).first()
-            if row is None:
-                return None
-
-            fact, detail = row
-            return LatestSleepFact(
-                fact_record_id=fact.id,
-                local_health_day=fact.local_health_day,
-                start_utc=fact.start_utc,
-                end_utc=fact.end_utc,
-                duration_min=detail.duration_min,
-                time_in_bed_min=detail.time_in_bed_min,
-                efficiency_pct=detail.efficiency_pct,
-                is_nap=bool(detail.is_nap),
-                quality=fact.quality,
-                confidence=fact.confidence,
-                normalizer_version=fact.normalizer_version,
-                raw_revision_id=fact.raw_revision_id,
-                version_n=fact.version_n,
-            )
 
     @staticmethod
     def _count_where(session: Session, model: object, condition: object) -> int:
