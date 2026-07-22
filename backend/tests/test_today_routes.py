@@ -159,7 +159,15 @@ def _login(client: TestClient, factory: sessionmaker[Session]) -> None:
     client.cookies.set(SESSION_COOKIE_NAME, issued.token)
 
 
-def _seed_score(factory: sessionmaker[Session], *, day: str, score: int) -> None:
+def _seed_score(
+    factory: sessionmaker[Session],
+    *,
+    day: str,
+    score: int,
+    status: str = "partial",
+    confidence: float = 0.7,
+    available_weight: float = 0.60,
+) -> None:
     with factory() as session, session.begin():
         session.add(
             DailyHealthScore(
@@ -167,10 +175,10 @@ def _seed_score(factory: sessionmaker[Session], *, day: str, score: int) -> None
                 tenant_id="tenant-1",
                 local_health_day=day,
                 score_code="recovery",
-                status="partial",
+                status=status,
                 score=score,
-                available_weight=0.60,
-                confidence=0.7,
+                available_weight=available_weight,
+                confidence=confidence,
                 formula_version="general_recovery_v0.1.0",
                 dependency_hash="seeded",
                 freshness_at=NOW_S,
@@ -180,6 +188,28 @@ def _seed_score(factory: sessionmaker[Session], *, day: str, score: int) -> None
                 superseded_by=None,
                 superseded_at=None,
                 created_at=NOW_S,
+            )
+        )
+
+
+def _seed_high_anomaly(factory: sessionmaker[Session]) -> None:
+    from akunaki.adapters.db.models import Anomaly as AnomalyRow
+
+    with factory() as session, session.begin():
+        session.add(
+            AnomalyRow(
+                id="an-1",
+                tenant_id="tenant-1",
+                feature_code="low_hrv",
+                started_on=TARGET_DAY,
+                ended_on=None,
+                severity="high",
+                z_like=-3.0,
+                formula_version="anomaly_v0.1.0",
+                is_active=1,
+                consecutive_clear_days=0,
+                created_at=NOW_S,
+                updated_at=NOW_S,
             )
         )
 
@@ -225,6 +255,27 @@ def test_composite_carries_recovery_and_sleep(
     assert body["sleep"]["adherence_pct"] == pytest.approx(87.5)
 
     assert body["formula_version"] == "general_recovery_v0.1.0"
+
+
+def test_high_anomaly_floors_training_label_at_light(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    # A stored hard-band score (ok, high confidence) would be `hard`, but a
+    # persisted high-severity anomaly floors it at light.
+    _seed_score(factory, day=TARGET_DAY, score=90, status="ok", confidence=0.9)
+    _seed_high_anomaly(factory)
+    _login(client, factory)
+
+    body = client.get("/v1/today", params={"day": TARGET_DAY}).json()
+    assert body["recovery"]["score"] == 90
+    assert body["training_recommendation"]["label"] == "light"
+
+
+def test_no_anomaly_leaves_hard_label(client: TestClient, factory: sessionmaker[Session]) -> None:
+    _seed_score(factory, day=TARGET_DAY, score=90, status="ok", confidence=0.9)
+    _login(client, factory)
+    body = client.get("/v1/today", params={"day": TARGET_DAY}).json()
+    assert body["training_recommendation"]["label"] == "hard"
 
 
 def test_training_label_and_recommendation_ship(

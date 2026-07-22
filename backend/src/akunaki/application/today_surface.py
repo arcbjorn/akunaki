@@ -1,15 +1,14 @@
 """The composite ``/v1/today`` day view.
 
-This stitches the two shipping blocks — the recovery score and the sleep
-summary — into one day view, and discloses what is missing rather than
-inventing it. Recovery is the only 0-100 score in v0.1.0; sleep is a
-deterministic summary. Strain, activity, and the training recommendation do
-**not** ship yet (no load data, no accepted ruleset), so they are absent from
-the body and named in ``data_gaps`` — never fabricated.
+This stitches the shipping blocks — the recovery score, the sleep summary, the
+deterministic training label, and the recommendations — into one day view, and
+discloses what is missing rather than inventing it. Recovery is the only 0-100
+score in v0.1.0. Strain and activity do **not** ship yet, so they are named in
+``data_gaps`` — never fabricated.
 
 The composite owns no formula: it delegates to the recovery and sleep surface
-services and combines their disclosures. The top-level ``status`` is the
-recovery status, since recovery is the day's headline score.
+services and applies the pure training-label and recommendation rules. The
+top-level ``status`` is the recovery status, since recovery is the headline.
 """
 
 from __future__ import annotations
@@ -40,6 +39,14 @@ class RecoverySource(Protocol):
         self, *, tenant_id: str, local_health_day: str, target_min: int = ...
     ) -> RecoverySurface:
         """Return the recovery surface for the tenant's local day."""
+        ...
+
+
+class AnomalySource(Protocol):
+    """Port: whether the tenant has an active high-severity anomaly."""
+
+    def has_active_high_severity(self, *, tenant_id: str) -> bool:
+        """True when an active anomaly is high severity (drives the downshift)."""
         ...
 
 
@@ -77,9 +84,11 @@ class TodaySurfaceService:
         *,
         recovery: RecoverySource,
         sleep: SleepSurfaceService,
+        anomalies: AnomalySource | None = None,
     ) -> None:
         self._recovery = recovery
         self._sleep = sleep
+        self._anomalies = anomalies
 
     def today_for_day(
         self,
@@ -115,16 +124,18 @@ class TodaySurfaceService:
         deduped_gaps = _dedupe(gaps)
 
         # Training label and recommendations from the day's disclosed values.
-        # Anomaly detection is not yet threaded into this path, so no active
-        # high-severity anomaly is asserted; ACWR has no source, so load rules
-        # cannot fire — both honest given the current data.
+        # A persisted active high-severity anomaly floors the label at light;
+        # ACWR has no source, so load rules cannot fire — both honest today.
+        high_anomaly = self._anomalies is not None and self._anomalies.has_active_high_severity(
+            tenant_id=tenant_id
+        )
         hrv_c = _hrv_component_c(recovery)
         label = training_label(
             TrainingInputs(
                 recovery_score=recovery.score,
                 recovery_status=recovery.status.value,
                 confidence=recovery.confidence,
-                has_high_severity_anomaly=False,
+                has_high_severity_anomaly=high_anomaly,
                 symptom_burden_n=None,
                 severe_symptom_flag=False,
                 acwr=None,
