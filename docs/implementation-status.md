@@ -57,6 +57,7 @@ Legend:
 | Handler registry (`system.noop` built in) | yes | yes | unregistered `job_type` dead-letters instead of burning attempts |
 | Background lease heartbeat | yes | yes | daemon thread; lease loss suppresses completion (no false success) |
 | Leader-gated reaper tick (requeue expired / dead-letter exhausted) | yes | yes | standby never reaps without the `core-reaper` leader lease |
+| Leader-gated periodic scheduler | yes | partial | pure `due_schedules` decides which `ScheduleSpec`s are due (never-fired → due immediately; else interval-elapsed); the worker fires them **only under the `core-reaper` leader lease**, on the reaper tick, tracking last-fired in memory, so at most one worker schedules. Each fire is **idempotency-keyed** so a lost lease or crash mid-fire never duplicates. Fake-repo worker tests + pure decision tests. **Production wiring pending**: the reconcile-sweep schedule is not yet registered in `python -m akunaki.worker` because a system-wide job needs a system-tenant convention (the `jobs.tenant_id` FK is non-null) — the mechanism is complete and general, the entrypoint wiring awaits that |
 | Core-only / no model SDKs | yes | yes | import-linter + tests |
 | Ruff / mypy / import-linter / pytest / pip-audit gates | yes | yes | see evidence docs |
 | CI workflow (GitHub Actions) | yes | yes | four jobs: quality, migrations up/down/up on an ephemeral DB, core-only boot with models disabled, advisory `pip-audit`; every step verified locally before commit |

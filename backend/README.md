@@ -69,7 +69,7 @@ Each iteration claims one due job by fenced CAS, runs its registered handler whi
 | `PermanentJobError`, `ValueError`/`TypeError`/`KeyError` | Dead-lettered immediately without burning the attempt budget |
 | Unregistered `job_type` | Dead-lettered as `UnregisteredJobType` (deployment error, not transient) |
 
-Only the holder of the `core-reaper` **leader lease** requeues expired leases and dead-letters exhausted ones, so a passive standby never reaps behind an active worker.
+Only the holder of the `core-reaper` **leader lease** requeues expired leases and dead-letters exhausted ones, so a passive standby never reaps behind an active worker. The same leader also fires **periodic jobs** (`JobWorker(schedules=[...])`): the pure `due_schedules` picks which are due on each reaper tick, and each fire is idempotency-keyed so a lost lease or a crash mid-fire never duplicates. (The reconcile-sweep schedule is not yet registered in the worker entrypoint — a system-wide periodic job needs a system-tenant convention first — but the mechanism is general.)
 
 Execution policy lives in `akunaki.application.worker_runtime` (port-typed, no SQLAlchemy); durability lives in `JobRepository`. Handlers register in `akunaki.application.handlers`; `system.noop` and `connection.initial_sync` ship today. Handlers **must be idempotent** — a lease can expire mid-run and the job be retried elsewhere.
 
