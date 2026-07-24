@@ -72,6 +72,9 @@ def normalize_workout_payload(payload_text: str) -> list[WorkoutFact]:
 
     if isinstance(parsed, list):
         records = parsed
+    elif isinstance(parsed, dict) and isinstance(parsed.get("exercises"), list):
+        # The fetch client assembles a transaction into {"exercises": [...]}.
+        records = parsed["exercises"]
     elif isinstance(parsed, dict) and isinstance(parsed.get("data"), list):
         records = parsed["data"]
     elif isinstance(parsed, dict) and ("start_time" in parsed or "start-time" in parsed):
@@ -142,7 +145,7 @@ def _zone_minutes(raw: object) -> ZoneMinutes | None:
     values: list[float] = []
     if isinstance(raw, list) and len(raw) == 5:
         for entry in raw:
-            minutes = _duration_minutes(entry.get("in_zone") if isinstance(entry, dict) else None)
+            minutes = _zone_entry_minutes(entry)
             if minutes is None:
                 return None
             values.append(minutes)
@@ -158,6 +161,16 @@ def _zone_minutes(raw: object) -> ZoneMinutes | None:
     if any(not 0.0 <= v <= _MAX_ZONE_MINUTES for v in values):
         return None
     return ZoneMinutes(z1=values[0], z2=values[1], z3=values[2], z4=values[3], z5=values[4])
+
+
+def _zone_entry_minutes(entry: object) -> float | None:
+    """Minutes in one zone. Polar names the field ``in-zone``; accept both forms."""
+    if not isinstance(entry, dict):
+        return None
+    raw = entry.get("in-zone")
+    if raw is None:
+        raw = entry.get("in_zone")
+    return _duration_minutes(raw)
 
 
 def _duration_minutes(value: object) -> float | None:

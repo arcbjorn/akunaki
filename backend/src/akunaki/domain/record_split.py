@@ -59,8 +59,10 @@ def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
     if not isinstance(parsed, dict):
         return [_whole_page_slice(stream, payload_text)]
 
-    records = parsed.get("data")
-    if not isinstance(records, list):
+    # Oura/Google pages carry "data"/"dataPoints"; the Polar fetch client
+    # assembles its transaction into "exercises". Accept whichever is present.
+    records = _record_list(parsed)
+    if records is None:
         return [_whole_page_slice(stream, payload_text)]
 
     slices: list[RecordSlice] = []
@@ -76,6 +78,15 @@ def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
         seen.add(record_slice.vendor_record_id)
         slices.append(record_slice)
     return slices
+
+
+def _record_list(parsed: dict[str, Any]) -> list[Any] | None:
+    """Return the record array under a recognized collection key, or None."""
+    for key in ("data", "exercises"):
+        value = parsed.get(key)
+        if isinstance(value, list):
+            return value
+    return None
 
 
 def _slice_for(stream: str, record: dict[str, Any]) -> RecordSlice:

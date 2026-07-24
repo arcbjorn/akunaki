@@ -48,25 +48,21 @@ NOW_S = to_utc_rfc3339(T0)
 KEK = b"\x66" * KEY_BYTES
 ACCESS_TOKEN = "polar-access-SECRET"
 
-# One AccessLink exercise with all five HR zones populated -> a real workout.
-_EXERCISES = json.dumps(
-    {
-        "data": [
-            {
-                "id": "ex-1",
-                "start_time": "2026-07-22T06:00:00+02:00",
-                "duration": "PT1H",
-                "heart_rate_zones": [
-                    {"index": 1, "in_zone": "PT10M"},
-                    {"index": 2, "in_zone": "PT20M"},
-                    {"index": 3, "in_zone": "PT30M"},
-                    {"index": 4, "in_zone": "PT5M"},
-                    {"index": 5, "in_zone": "PT2M"},
-                ],
-            }
-        ]
-    }
-)
+# The AccessLink exercise transaction the fetch client drives: create -> list ->
+# summary -> zones -> commit. One exercise with all five HR zones populated.
+_TX = "https://www.polaraccesslink.com/v3/users/self/exercise-transactions/42"
+_EX = f"{_TX}/exercises/ex-1"
+_SUMMARY = {
+    "id": "ex-1",
+    "start-time": "2026-07-22T06:00:00+02:00",
+    "duration": "PT1H",
+    "sport": "RUNNING",
+}
+_ZONES = {"zone": [{"index": 1, "in-zone": "PT10M"},
+                   {"index": 2, "in-zone": "PT20M"},
+                   {"index": 3, "in-zone": "PT30M"},
+                   {"index": 4, "in-zone": "PT5M"},
+                   {"index": 5, "in-zone": "PT2M"}]}
 
 _IDS = itertools.count(1)
 
@@ -124,9 +120,23 @@ def factory(sync_db: str) -> Iterator[sessionmaker[Session]]:
         engine.dispose()
 
 
-def _ok(body: str) -> Callable[[httpx2.Request], httpx2.Response]:
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, text=body, headers={"content-type": "application/json"})
+def _polar_transaction() -> Callable[[httpx2.Request], httpx2.Response]:
+    """Model the AccessLink exercise-transaction lifecycle."""
+    hdr = {"content-type": "application/json"}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        method, url = request.method, str(request.url)
+        if method == "POST" and url.endswith("/exercise-transactions"):
+            return httpx2.Response(201, json={"resource-uri": _TX}, headers=hdr)
+        if method == "GET" and url == _TX:
+            return httpx2.Response(200, json={"exercises": [_EX]}, headers=hdr)
+        if method == "GET" and url == _EX:
+            return httpx2.Response(200, json=_SUMMARY, headers=hdr)
+        if method == "GET" and url == f"{_EX}/heart-rate-zones":
+            return httpx2.Response(200, json=_ZONES, headers=hdr)
+        if method == "PUT" and url == _TX:
+            return httpx2.Response(200, headers=hdr)
+        return httpx2.Response(500, text="unexpected")
 
     return handler
 
@@ -136,7 +146,7 @@ def _registry(factory: sessionmaker[Session]) -> HandlerRegistry:
     new_id = lambda: f"id-{next(_IDS)}"  # noqa: E731
     initial = InitialSyncHandler(
         fetch_client=PolarFetchClient(
-            transport=httpx2.Client(transport=httpx2.MockTransport(_ok(_EXERCISES)))
+            transport=httpx2.Client(transport=httpx2.MockTransport(_polar_transaction()))
         ),
         ingestion=IngestionRepository(factory),
         connections=ConnectionRepository(factory),

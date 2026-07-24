@@ -14,16 +14,17 @@ from akunaki.domain.workout_normalizer import (
 
 
 def _record(**overrides: object) -> dict[str, object]:
+    # Real Polar AccessLink shape: hyphenated `start-time` and `in-zone`.
     values: dict[str, object] = {
         "id": "ex-1",
-        "start_time": "2026-07-22T06:00:00+02:00",
+        "start-time": "2026-07-22T06:00:00+02:00",
         "duration": "PT1H",
         "heart_rate_zones": [
-            {"index": 1, "in_zone": "PT10M"},
-            {"index": 2, "in_zone": "PT20M"},
-            {"index": 3, "in_zone": "PT30M"},
-            {"index": 4, "in_zone": "PT5M"},
-            {"index": 5, "in_zone": "PT2M"},
+            {"index": 1, "in-zone": "PT10M"},
+            {"index": 2, "in-zone": "PT20M"},
+            {"index": 3, "in-zone": "PT30M"},
+            {"index": 4, "in-zone": "PT5M"},
+            {"index": 5, "in-zone": "PT2M"},
         ],
     }
     values.update(overrides)
@@ -31,7 +32,8 @@ def _record(**overrides: object) -> dict[str, object]:
 
 
 def _page(*records: dict[str, object]) -> str:
-    return json.dumps({"data": list(records)})
+    # The fetch client assembles a transaction into {"exercises": [...]}.
+    return json.dumps({"exercises": list(records)})
 
 
 def test_computes_canonical_load_from_zones() -> None:
@@ -118,3 +120,18 @@ def test_no_records_raises() -> None:
 def test_bare_list_payload_is_accepted() -> None:
     facts = normalize_workout_payload(json.dumps([_record()]))
     assert len(facts) == 1
+
+
+def test_underscore_field_forms_still_parse() -> None:
+    """Legacy `start_time`/`in_zone` forms remain accepted alongside hyphens."""
+    record = {
+        "id": "ex-legacy",
+        "start_time": "2026-07-22T06:00:00+02:00",
+        "duration": "PT1H",
+        "heart_rate_zones": [
+            {"index": i, "in_zone": "PT10M"} for i in range(1, 6)
+        ],
+    }
+    fact = normalize_workout_payload(_page(record))[0]
+    # 10*1 + 10*2 + 10*3 + 10*4 + 10*5 = 150.
+    assert fact.session_load == pytest.approx(150.0)
