@@ -1348,3 +1348,93 @@ class WebhookInbox(Base):
         CheckConstraint("json_valid(headers_meta_json)", name="webhook_inbox_headers_json"),
         UniqueConstraint("connection_id", "dedupe_key", name="uq_webhook_inbox_dedupe"),
     )
+
+
+class SourceSelection(Base):
+    """One versioned per-day source-precedence decision (daily-metric slice).
+
+    Exactly one current decision per ``(tenant, metric_family, granularity,
+    grain_key)`` — the grain_key is the local health day. The losing providers
+    are recorded as :class:`SourceSelectionCandidate` rows for the "Why".
+    ``selected_fact_record_id`` is null **only** for the ``missing_authoritative``
+    reason (with a required ``missing_reason``); every other reason names a fact.
+    """
+
+    __tablename__ = "source_selections"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    metric_family: Mapped[str] = mapped_column(Text, nullable=False)
+    granularity: Mapped[str] = mapped_column(Text, nullable=False)
+    grain_key: Mapped[str] = mapped_column(Text, nullable=False)
+    local_health_day: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_fact_record_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("fact_records.id", ondelete="SET NULL"), nullable=True
+    )
+    source_policy_version_id: Mapped[str] = mapped_column(Text, nullable=False)
+    selection_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    missing_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version_n: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_current: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    superseded_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("granularity = 'daily_metric'", name="source_selection_granularity"),
+        CheckConstraint("is_current IN (0, 1)", name="source_selection_is_current_bool"),
+        CheckConstraint(
+            "selection_reason IN ('policy_match', 'only_source', "
+            "'user_override', 'missing_authoritative')",
+            name="source_selection_reason",
+        ),
+        CheckConstraint(
+            "(selection_reason = 'missing_authoritative' "
+            "AND selected_fact_record_id IS NULL AND missing_reason IS NOT NULL) "
+            "OR (selection_reason != 'missing_authoritative' "
+            "AND selected_fact_record_id IS NOT NULL AND missing_reason IS NULL)",
+            name="source_selection_missing_consistency",
+        ),
+        Index(
+            "uq_source_selection_current",
+            "tenant_id",
+            "metric_family",
+            "granularity",
+            "grain_key",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+    )
+
+
+class SourceSelectionCandidate(Base):
+    """An alternative fact that competed in a source-selection decision.
+
+    The "Why": every provider's fact for the grain, marked ``eligible`` or
+    ``ineligible`` with a reason. Ordered by ``rank`` for display only —
+    candidates are **never** averaged or silently fallen back to.
+    """
+
+    __tablename__ = "source_selection_candidates"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    source_selection_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("source_selections.id", ondelete="CASCADE"), nullable=False
+    )
+    fact_record_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("fact_records.id", ondelete="CASCADE"), nullable=False
+    )
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    eligibility: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "eligibility IN ('eligible', 'ineligible')", name="source_candidate_eligibility"
+        ),
+        UniqueConstraint("source_selection_id", "fact_record_id", name="uq_source_candidate_fact"),
+    )
