@@ -58,8 +58,11 @@ jobs:
       - name: Architecture contracts
         run: uv run lint-imports
 
+      # Coverage is measured here rather than in addopts so local runs stay
+      # fast. The floor sits below the current figure (93% branch): it exists
+      # to catch a regression, not to chase a number.
       - name: Tests
-        run: uv run pytest
+        run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 
   migrations:
     name: migrations up/down/up

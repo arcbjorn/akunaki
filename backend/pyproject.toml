@@ -41,8 +41,25 @@ module-root = "src"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Coverage is not in addopts: it slows every local run. CI passes --cov
+# explicitly (see the quality job), which is what backs the "Tested" column
+# in docs/implementation-status.md.
 addopts = ["-q", "--strict-markers", "--strict-config"]
 filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["src/akunaki"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    # Type-checking-only imports never execute at runtime.
+    "if TYPE_CHECKING:",
+    # Protocol/ABC method bodies in the ports layer are declarations only.
+    "^\\s*\\.\\.\\.$",
+    "raise NotImplementedError",
+]
 
 [tool.ruff]
 target-version = "py313"
