@@ -79,6 +79,11 @@ class PolarOAuthClient:
         """Provider identifier."""
         return PROVIDER
 
+    @property
+    def uses_pkce(self) -> bool:
+        """Polar's AccessLink flow does not use PKCE."""
+        return False
+
     def __repr__(self) -> str:
         """Redacted repr: the client secret must never surface in logs."""
         return f"PolarOAuthClient(provider={PROVIDER!r}, client_id=<redacted>)"
@@ -89,11 +94,13 @@ class PolarOAuthClient:
         state: str,
         redirect_uri: str,
         scopes: tuple[str, ...] = ("accesslink.read_all",),
+        code_challenge: str | None = None,
     ) -> str:
         """Return the Polar authorize URL.
 
-        Polar does not use PKCE, so there is no ``code_challenge``; ``state`` is
-        the CSRF binding. The default scope is the read-all AccessLink scope.
+        Polar does not use PKCE, so ``code_challenge`` is accepted (to satisfy
+        the uniform client port) but ignored; ``state`` is the CSRF binding. The
+        default scope is the read-all AccessLink scope.
         """
         for name, value in (("state", state), ("redirect_uri", redirect_uri)):
             if not value:
@@ -120,10 +127,12 @@ class PolarOAuthClient:
         code: str,
         redirect_uri: str,
         now: datetime,
+        code_verifier: str | None = None,
     ) -> TokenExchangeResult:
         """Exchange an authorization code for a long-lived access token.
 
-        No PKCE verifier: Polar authenticates the exchange with Basic auth.
+        No PKCE verifier: Polar authenticates the exchange with Basic auth, so
+        ``code_verifier`` is accepted (for the uniform port) but ignored.
         """
         if not code or not redirect_uri:
             msg = "code and redirect_uri must be non-empty"

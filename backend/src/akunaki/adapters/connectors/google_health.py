@@ -79,6 +79,11 @@ class GoogleHealthOAuthClient:
         """Provider identifier."""
         return PROVIDER
 
+    @property
+    def uses_pkce(self) -> bool:
+        """Google Health uses the authorization-code + PKCE flow."""
+        return True
+
     def __repr__(self) -> str:
         """Redacted repr: the client secret must never surface in logs."""
         return f"GoogleHealthOAuthClient(provider={PROVIDER!r}, client_id=<redacted>)"
@@ -87,7 +92,7 @@ class GoogleHealthOAuthClient:
         self,
         *,
         state: str,
-        code_challenge: str,
+        code_challenge: str | None,
         redirect_uri: str,
         scopes: tuple[str, ...],
     ) -> str:
@@ -129,7 +134,7 @@ class GoogleHealthOAuthClient:
         self,
         *,
         code: str,
-        code_verifier: str,
+        code_verifier: str | None,
         redirect_uri: str,
         now: datetime,
     ) -> TokenExchangeResult:
