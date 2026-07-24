@@ -26,6 +26,7 @@ from typing import NoReturn
 
 from akunaki.domain.connections import ConnectionStatus
 from akunaki.domain.fetch import FetchFailure
+from akunaki.domain.google_sleep_normalizer import normalize_google_sleep_payload
 from akunaki.domain.jobs import (
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
@@ -98,6 +99,8 @@ _PROVIDER_STREAMS: dict[str, tuple[str, str]] = {
     "oura": ("sleep", "oura.v2"),
     # Polar: the AccessLink exercises list, normalized to canonical workouts.
     "polar": ("workout", "polar.v1"),
+    # Google Health: the v4 sleep-segment reconcile stream (Fitbit-origin sleep).
+    "google_health": ("sleep", "google_health.v4"),
 }
 
 
@@ -345,12 +348,16 @@ class NormalizeHandler:
 
         # Dispatch by the revision's schema version: an Oura sleep page yields
         # sleep + overnight-vitals facts; a Polar exercise page yields workout
-        # (zone-load) facts. Unknown schemas parse nothing and write nothing.
+        # (zone-load) facts; a Google Health sleep-segment page yields sleep
+        # facts only (its segments carry no HRV/RHR). Unknown schemas parse
+        # nothing and write nothing.
         written = 0
         affected_days: set[str] = set()
         try:
             if revision.schema_version.startswith("polar."):
                 affected_days = self._normalize_workouts(claim, revision, now)
+            elif revision.schema_version.startswith("google_health."):
+                written, affected_days = self._normalize_google_sleep(claim, revision, now)
             else:
                 sleep_facts = normalize_sleep_payload(revision.payload_text)
                 # Overnight vitals ride along on the same sleep payload; one page
@@ -436,6 +443,30 @@ class NormalizeHandler:
                 now=now,
             )
         return {fact.local_health_day for fact in facts}
+
+    def _normalize_google_sleep(
+        self,
+        claim: JobClaim,
+        revision: RevisionBody,
+        now: datetime,
+    ) -> tuple[int, set[str]]:
+        """Normalize a Google Health sleep-segment revision into sleep facts."""
+        facts = normalize_google_sleep_payload(revision.payload_text)
+        written = 0
+        for fact in facts:
+            outcome = self._facts.write_sleep_fact(
+                fact_record_id=self._new_id(),
+                tenant_id=claim.tenant_id,
+                connection_id=revision.connection_id,
+                fact=fact,
+                raw_revision_id=revision.revision_id,
+                raw_payload_id=revision.raw_payload_id,
+                schema_version=revision.schema_version,
+                now=now,
+            )
+            if outcome.is_new_version:
+                written += 1
+        return written, {fact.local_health_day for fact in facts}
 
 
 def _parse_normalize_payload(payload_json: str) -> dict[str, str]:

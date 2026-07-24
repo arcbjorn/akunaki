@@ -35,6 +35,15 @@ def test_polar_backfills_the_workout_stream() -> None:
     assert config.schema_version.startswith("polar.")
 
 
+def test_google_health_backfills_the_sleep_stream() -> None:
+    config = sync_config_for_provider("google_health")
+    # Google Health's sleep-segment reconcile normalizes to canonical sleep;
+    # the normalize dispatch keys on the ``google_health.`` schema prefix.
+    assert config.stream == "sleep"
+    assert config.schema_version == "google_health.v4"
+    assert config.schema_version.startswith("google_health.")
+
+
 def test_unwired_provider_fails_loudly() -> None:
     # An unknown provider is never a silent Oura fallback.
     with pytest.raises(ValueError, match="no backfill config for provider 'garmin'"):
