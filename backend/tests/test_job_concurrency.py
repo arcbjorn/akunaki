@@ -55,7 +55,7 @@ def _backend_root() -> Path:
 def _alembic_config(database_url: str) -> Config:
     cfg = Config(str(_backend_root() / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", database_url)
-    cfg.set_main_option("script_location", str(_backend_root() / "alembic"))
+    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
     return cfg
 
 

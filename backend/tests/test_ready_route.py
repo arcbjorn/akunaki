@@ -35,7 +35,7 @@ def _backend_root() -> Path:
 def _cfg(url: str) -> Config:
     cfg = Config(str(_backend_root() / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "alembic"))
+    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
     return cfg
 
 
@@ -143,3 +143,33 @@ def test_db_behind_head_is_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert body["database_ready"] is True  # DB is reachable...
     assert body["migration"]["at_head"] is False  # ...but behind head
     clear_settings_cache()
+
+
+def test_migrations_are_packaged_not_path_derived() -> None:
+    """Readiness must resolve the migration head without a source checkout.
+
+    Regression: ``_alembic_config`` walked four parent directories to find
+    ``alembic.ini`` and a sibling ``alembic/`` tree. Neither ships in the
+    wheel, so ``/readyz`` raised on any installed deployment instead of
+    reporting readiness. The scripts now live inside the package and are
+    located by import.
+    """
+    from alembic.script import ScriptDirectory
+
+    import akunaki
+    from akunaki.api.routes.ready import _alembic_config
+    from akunaki.migrations import script_location
+
+    package_root = Path(akunaki.__file__).resolve().parent
+    location = script_location()
+
+    # Inside the installed package, so a wheel carries them.
+    assert location.is_relative_to(package_root)
+    assert (location / "versions").is_dir()
+    assert any((location / "versions").glob("*.py"))
+
+    # The head is readable from the config the endpoint itself builds, with no
+    # alembic.ini on disk — the file is not shipped and must not be required.
+    cfg = _alembic_config()
+    assert cfg.config_file_name is None
+    assert ScriptDirectory.from_config(cfg).get_current_head() is not None

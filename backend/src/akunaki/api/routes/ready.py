@@ -13,7 +13,6 @@ deploys is not an unready service.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated
 
 from alembic.config import Config
@@ -27,6 +26,7 @@ from akunaki.adapters.db.status_repository import (
     migration_status,
 )
 from akunaki.api.app import get_engine, get_session_factory
+from akunaki.migrations import script_location
 
 # The reaper/scheduler leader lease name; a held lease means a worker leads.
 _REAPER_LEASE_NAME = "core-reaper"
@@ -63,12 +63,16 @@ class ReadyzResponse(BaseModel):
 
 
 def _alembic_config() -> Config:
-    """Build the alembic config from the backend package root."""
-    # ready.py lives at src/akunaki/api/routes/; the backend root holding
-    # alembic.ini and alembic/ is four parents up from src/akunaki/api.
-    backend_root = Path(__file__).resolve().parents[4]
-    cfg = Config(str(backend_root / "alembic.ini"))
-    cfg.set_main_option("script_location", str(backend_root / "alembic"))
+    """Build a minimal alembic config pointing at the packaged migrations.
+
+    The script location is resolved by importing the migrations package rather
+    than walking parent directories, so this works from a source checkout and
+    an installed wheel alike. Reading the head needs only the script directory,
+    not ``alembic.ini`` — so no config file is loaded, and a deployment that
+    does not ship one still reports readiness instead of raising.
+    """
+    cfg = Config()
+    cfg.set_main_option("script_location", str(script_location()))
     return cfg
 
 

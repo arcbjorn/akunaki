@@ -18,7 +18,7 @@ def _migrate(settings: Settings) -> None:
     backend_root = Path(__file__).resolve().parents[1]
     cfg = Config(str(backend_root / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", settings.database_url)
-    cfg.set_main_option("script_location", str(backend_root / "alembic"))
+    cfg.set_main_option("script_location", str(backend_root / "src" / "akunaki" / "migrations"))
     command.upgrade(cfg, "head")
 
 

@@ -42,7 +42,7 @@ def db_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     clear_settings_cache()
     cfg = Config(str(_backend_root() / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "alembic"))
+    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
     command.upgrade(cfg, "head")
     yield url
     clear_settings_cache()

@@ -91,7 +91,11 @@ ignore = [
 "tests/**" = ["S101", "S105", "S106"]
 "src/akunaki/api/__main__.py" = ["T20"]
 "src/akunaki/worker/__main__.py" = ["T20"]
-"alembic/**" = ["INP001"]
+# Migration scripts are generated-shaped and frozen once applied: they are
+# rewritten only by a new revision, never reformatted in place. E501 spares the
+# long generated CheckConstraint lines; S608 covers the interpolation of
+# module-level *code constants* (never user input) into one-off DDL/DML.
+"src/akunaki/migrations/versions/**" = ["E501", "S608"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["akunaki"]
@@ -100,6 +104,10 @@ known-first-party = ["akunaki"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
+# An applied migration is a historical record: reformatting one rewrites a file
+# that has already run against real databases, for no behavioural gain. New
+# revisions are written formatted; old ones are left exactly as applied.
+exclude = ["src/akunaki/migrations/versions/**"]
 
 [tool.mypy]
 python_version = "3.13"
