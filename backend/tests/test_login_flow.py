@@ -40,6 +40,7 @@ from akunaki.adapters.db.user_repository import UserRepository
 from akunaki.adapters.oidc.client import OIDCClient
 from akunaki.application.login import LoginRejection, LoginService
 from akunaki.config import Settings, clear_settings_cache
+from akunaki.domain.tenants import SYSTEM_TENANT_ID
 
 NOW = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
 ISSUER = "https://auth.example.com"
@@ -206,7 +207,8 @@ def test_full_login_provisions_a_user_and_issues_a_session(
 
     with factory() as session:
         user = session.scalars(select(User)).one()
-        tenant = session.scalars(select(Tenant)).one()
+        # Exclude the seeded system tenant; login provisions exactly one user tenant.
+        tenant = session.scalars(select(Tenant).where(Tenant.id != SYSTEM_TENANT_ID)).one()
     assert user.oidc_issuer == ISSUER
     assert user.oidc_subject == "oidc-subject-1"
     assert user.tenant_id == tenant.id
@@ -237,7 +239,8 @@ def test_returning_login_reuses_the_existing_user(
     assert first.tenant_id == second.tenant_id
     with factory() as session:
         assert len(session.scalars(select(User)).all()) == 1
-        assert len(session.scalars(select(Tenant)).all()) == 1
+        user_tenants = session.scalars(select(Tenant).where(Tenant.id != SYSTEM_TENANT_ID)).all()
+        assert len(user_tenants) == 1
 
 
 # ---------------------------------------------------------------------------

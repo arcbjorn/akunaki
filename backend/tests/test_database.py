@@ -18,6 +18,7 @@ from akunaki.adapters.db.engine import (
 )
 from akunaki.adapters.db.models import Job, Tenant
 from akunaki.config import Settings
+from akunaki.domain.tenants import SYSTEM_TENANT_ID
 
 # sqlalchemy-libsql surfaces some SQLite constraint failures as ValueError.
 ConstraintError = (IntegrityError, ValueError)
@@ -122,7 +123,8 @@ def test_tenant_and_job_crud(db_session: Session) -> None:
     db_session.add(_job())
     db_session.commit()
 
-    tenants = db_session.scalars(select(Tenant)).all()
+    # Exclude the migration-seeded system tenant; this test owns "tenant-1".
+    tenants = db_session.scalars(select(Tenant).where(Tenant.id != SYSTEM_TENANT_ID)).all()
     jobs = db_session.scalars(select(Job)).all()
     assert len(tenants) == 1
     assert tenants[0].id == "tenant-1"
