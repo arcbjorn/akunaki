@@ -1281,3 +1281,37 @@ class LoginState(Base):
         UniqueConstraint("state_hash", name="uq_login_states_state_hash"),
         Index("ix_login_states_expires_at", "expires_at"),
     )
+
+
+class WebhookInbox(Base):
+    """One durable, deduplicated verified webhook delivery."""
+
+    __tablename__ = "webhook_inbox"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    connection_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("connections.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    delivery_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at: Mapped[str] = mapped_column(Text, nullable=False)
+    verified_at: Mapped[str] = mapped_column(Text, nullable=False)
+    headers_meta_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # Sole FK between inbox and payload; set after the payload is captured.
+    body_payload_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("raw_payload.id", ondelete="SET NULL"), nullable=True
+    )
+    processing_status: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "processing_status IN ('accepted', 'enqueued', 'processed', 'ignored_dup')",
+            name="webhook_inbox_status",
+        ),
+        CheckConstraint("json_valid(headers_meta_json)", name="webhook_inbox_headers_json"),
+        UniqueConstraint("connection_id", "dedupe_key", name="uq_webhook_inbox_dedupe"),
+    )
