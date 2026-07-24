@@ -23,6 +23,7 @@ from akunaki.adapters.db.models import (
 from akunaki.domain.jobs import parse_utc_rfc3339, require_aware, to_utc_rfc3339
 from akunaki.domain.sleep_consistency import midpoint_local_minutes
 from akunaki.domain.sleep_normalizer import ENTITY_TYPE, NORMALIZER_VERSION, SleepFact
+from akunaki.domain.source_policy import authoritative_sleep_provider
 from akunaki.domain.vitals_normalizer import (
     ENTITY_TYPE as VITALS_ENTITY_TYPE,
 )
@@ -406,13 +407,15 @@ class FactRepository:
         tenant_id: str,
         local_health_days: list[str],
     ) -> dict[str, float]:
-        """Total sleep minutes per local day, summed across current sessions.
+        """Total sleep minutes per local day, from the authoritative provider.
 
         Per the design, ``sleep_duration_min`` is the total sleep minutes across
-        all sessions assigned to a wake-date, naps and split sessions included.
-        Only current, load-eligible, active facts count; a day absent from the
-        result has no known sleep and must be treated as unknown by the caller,
-        never imputed as zero.
+        all sessions assigned to a wake-date, naps and split sessions included —
+        but **only from the one authoritative provider** for that day when more
+        than one supplies sleep. Providers are never summed together or blended
+        (see :func:`authoritative_sleep_provider`). Only current, load-eligible,
+        active facts count; a day absent from the result has no known sleep and
+        must be treated as unknown by the caller, never imputed as zero.
         """
         if not local_health_days:
             return {}
@@ -420,6 +423,7 @@ class FactRepository:
             rows = session.execute(
                 select(
                     FactRecord.local_health_day,
+                    FactRecord.provider,
                     func.sum(SleepSession.duration_min),
                 )
                 .join(SleepSession, SleepSession.fact_record_id == FactRecord.id)
@@ -431,9 +435,15 @@ class FactRepository:
                     FactRecord.deletion_state == "active",
                     FactRecord.exclude_from_load == 0,
                 )
-                .group_by(FactRecord.local_health_day)
+                .group_by(FactRecord.local_health_day, FactRecord.provider)
             ).all()
-        return {day: float(total) for day, total in rows if day is not None}
+        # Collapse (day, provider) totals to one authoritative provider per day.
+        by_day: dict[str, dict[str, float]] = {}
+        for day, provider, total in rows:
+            if day is None or provider is None:
+                continue
+            by_day.setdefault(day, {})[provider] = float(total)
+        return _authoritative_per_day(by_day)
 
     def daily_sleep_efficiency(
         self,
@@ -447,7 +457,9 @@ class FactRepository:
         included only when **every** contributing session has a non-null
         ``time_in_bed_min``; a day with any missing in-bed minutes is omitted
         (absent, not imputed), matching how the baseline layer treats gaps. As
-        with durations, only current, load-eligible, active facts count.
+        with durations, only current, load-eligible, active facts count, and
+        only the **authoritative provider's** sessions are used — providers are
+        never mixed into one ratio.
         """
         if not local_health_days:
             return {}
@@ -455,6 +467,7 @@ class FactRepository:
             rows = session.execute(
                 select(
                     FactRecord.local_health_day,
+                    FactRecord.provider,
                     func.sum(SleepSession.duration_min),
                     func.sum(SleepSession.time_in_bed_min),
                     func.count().filter(SleepSession.time_in_bed_min.is_(None)),
@@ -468,16 +481,34 @@ class FactRepository:
                     FactRecord.deletion_state == "active",
                     FactRecord.exclude_from_load == 0,
                 )
-                .group_by(FactRecord.local_health_day)
+                .group_by(FactRecord.local_health_day, FactRecord.provider)
             ).all()
 
+        # Per day, keep only the authoritative provider's totals before deciding
+        # whether efficiency is defined.
+        per_day: dict[str, dict[str, tuple[float, float | None, int]]] = {}
+        for day, provider, duration_total, in_bed_total, missing_in_bed in rows:
+            if day is None or provider is None:
+                continue
+            in_bed = float(in_bed_total) if in_bed_total is not None else None
+            per_day.setdefault(day, {})[provider] = (
+                float(duration_total),
+                in_bed,
+                int(missing_in_bed),
+            )
+
         efficiency: dict[str, float] = {}
-        for day, duration_total, in_bed_total, missing_in_bed in rows:
-            if day is None or missing_in_bed > 0 or in_bed_total in (None, 0):
+        for day, per_provider in per_day.items():
+            chosen = authoritative_sleep_provider(per_provider.keys())
+            if chosen is None:
+                continue
+            duration_total, in_bed_total, missing_in_bed = per_provider[chosen]
+            if missing_in_bed > 0 or in_bed_total in (None, 0.0):
                 # Any session missing in-bed minutes, or a zero/absent total,
                 # leaves efficiency undefined for the day: omit it.
                 continue
-            efficiency[day] = float(duration_total) / float(in_bed_total) * 100.0
+            assert in_bed_total is not None
+            efficiency[day] = duration_total / in_bed_total * 100.0
         return efficiency
 
     def daily_principal_sleep_midpoint(
@@ -492,7 +523,8 @@ class FactRepository:
         duration (health-engine.md); a day with only naps has no valid night and
         is omitted. The midpoint needs the onset instant and the source offset,
         so a session missing either is skipped. Only current, load-eligible,
-        active facts are considered.
+        active facts are considered, and only the **authoritative provider's**
+        sessions — the principal session is never chosen across providers.
         """
         if not local_health_days:
             return {}
@@ -500,6 +532,7 @@ class FactRepository:
             rows = session.execute(
                 select(
                     FactRecord.local_health_day,
+                    FactRecord.provider,
                     FactRecord.start_utc,
                     FactRecord.source_offset_minutes,
                     SleepSession.duration_min,
@@ -516,11 +549,25 @@ class FactRepository:
                 )
             ).all()
 
-        # Pick the longest non-nap session per day, then take its midpoint.
+        # The authoritative provider per day is decided over every provider that
+        # supplied a non-nap session, so a lower-precedence provider's session is
+        # never the principal one even if it is longer.
+        providers_by_day: dict[str, set[str]] = {}
+        for day, provider, _start, _offset, _dur in rows:
+            if day is not None and provider is not None:
+                providers_by_day.setdefault(day, set()).add(provider)
+        authoritative = {
+            day: authoritative_sleep_provider(providers)
+            for day, providers in providers_by_day.items()
+        }
+
+        # Pick the longest non-nap authoritative session per day, then midpoint.
         principal_duration: dict[str, float] = {}
         midpoints: dict[str, float] = {}
-        for day, start_utc, offset_minutes, duration_min in rows:
+        for day, provider, start_utc, offset_minutes, duration_min in rows:
             if day is None or start_utc is None or offset_minutes is None:
+                continue
+            if provider != authoritative.get(day):
                 continue
             if duration_min <= principal_duration.get(day, -1.0):
                 continue
@@ -652,3 +699,19 @@ class FactRepository:
                 )
             ).all()
         return {day: float(value) for day, value in rows if day is not None and value is not None}
+
+
+def _authoritative_per_day(by_day: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Collapse per-provider day values to the one authoritative provider's.
+
+    ``by_day`` maps each day to ``{provider: value}``. For each day the sleep
+    precedence picks a single provider; a day whose only providers are outside
+    the precedence contributes nothing (no authoritative source), rather than
+    blending unrecognized sources.
+    """
+    result: dict[str, float] = {}
+    for day, per_provider in by_day.items():
+        chosen = authoritative_sleep_provider(per_provider.keys())
+        if chosen is not None:
+            result[day] = per_provider[chosen]
+    return result
