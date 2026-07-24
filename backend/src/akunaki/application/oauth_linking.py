@@ -122,9 +122,19 @@ class OAuthLinkingService:
             raise ValueError(msg)
 
         state = self._generate_state()
-        verifier = self._generate_code_verifier()
-        challenge = self._code_challenge(verifier)
         state_id = self._new_id()
+
+        # A PKCE provider (Oura, Google Health) generates a verifier + challenge;
+        # a non-PKCE provider (Polar) has neither. The state row's sealed-verifier
+        # column is non-null, so a non-PKCE flow seals an empty placeholder — the
+        # CSRF binding is ``state``, which every provider uses, so single-use and
+        # replay protection are identical either way.
+        if self._client.uses_pkce:
+            verifier = self._generate_code_verifier()
+            challenge: str | None = self._code_challenge(verifier)
+        else:
+            verifier = ""
+            challenge = None
 
         # Bind the sealed verifier to its own state row, so a stolen envelope
         # cannot be replayed against a different authorization attempt.
@@ -189,8 +199,11 @@ class OAuthLinkingService:
 
         assert consumption.sealed_verifier is not None
         assert consumption.state_id is not None
+        # Open the sealed envelope for every provider — a non-PKCE flow sealed an
+        # empty placeholder, and opening it still exercises the same tamper /
+        # key-rotation check before any code exchange.
         try:
-            verifier = self._sealer.open(
+            opened = self._sealer.open(
                 consumption.sealed_verifier,
                 aad=consumption.state_id.encode(),
             ).decode()
@@ -201,6 +214,8 @@ class OAuthLinkingService:
             )
             return LinkResult(rejection=LinkRejection.VERIFIER_UNREADABLE)
 
+        # A non-PKCE provider exchanges the code with no verifier.
+        verifier = opened if self._client.uses_pkce else None
         exchange = self._client.exchange_code(
             code=code,
             code_verifier=verifier,
