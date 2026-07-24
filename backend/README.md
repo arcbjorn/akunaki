@@ -49,8 +49,11 @@ These same gates run in CI (`.github/workflows/backend.yml`) across four jobs: *
 ```bash
 # optional: export AKUNAKI_DATABASE_URL=sqlite+libsql:////abs/path/to/file.db
 uv run python -m akunaki.api
-# GET http://127.0.0.1:8000/healthz
+# GET http://127.0.0.1:8000/healthz   # cheap liveness: process up + DB reachable
+# GET http://127.0.0.1:8000/readyz    # deep readiness for probes/dashboards
 ```
+
+`/readyz` is the deployment readiness probe: it reports the **migration head** (is the DB at the code's revision?), **queue depth** (ready/leased/dead-letter job counts), and whether a worker holds the **`core-reaper` leader lease**. It returns **503** unless the DB is reachable *and* at the migration head — so a deployment whose migrations haven't run reads not-ready. Queue depth and leader presence are reported for dashboards but do not gate readiness. It is read-only, so probing it never perturbs the queue or leases.
 
 ## Run worker
 
