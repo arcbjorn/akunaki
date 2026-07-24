@@ -16,6 +16,7 @@ from enum import StrEnum
 NORMALIZE_JOB_TYPE = "raw.normalize"
 INITIAL_SYNC_JOB_TYPE = "connection.initial_sync"
 INCREMENTAL_SYNC_JOB_TYPE = "connection.incremental_sync"
+RECONCILE_SWEEP_JOB_TYPE = "connection.reconcile_sweep"
 SCORE_RECOMPUTE_JOB_TYPE = "score.recompute"
 
 

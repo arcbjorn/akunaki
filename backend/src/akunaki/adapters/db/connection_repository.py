@@ -140,7 +140,27 @@ class ConnectionRepository:
             )
             if affected_rows(result) != 1:
                 return False
-            if error_class is not None:
+            # A transition to ACTIVE marks a successful sync; record it (and
+            # clear the failure streak) so the reconciliation sweep can tell a
+            # fresh connection from a stale one.
+            if status is ConnectionStatus.ACTIVE:
+                tenant_id = session.execute(
+                    select(Connection.tenant_id).where(Connection.id == connection_id)
+                ).scalar_one()
+                updated = session.execute(
+                    update(ConnectionHealth)
+                    .where(ConnectionHealth.connection_id == connection_id)
+                    .values(last_success_at=now_s, consecutive_failures=0, last_error_class=None)
+                )
+                if affected_rows(updated) == 0:
+                    session.add(
+                        ConnectionHealth(
+                            connection_id=connection_id,
+                            tenant_id=tenant_id,
+                            last_success_at=now_s,
+                        )
+                    )
+            elif error_class is not None:
                 session.merge(
                     ConnectionHealth(
                         connection_id=connection_id,
@@ -172,6 +192,30 @@ class ConnectionRepository:
                 scopes=scopes,
                 external_user_id=row.external_user_id,
             )
+
+    def stale_connections(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str]]:
+        """Active connections whose last successful sync is older than ``cutoff``.
+
+        Returns ``(connection_id, tenant_id)`` for each ACTIVE connection whose
+        ``connection_health.last_success_at`` is null (never synced) or strictly
+        older than ``cutoff`` (a UTC RFC3339 instant). Only ACTIVE connections
+        are swept — a ``needs_reauth`` or ``error`` connection will not sync
+        until the user re-consents, so re-enqueuing it would only burn attempts.
+        The stable ``id`` ordering makes the sweep deterministic and pageable.
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(Connection.id, Connection.tenant_id)
+                .outerjoin(ConnectionHealth, ConnectionHealth.connection_id == Connection.id)
+                .where(
+                    Connection.status == ConnectionStatus.ACTIVE.value,
+                    (ConnectionHealth.last_success_at.is_(None))
+                    | (ConnectionHealth.last_success_at < cutoff),
+                )
+                .order_by(Connection.id)
+                .limit(limit)
+            ).all()
+        return [(cid, tid) for cid, tid in rows]
 
     def get_sealed_secret(self, *, connection_id: str) -> SealedSecret | None:
         """Return the stored sealed tokens for a connection, if any."""
