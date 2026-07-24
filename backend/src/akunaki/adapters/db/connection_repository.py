@@ -152,6 +152,27 @@ class ConnectionRepository:
                 )
             return True
 
+    def get_connection(self, *, connection_id: str) -> LinkedConnection | None:
+        """Return a connection's identity (tenant, provider, status), or None.
+
+        Used where only the connection id is known — e.g. a webhook ingress that
+        must resolve the owning tenant and provider before verifying and
+        recording a delivery.
+        """
+        with self._session_factory() as session:
+            row = session.get(Connection, connection_id)
+            if row is None:
+                return None
+            scopes = tuple(json.loads(row.scopes_granted_json))
+            return LinkedConnection(
+                connection_id=row.id,
+                tenant_id=row.tenant_id,
+                provider=Provider(row.provider),
+                status=ConnectionStatus(row.status),
+                scopes=scopes,
+                external_user_id=row.external_user_id,
+            )
+
     def get_sealed_secret(self, *, connection_id: str) -> SealedSecret | None:
         """Return the stored sealed tokens for a connection, if any."""
         with self._session_factory() as session:

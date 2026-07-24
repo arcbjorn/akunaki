@@ -157,6 +157,12 @@ class Settings(BaseSettings):
         default="", description="Google Health OAuth callback URI."
     )
 
+    # Per-connector webhook signing secrets (HMAC-SHA256 verification). Empty
+    # disables webhook ingress for that provider (the delivery is rejected),
+    # so an unconfigured provider has no verifiable webhook path.
+    oura_webhook_secret: str = Field(default="", description="Oura webhook signing secret.")
+    polar_webhook_secret: str = Field(default="", description="Polar webhook signing secret.")
+
     def connector_oauth(self, provider: str) -> ConnectorOAuthConfig | None:
         """Return a provider's OAuth config, or None when not fully configured.
 
@@ -174,6 +180,15 @@ class Settings(BaseSettings):
             client_secret=client_secret,
             redirect_uri=redirect_uri,
         )
+
+    def webhook_secret(self, provider: str) -> str | None:
+        """Return a provider's webhook signing secret, or None when unset.
+
+        None means webhook ingress is not enabled for the provider, so a
+        delivery cannot be verified and must be rejected.
+        """
+        secret = getattr(self, f"{provider}_webhook_secret", "")
+        return secret if secret.strip() else None
 
     @field_validator("database_url")
     @classmethod
