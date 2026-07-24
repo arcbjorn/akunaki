@@ -210,9 +210,7 @@ class PolarFetchClient:
             "Accept": "application/json",
         }
         if self._transport is not None:
-            return self._transport.request(
-                method, url, headers=headers, timeout=self._timeout
-            )
+            return self._transport.request(method, url, headers=headers, timeout=self._timeout)
         with httpx2.Client(timeout=self._timeout) as client:
             return client.request(method, url, headers=headers)
 

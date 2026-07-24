@@ -20,9 +20,7 @@ from akunaki.domain.sleep_normalizer import NormalizationError
 
 def _page(*stages: dict[str, str]) -> str:
     """Wrap stage segments as one v4 sleep data point's sleepStages array."""
-    return json.dumps(
-        {"dataPoints": [{"sleep": {"sleepStages": list(stages)}}]}
-    )
+    return json.dumps({"dataPoints": [{"sleep": {"sleepStages": list(stages)}}]})
 
 
 def _seg(start: str, end: str, stage: str | None) -> dict[str, str]:

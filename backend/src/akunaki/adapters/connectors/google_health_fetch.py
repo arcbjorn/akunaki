@@ -159,17 +159,13 @@ class GoogleHealthFetchClient:
             )
         )
 
-    def _send(
-        self, url: str, params: dict[str, str], access_token: str
-    ) -> httpx2.Response:
+    def _send(self, url: str, params: dict[str, str], access_token: str) -> httpx2.Response:
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
         }
         if self._transport is not None:
-            return self._transport.get(
-                url, params=params, headers=headers, timeout=self._timeout
-            )
+            return self._transport.get(url, params=params, headers=headers, timeout=self._timeout)
         with httpx2.Client(timeout=self._timeout) as client:
             return client.get(url, params=params, headers=headers)
 

@@ -58,11 +58,15 @@ _SUMMARY = {
     "duration": "PT1H",
     "sport": "RUNNING",
 }
-_ZONES = {"zone": [{"index": 1, "in-zone": "PT10M"},
-                   {"index": 2, "in-zone": "PT20M"},
-                   {"index": 3, "in-zone": "PT30M"},
-                   {"index": 4, "in-zone": "PT5M"},
-                   {"index": 5, "in-zone": "PT2M"}]}
+_ZONES = {
+    "zone": [
+        {"index": 1, "in-zone": "PT10M"},
+        {"index": 2, "in-zone": "PT20M"},
+        {"index": 3, "in-zone": "PT30M"},
+        {"index": 4, "in-zone": "PT5M"},
+        {"index": 5, "in-zone": "PT2M"},
+    ]
+}
 
 _IDS = itertools.count(1)
 

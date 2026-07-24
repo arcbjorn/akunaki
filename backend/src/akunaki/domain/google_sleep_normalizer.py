@@ -161,9 +161,7 @@ def _segments_from_point(point: dict[str, Any]) -> list[_Segment]:
     return []
 
 
-def _parse_segment(
-    *, start_text: object, end_text: object, stage_raw: object
-) -> _Segment | None:
+def _parse_segment(*, start_text: object, end_text: object, stage_raw: object) -> _Segment | None:
     """Parse one stage/interval slice into a segment, or None when unusable."""
     if not isinstance(start_text, str) or not isinstance(end_text, str):
         return None

@@ -81,8 +81,10 @@ def test_list_gets_window_filter_and_returns_exact_body() -> None:
 
     # List is a GET whose path names the data type and whose filter windows it.
     assert captured["method"] == "GET"
-    assert str(captured["url"]).split("?")[0].endswith(
-        "/v4/users/me/dataTypes/com.google.sleep/dataPoints"
+    assert (
+        str(captured["url"])
+        .split("?")[0]
+        .endswith("/v4/users/me/dataTypes/com.google.sleep/dataPoints")
     )
     assert captured["auth"] == "Bearer AT"
     params = captured["params"]

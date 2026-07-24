@@ -128,9 +128,7 @@ def test_underscore_field_forms_still_parse() -> None:
         "id": "ex-legacy",
         "start_time": "2026-07-22T06:00:00+02:00",
         "duration": "PT1H",
-        "heart_rate_zones": [
-            {"index": i, "in_zone": "PT10M"} for i in range(1, 6)
-        ],
+        "heart_rate_zones": [{"index": i, "in_zone": "PT10M"} for i in range(1, 6)],
     }
     fact = normalize_workout_payload(_page(record))[0]
     # 10*1 + 10*2 + 10*3 + 10*4 + 10*5 = 150.
