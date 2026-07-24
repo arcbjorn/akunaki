@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" width="960" height="470" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
+  <title id="title">Akunaki architecture</title>
+  <desc id="desc">Wearable providers sync into raw transport, normalize into typed facts, pass through source selection, feed a deterministic health engine, and are served over the versioned product API to a web client and an optional agent.</desc>
+
+  <style>
+    .bg      { fill: #ffffff; }
+    .lane    { fill: #f7f8fa; stroke: #e6e8ec; }
+    .lane-t  { fill: #9aa1ac; font-size: 11px; letter-spacing: .12em; font-weight: 600; }
+    .box     { fill: #ffffff; stroke: #d7dbe2; }
+    .box-h   { fill: #12141a; font-size: 13.5px; font-weight: 650; }
+    .box-s   { fill: #7c8794; font-size: 10.5px; }
+    .accent  { fill: #2f6df6; }
+    .accent-b{ fill: #ffffff; stroke: #2f6df6; stroke-width: 1.6; }
+    .accent-h{ fill: #1b3f9c; font-size: 13.5px; font-weight: 650; }
+    .flow    { stroke: #b9c0cb; stroke-width: 1.6; fill: none; }
+    .flow-a  { stroke: #2f6df6; stroke-width: 1.8; fill: none; }
+    .dash    { stroke: #c6ccd6; stroke-width: 1.5; fill: none; stroke-dasharray: 4 4; }
+    .edge-t  { fill: #8b939f; font-size: 10px; }
+    .store   { fill: #fbfcfe; stroke: #c9d2e4; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg      { fill: #0d0f13; }
+      .lane    { fill: #141821; stroke: #232936; }
+      .lane-t  { fill: #6d7684; }
+      .box     { fill: #171b24; stroke: #2c3342; }
+      .box-h   { fill: #e8ecf2; }
+      .box-s   { fill: #838d9c; }
+      .accent  { fill: #6c9bff; }
+      .accent-b{ fill: #172038; stroke: #5b8cff; }
+      .accent-h{ fill: #b9cdff; }
+      .flow    { stroke: #39414f; }
+      .flow-a  { stroke: #5b8cff; }
+      .dash    { stroke: #333b4a; }
+      .edge-t  { fill: #737d8b; }
+      .store   { fill: #151b28; stroke: #2b344a; }
+    }
+  </style>
+
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#b9c0cb"/>
+    </marker>
+    <marker id="ar-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#2f6df6"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="960" height="470"/>
+
+  <!-- ══ lane 1: providers ══ -->
+  <text class="lane-t" x="40" y="44">SOURCES</text>
+  <g>
+    <rect class="box" x="40" y="58" width="150" height="40" rx="9"/>
+    <text class="box-h" x="58" y="83">Oura</text>
+    <rect class="box" x="40" y="106" width="150" height="40" rx="9"/>
+    <text class="box-h" x="58" y="131">Google Health</text>
+    <rect class="box" x="40" y="154" width="150" height="40" rx="9"/>
+    <text class="box-h" x="58" y="179">Polar</text>
+  </g>
+  <text class="edge-t" x="40" y="222">OAuth · webhooks · polling</text>
+
+  <!-- providers → ingest -->
+  <path class="flow" d="M190 78 C 215 78 215 126 238 126" marker-end="url(#ar)"/>
+  <path class="flow" d="M190 126 L 238 126" marker-end="url(#ar)"/>
+  <path class="flow" d="M190 174 C 215 174 215 126 238 126" marker-end="url(#ar)"/>
+
+  <!-- ══ lane 2: pipeline ══ -->
+  <text class="lane-t" x="248" y="44">DETERMINISTIC PIPELINE</text>
+  <rect class="lane" x="240" y="54" width="430" height="288" rx="14"/>
+
+  <!-- ingest -->
+  <rect class="box" x="262" y="102" width="176" height="48" rx="9"/>
+  <text class="box-h" x="280" y="123">Ingest</text>
+  <text class="box-s" x="280" y="139">exact vendor payloads, retained</text>
+
+  <!-- normalize -->
+  <rect class="box" x="472" y="102" width="176" height="48" rx="9"/>
+  <text class="box-h" x="490" y="123">Normalize</text>
+  <text class="box-s" x="490" y="139">typed facts + lineage</text>
+
+  <path class="flow" d="M438 126 L 466 126" marker-end="url(#ar)"/>
+
+  <!-- select -->
+  <rect class="box" x="472" y="176" width="176" height="48" rx="9"/>
+  <text class="box-h" x="490" y="197">Select</text>
+  <text class="box-s" x="490" y="213">one authoritative source</text>
+
+  <path class="flow" d="M560 150 L 560 170" marker-end="url(#ar)"/>
+
+  <!-- engine -->
+  <rect class="accent-b" x="262" y="176" width="176" height="48" rx="9"/>
+  <text class="accent-h" x="280" y="197">Health engine</text>
+  <text class="box-s" x="280" y="213">scores · baselines · anomalies</text>
+
+  <path class="flow-a" d="M466 200 L 444 200" marker-end="url(#ar-a)"/>
+
+  <!-- store -->
+  <rect class="store" x="262" y="256" width="386" height="60" rx="10"/>
+  <text class="box-h" x="282" y="280">libSQL / Turso</text>
+  <text class="box-s" x="282" y="298">versioned rows · immutable raw · job queue · provenance</text>
+
+  <path class="flow" d="M350 224 L 350 250" marker-end="url(#ar)"/>
+  <path class="flow" d="M560 224 L 560 250" marker-end="url(#ar)"/>
+
+  <text class="edge-t" x="262" y="364">every derivation is reproducible and recorded as a run</text>
+
+  <!-- ══ lane 3: surfaces ══ -->
+  <text class="lane-t" x="716" y="44">SURFACES</text>
+
+  <path class="flow-a" d="M648 286 C 686 286 686 96 714 96" marker-end="url(#ar-a)"/>
+  <text class="edge-t" x="662" y="180">/v1</text>
+
+  <rect class="accent-b" x="716" y="72" width="204" height="48" rx="9"/>
+  <text class="accent-h" x="734" y="93">Product API</text>
+  <text class="box-s" x="734" y="109">REST + SSE, provenance on read</text>
+
+  <path class="flow" d="M818 120 L 818 148" marker-end="url(#ar)"/>
+
+  <rect class="box" x="716" y="154" width="204" height="48" rx="9"/>
+  <text class="box-h" x="734" y="175">Web PWA</text>
+  <text class="box-s" x="734" y="191">how am I · why · what to do</text>
+
+  <path class="dash" d="M818 202 L 818 230" marker-end="url(#ar)"/>
+
+  <rect class="box" x="716" y="236" width="204" height="48" rx="9" stroke-dasharray="5 4"/>
+  <text class="box-h" x="734" y="257">Agent <tspan class="box-s">(optional)</tspan></text>
+  <text class="box-s" x="734" y="273">explains, never invents a score</text>
+
+  <text class="edge-t" x="716" y="308">core product works with the agent absent</text>
+
+  <!-- ══ footer: worker ══ -->
+  <rect class="box" x="40" y="392" width="880" height="46" rx="9"/>
+  <text class="box-h" x="62" y="413">Core worker</text>
+  <text class="box-s" x="62" y="429">leased jobs · fence tokens · retries · leader-gated schedules — drives every stage above</text>
+  <path class="dash" d="M880 392 L 880 350"/>
+</svg>
