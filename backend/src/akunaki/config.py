@@ -162,6 +162,14 @@ class Settings(BaseSettings):
     # so an unconfigured provider has no verifiable webhook path.
     oura_webhook_secret: str = Field(default="", description="Oura webhook signing secret.")
     polar_webhook_secret: str = Field(default="", description="Polar webhook signing secret.")
+    # Google Health push (Pub/Sub OIDC) authorization. Both are required to
+    # enable the Google Health webhook path; empty disables it (404).
+    google_health_push_audience: str = Field(
+        default="", description="Expected `aud` on the Google push OIDC token."
+    )
+    google_health_push_service_account: str = Field(
+        default="", description="Expected push service-account email on the token."
+    )
 
     def connector_oauth(self, provider: str) -> ConnectorOAuthConfig | None:
         """Return a provider's OAuth config, or None when not fully configured.

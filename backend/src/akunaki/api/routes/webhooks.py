@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.connectors.google_push_verifier import GooglePushVerifier
 from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.webhook_inbox_repository import WebhookInboxRepository
@@ -33,6 +34,8 @@ from akunaki.domain.jobs import INCREMENTAL_SYNC_JOB_TYPE
 from akunaki.domain.webhook_verification import HMAC_PROVIDERS, verify_hmac_signature
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+_GOOGLE_HEALTH = "google_health"
 
 # The signature header each HMAC provider sends. A provider absent here has no
 # verifiable webhook path.
@@ -52,6 +55,42 @@ def _settings(request: Request) -> Settings:
     return request.app.state.settings  # type: ignore[no-any-return]
 
 
+def _webhook_enabled(provider: str, settings: Settings) -> bool:
+    """Whether a provider has a fully-configured, verifiable webhook path."""
+    if provider in HMAC_PROVIDERS:
+        return settings.webhook_secret(provider) is not None
+    if provider == _GOOGLE_HEALTH:
+        return bool(
+            settings.google_health_push_audience.strip()
+            and settings.google_health_push_service_account.strip()
+        )
+    return False
+
+
+def _verify(
+    *, provider: str, request: Request, body: bytes, settings: Settings, now: datetime
+) -> bool:
+    """Verify a delivery per its provider's scheme. Assumes it is enabled.
+
+    HMAC providers verify the signature over the exact body; Google Health
+    verifies the Google-signed push OIDC token in the Authorization header.
+    """
+    if provider in HMAC_PROVIDERS:
+        secret = settings.webhook_secret(provider)
+        signature = request.headers.get(_SIGNATURE_HEADERS[provider], "")
+        return secret is not None and verify_hmac_signature(
+            secret=secret, body=body, provided_signature=signature
+        )
+    # Google Health: a Bearer JWT in the Authorization header, Google-signed.
+    authorization = request.headers.get("authorization", "")
+    token = authorization[len("Bearer ") :] if authorization.startswith("Bearer ") else ""
+    verifier = GooglePushVerifier(
+        expected_audience=settings.google_health_push_audience,
+        expected_service_account=settings.google_health_push_service_account,
+    )
+    return verifier.verify(bearer_token=token, now=now)
+
+
 @router.post("/{provider}/{connection_id}", response_model=WebhookAck)
 async def receive(
     provider: str,
@@ -65,25 +104,23 @@ async def receive(
     """Verify and record a webhook delivery, then enqueue a refetch."""
     response.headers["Cache-Control"] = "no-store"
 
-    # Unknown or non-HMAC provider, or one without a configured secret: reject
-    # indistinguishably so ingress reveals nothing about configuration.
-    secret = settings.webhook_secret(provider) if provider in HMAC_PROVIDERS else None
-    if secret is None:
+    # A provider with no configured verification path is an indistinguishable
+    # 404 — ingress reveals nothing about which providers *could* be enabled.
+    if not _webhook_enabled(provider, settings):
         raise HTTPException(status_code=404, detail={"code": "no_webhook"})
 
     body = await request.body()
-    signature = request.headers.get(_SIGNATURE_HEADERS[provider], "")
-    if not verify_hmac_signature(secret=secret, body=body, provided_signature=signature):
+    now = datetime.now(UTC)
+    if not _verify(provider=provider, request=request, body=body, settings=settings, now=now):
         # One generic 401: never disclose whether the connection exists.
         raise HTTPException(status_code=401, detail={"code": "invalid_signature"})
 
-    # Resolve the owning tenant/provider only after the signature passes, so an
+    # Resolve the owning tenant/provider only after verification passes, so an
     # unverified request cannot probe which connections exist.
     connection = ConnectionRepository(session_factory).get_connection(connection_id=connection_id)
     if connection is None or connection.provider.value != provider:
         raise HTTPException(status_code=401, detail={"code": "invalid_signature"})
 
-    now = datetime.now(UTC)
     # Dedupe on the vendor delivery id when present, else a hash of the body.
     dedupe_key = delivery_id or hashlib.sha256(body).hexdigest()
     inbox = WebhookInboxRepository(session_factory)
