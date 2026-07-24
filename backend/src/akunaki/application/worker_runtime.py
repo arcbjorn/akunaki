@@ -92,6 +92,7 @@ class WorkerStats:
     dead_lettered_expired: int = 0
     idle_polls: int = 0
     scheduled: int = 0
+    schedule_deduped: int = 0
 
 
 class JobWorker:
@@ -328,7 +329,7 @@ class JobWorker:
     def _fire_schedules(self, now: datetime) -> None:
         """Enqueue any periodic jobs whose interval has elapsed (leader only)."""
         for spec in due_schedules(self._schedules, last_fired=self._last_fired, now=now):
-            self._repository.enqueue_job(
+            outcome = self._repository.enqueue_job(
                 job_id=f"sched-{spec.job_type}-{int(now.timestamp())}",
                 tenant_id=spec.tenant_id,
                 job_type=spec.job_type,
@@ -336,8 +337,19 @@ class JobWorker:
                 now=now,
                 idempotency_key=spec.idempotency_key,
             )
+            # Mark fired either way: a dedupe means the previous run is still
+            # in flight, so the interval has genuinely been served.
             self._last_fired[spec.idempotency_key] = now
-            self.stats.scheduled += 1
+            # Count only real enqueues. Counting deduped calls would report a
+            # healthy schedule even when nothing was ever queued.
+            if outcome.created:
+                self.stats.scheduled += 1
+            else:
+                self.stats.schedule_deduped += 1
+                logger.info(
+                    "scheduled job already in flight; not re-enqueued",
+                    extra={"job_type": spec.job_type, "idempotency_key": spec.idempotency_key},
+                )
 
     def _ensure_leadership(self, now: datetime) -> bool:
         """Acquire or extend the reaper leader lease. False when another owner leads."""

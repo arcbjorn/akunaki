@@ -41,11 +41,15 @@ class FakeRepository:
         heartbeat_alive: bool = True,
         complete_result: bool = True,
         leader_available: bool = True,
+        enqueue_creates: bool = True,
     ) -> None:
         self._claims = list(claims or [])
         self.heartbeat_alive = heartbeat_alive
         self.complete_result = complete_result
         self.leader_available = leader_available
+        # False simulates the repository deduping against a job that is still
+        # in flight, so the enqueue writes nothing.
+        self.enqueue_creates = enqueue_creates
         self.completed: list[str] = []
         self.failures: list[dict[str, object]] = []
         self.heartbeats: list[str] = []
@@ -142,7 +146,11 @@ class FakeRepository:
     ) -> EnqueuedJob:
         self.enqueued.append((job_type, tenant_id, idempotency_key))
         return EnqueuedJob(
-            job_id=job_id, tenant_id=tenant_id, job_type=job_type, role=role, created=True
+            job_id=job_id,
+            tenant_id=tenant_id,
+            job_type=job_type,
+            role=role,
+            created=self.enqueue_creates,
         )
 
     def try_acquire_leader(
@@ -473,6 +481,31 @@ def test_schedule_fires_once_per_interval() -> None:
     clock.advance(timedelta(minutes=31))
     worker.run_once()
     assert worker.stats.scheduled == 2
+
+
+def test_deduped_schedule_is_not_counted_as_scheduled() -> None:
+    """``scheduled`` counts real enqueues only.
+
+    Regression: the counter incremented on every attempt, so a schedule that
+    was silently deduped every tick still reported healthy — the metric hid
+    exactly the failure it should have surfaced.
+    """
+    repo = FakeRepository(enqueue_creates=False)
+    worker = JobWorker(
+        repo,
+        owner="worker-1",
+        clock=lambda: NOW,
+        sleep=lambda _s: None,
+        jitter=lambda: 0.0,
+        schedules=[_reconcile_spec()],
+    )
+
+    worker.run_once()
+
+    # The enqueue was attempted, but nothing new was queued.
+    assert len(repo.enqueued) == 1
+    assert worker.stats.scheduled == 0
+    assert worker.stats.schedule_deduped == 1
 
 
 def test_no_schedules_enqueues_nothing() -> None:
