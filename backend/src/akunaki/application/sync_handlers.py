@@ -28,10 +28,12 @@ from akunaki.domain.connections import ConnectionStatus
 from akunaki.domain.fetch import FetchFailure
 from akunaki.domain.google_sleep_normalizer import normalize_google_sleep_payload
 from akunaki.domain.jobs import (
+    INCREMENTAL_SYNC_JOB_TYPE,
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
     SCORE_RECOMPUTE_JOB_TYPE,
     JobClaim,
+    parse_utc_rfc3339,
 )
 from akunaki.domain.record_split import split_page
 from akunaki.domain.retry import PermanentJobError, TransientJobError
@@ -50,8 +52,10 @@ logger = logging.getLogger("akunaki.sync_handlers")
 # Re-exported from domain so callers can register handlers without reaching
 # into akunaki.domain.jobs for a job-type string.
 __all__ = [
+    "INCREMENTAL_SYNC_JOB_TYPE",
     "INITIAL_SYNC_JOB_TYPE",
     "NORMALIZE_JOB_TYPE",
+    "IncrementalSyncHandler",
     "InitialSyncHandler",
     "NormalizeHandler",
     "SyncConfig",
@@ -164,10 +168,44 @@ class InitialSyncHandler:
         connection_id = payload["connection_id"]
         now = self._clock()
 
-        access_token = self._open_access_token(connection_id)
-        window_end = now
+        # Backfill window: a fixed lookback ending now.
         window_start = now - timedelta(days=self._config.lookback_days) - self._config.overlap
 
+        new_revisions = self.sync_window(
+            claim=claim,
+            connection_id=connection_id,
+            sync_run_id=payload.get("sync_run_id"),
+            window_start=window_start,
+            window_end=now,
+            now=now,
+        )
+        self._connections.mark_status(
+            connection_id=connection_id,
+            status=ConnectionStatus.ACTIVE,
+            now=now,
+        )
+        logger.info(
+            "initial sync completed",
+            extra={"connection_id": connection_id, "new_revisions": new_revisions},
+        )
+
+    def sync_window(
+        self,
+        *,
+        claim: JobClaim,
+        connection_id: str,
+        sync_run_id: str | None,
+        window_start: datetime,
+        window_end: datetime,
+        now: datetime,
+    ) -> int:
+        """Fetch, commit, and cursor-advance one window; return new revisions.
+
+        The shared page loop for both initial backfill and incremental sync:
+        only the caller's ``window_start`` differs. Raises on a fetch failure
+        (mapped to the runtime's retry vocabulary).
+        """
+        access_token = self._open_access_token(connection_id)
         pages = 0
         new_revisions = 0
         page_token: str | None = None
@@ -199,7 +237,7 @@ class InitialSyncHandler:
                 ids=_id_stream(self._new_id),
                 tenant_id=claim.tenant_id,
                 connection_id=connection_id,
-                sync_run_id=payload.get("sync_run_id"),
+                sync_run_id=sync_run_id,
                 envelope=envelope,
                 schema_version=self._config.schema_version,
                 cursor_id=f"{connection_id}:{self._config.stream}",
@@ -215,19 +253,7 @@ class InitialSyncHandler:
             if not page_token:
                 break
 
-        self._connections.mark_status(
-            connection_id=connection_id,
-            status=ConnectionStatus.ACTIVE,
-            now=now,
-        )
-        logger.info(
-            "initial sync completed",
-            extra={
-                "connection_id": connection_id,
-                "pages": pages,
-                "new_revisions": new_revisions,
-            },
-        )
+        return new_revisions
 
     def _open_access_token(self, connection_id: str) -> str:
         """Open the sealed tokens for a connection, or fail permanently."""
@@ -280,6 +306,74 @@ class InitialSyncHandler:
         if retry_after_seconds is not None:
             detail = f"{detail} (retry after {retry_after_seconds}s)"
         raise TransientJobError(detail)
+
+
+class IncrementalSyncHandler:
+    """Pull only what is new since a connection's last sync.
+
+    Reuses the initial-sync page loop, but sets the window start from the
+    stored cursor (the last page's ``fetched_at``) minus an overlap, rather than
+    a full lookback. The overlap re-fetches recently-finalized records so a late
+    vendor edit is not missed; content-hash dedupe in the ingestion layer makes
+    the re-fetch a no-op when nothing changed.
+
+    On the **first** incremental run (no cursor yet) it degrades to the same
+    lookback backfill as an initial sync, so a connection can be scheduled for
+    incremental sync without a separate first-run path.
+    """
+
+    def __init__(
+        self,
+        *,
+        backfill: InitialSyncHandler,
+        cursors: IngestionRepositoryPort,
+        config: SyncConfig | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._backfill = backfill
+        self._cursors = cursors
+        self._config = config or SyncConfig()
+        self._clock = clock
+
+    def __call__(self, claim: JobClaim) -> None:
+        """Execute one incremental-sync job."""
+        payload = _parse_payload(claim.payload_json)
+        connection_id = payload["connection_id"]
+        now = self._clock()
+
+        window_start = self._window_start(connection_id=connection_id, now=now)
+        new_revisions = self._backfill.sync_window(
+            claim=claim,
+            connection_id=connection_id,
+            sync_run_id=payload.get("sync_run_id"),
+            window_start=window_start,
+            window_end=now,
+            now=now,
+        )
+        logger.info(
+            "incremental sync completed",
+            extra={"connection_id": connection_id, "new_revisions": new_revisions},
+        )
+
+    def _window_start(self, *, connection_id: str, now: datetime) -> datetime:
+        """Where to resume: the last cursor minus overlap, or a lookback."""
+        cursor = self._cursors.get_cursor(connection_id=connection_id, stream=self._config.stream)
+        lookback_start = now - timedelta(days=self._config.lookback_days) - self._config.overlap
+        if cursor is None:
+            # No prior sync for this stream: behave like an initial backfill.
+            return lookback_start
+        try:
+            resumed = parse_utc_rfc3339(cursor) - self._config.overlap
+        except ValueError:
+            # A malformed stored cursor should not wedge the connection; fall
+            # back to the safe lookback window rather than raising.
+            logger.warning(
+                "incremental sync ignoring malformed cursor",
+                extra={"connection_id": connection_id},
+            )
+            return lookback_start
+        # Never resume before the lookback horizon (guards a stale cursor).
+        return max(resumed, lookback_start)
 
 
 def _parse_payload(payload_json: str) -> dict[str, str]:
