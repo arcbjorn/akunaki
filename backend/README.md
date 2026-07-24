@@ -69,7 +69,7 @@ Each iteration claims one due job by fenced CAS, runs its registered handler whi
 | `PermanentJobError`, `ValueError`/`TypeError`/`KeyError` | Dead-lettered immediately without burning the attempt budget |
 | Unregistered `job_type` | Dead-lettered as `UnregisteredJobType` (deployment error, not transient) |
 
-Only the holder of the `core-reaper` **leader lease** requeues expired leases and dead-letters exhausted ones, so a passive standby never reaps behind an active worker. The same leader also fires **periodic jobs** (`JobWorker(schedules=[...])`): the pure `due_schedules` picks which are due on each reaper tick, and each fire is idempotency-keyed so a lost lease or a crash mid-fire never duplicates. (The reconcile-sweep schedule is not yet registered in the worker entrypoint — a system-wide periodic job needs a system-tenant convention first — but the mechanism is general.)
+Only the holder of the `core-reaper` **leader lease** requeues expired leases and dead-letters exhausted ones, so a passive standby never reaps behind an active worker. The same leader also fires **periodic jobs** (`JobWorker(schedules=[...])`): the pure `due_schedules` picks which are due on each reaper tick, and each fire is idempotency-keyed so a lost lease or a crash mid-fire never duplicates. (The reconcile-sweep schedule is not yet registered in the worker entrypoint: the reserved `system` tenant now exists to own such jobs, so the remaining prerequisite is wiring the full product handler registry into the entrypoint so the syncs the sweep enqueues have a handler.)
 
 Execution policy lives in `akunaki.application.worker_runtime` (port-typed, no SQLAlchemy); durability lives in `JobRepository`. Handlers register in `akunaki.application.handlers`; `system.noop` and `connection.initial_sync` ship today. Handlers **must be idempotent** — a lease can expire mid-run and the job be retried elsewhere.
 
@@ -144,6 +144,7 @@ uv run alembic current
 | `20260723_0021` | `webhook_inbox` (durable deduplicated deliveries; one-way FK to `raw_payload`) |
 | `20260723_0022` | `daily_activity` (steps + active minutes detail; at-least-one-signal) |
 | `20260724_0023` | `source_selections` + `source_selection_candidates` (versioned daily source-precedence decision) |
+| `20260724_0024` | seed the reserved `system` tenant (owns system-wide periodic jobs) |
 
 ### Sync transport layer (`0006`)
 
