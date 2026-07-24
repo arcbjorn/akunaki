@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from akunaki.domain.activity_normalizer import ActivityFact
 from akunaki.domain.sleep_normalizer import SleepFact
 from akunaki.domain.vitals_normalizer import VitalsFact
 from akunaki.domain.workout_normalizer import WorkoutFact
@@ -90,4 +91,19 @@ class FactWriterPort(Protocol):
         now: datetime,
     ) -> FactWriteOutcomeLike:
         """Write one workout fact, superseding any differing current version."""
+        ...
+
+    def write_activity_fact(
+        self,
+        *,
+        fact_record_id: str,
+        tenant_id: str,
+        connection_id: str | None,
+        fact: ActivityFact,
+        raw_revision_id: str | None,
+        raw_payload_id: str | None,
+        schema_version: str,
+        now: datetime,
+    ) -> FactWriteOutcomeLike:
+        """Write one daily-activity fact, superseding any differing version."""
         ...

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.models import (
+    DailyActivity,
     FactRecord,
     OvernightVitals,
     SleepSession,
@@ -814,3 +815,87 @@ def test_symptom_burden_for_day_is_none_without_a_source() -> None:
     # No subjective source wired at all -> None, never a fabricated zero.
     service = RecoveryInputService(features=_EmptyFeatures())
     assert service.symptom_burden_for_day(tenant_id="tenant-1", local_health_day=TARGET_DAY) is None
+
+
+def _seed_activity(factory: sessionmaker[Session], *, day: str, fact_id: str, steps: int) -> None:
+    with factory() as session, session.begin():
+        session.add(
+            FactRecord(
+                id=fact_id,
+                tenant_id="tenant-1",
+                connection_id=None,
+                provider="google_health",
+                entity_type="daily_activity",
+                vendor_record_id=fact_id,
+                origin=None,
+                method="wearable",
+                utc_instant=NOW_S,
+                start_utc=NOW_S,
+                end_utc=NOW_S,
+                source_offset_minutes=0,
+                iana_timezone="UTC",
+                local_health_day=day,
+                unit=None,
+                quality="high",
+                confidence=0.9,
+                freshness_at=NOW_S,
+                raw_revision_id=None,
+                raw_payload_id=None,
+                schema_version="v1",
+                normalizer_version="google_activity_v0.1.0",
+                content_hash=fact_id,
+                fact_key=f"daily_activity:{fact_id}",
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                deletion_state="active",
+                exclude_from_load=0,
+                created_at=NOW_S,
+            )
+        )
+        session.flush()
+        session.add(DailyActivity(fact_record_id=fact_id, tenant_id="tenant-1", steps=steps))
+
+
+def test_activity_steps_query_reads_current_facts(
+    factory: sessionmaker[Session],
+) -> None:
+    _seed_activity(factory, day=TARGET_DAY, fact_id="a1", steps=8500)
+    steps = FactRepository(factory).daily_activity_steps(
+        tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+    )
+    assert steps[TARGET_DAY] == pytest.approx(8500.0)
+
+
+def test_low_activity_opens_an_anomaly_signal(factory: sessionmaker[Session]) -> None:
+    # A mature high-steps baseline, then a near-zero day far below it, opens a
+    # low_activity signal (z <= -2.5); more steps is better, so a low day is the
+    # anomaly direction.
+    for offset in range(1, 43):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_activity(factory, day=day, fact_id=f"ba-{offset}", steps=10000)
+    _seed_activity(factory, day=TARGET_DAY, fact_id="ta", steps=100)
+
+    signals = RecoveryInputService(features=FactRepository(factory)).feature_signals(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    by_code = {s.feature_code: s for s in signals}
+    assert "low_activity" in by_code
+    # open_today carries the opened Anomaly (truthy) when the detector fires.
+    assert by_code["low_activity"].open_today
+    assert by_code["low_activity"].z_like == pytest.approx(-3.0)
+
+
+def test_normal_activity_opens_no_anomaly(factory: sessionmaker[Session]) -> None:
+    for offset in range(1, 43):
+        day = (datetime.fromisoformat(TARGET_DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_activity(factory, day=day, fact_id=f"ba-{offset}", steps=10000)
+    _seed_activity(factory, day=TARGET_DAY, fact_id="ta", steps=9800)
+
+    signals = RecoveryInputService(features=FactRepository(factory)).feature_signals(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    by_code = {s.feature_code: s for s in signals}
+    # A signal may exist but must not be open for a normal day.
+    assert "low_activity" not in by_code or not by_code["low_activity"].open_today

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
 
+from akunaki.domain.activity_normalizer import normalize_activity_payload
 from akunaki.domain.connections import ConnectionStatus
 from akunaki.domain.fetch import FetchFailure
 from akunaki.domain.google_sleep_normalizer import normalize_google_sleep_payload
@@ -450,6 +451,8 @@ class NormalizeHandler:
         try:
             if revision.schema_version.startswith("polar."):
                 affected_days = self._normalize_workouts(claim, revision, now)
+            elif revision.schema_version.startswith("google_activity."):
+                written, affected_days = self._normalize_activity(claim, revision, now)
             elif revision.schema_version.startswith("google_health."):
                 written, affected_days = self._normalize_google_sleep(claim, revision, now)
             else:
@@ -549,6 +552,30 @@ class NormalizeHandler:
         written = 0
         for fact in facts:
             outcome = self._facts.write_sleep_fact(
+                fact_record_id=self._new_id(),
+                tenant_id=claim.tenant_id,
+                connection_id=revision.connection_id,
+                fact=fact,
+                raw_revision_id=revision.revision_id,
+                raw_payload_id=revision.raw_payload_id,
+                schema_version=revision.schema_version,
+                now=now,
+            )
+            if outcome.is_new_version:
+                written += 1
+        return written, {fact.local_health_day for fact in facts}
+
+    def _normalize_activity(
+        self,
+        claim: JobClaim,
+        revision: RevisionBody,
+        now: datetime,
+    ) -> tuple[int, set[str]]:
+        """Normalize a Google Health daily-activity revision into activity facts."""
+        facts = normalize_activity_payload(revision.payload_text)
+        written = 0
+        for fact in facts:
+            outcome = self._facts.write_activity_fact(
                 fact_record_id=self._new_id(),
                 tenant_id=claim.tenant_id,
                 connection_id=revision.connection_id,

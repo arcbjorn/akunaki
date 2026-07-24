@@ -25,11 +25,13 @@ from akunaki.domain.anomalies import (
     clears_deviant_temperature,
     clears_elevated_respiration,
     clears_elevated_rhr,
+    clears_low_activity,
     clears_low_hrv,
     clears_short_sleep,
     detect_deviant_temperature,
     detect_elevated_respiration,
     detect_elevated_rhr,
+    detect_low_activity,
     detect_low_hrv,
     detect_short_sleep,
 )
@@ -106,6 +108,12 @@ class FeatureSource(Protocol):
         self, *, tenant_id: str, local_health_days: list[str]
     ) -> dict[str, float]:
         """Daily strain-load per day where it is known (confirmed rest is 0.0)."""
+        ...
+
+    def daily_activity_steps(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
+        """Daily step count per day where known; omit days with no steps."""
         ...
 
 
@@ -375,6 +383,20 @@ class RecoveryInputService:
             direction=Direction.ELEVATED_WORSE,
             detect=detect_elevated_respiration,
             clears=clears_elevated_respiration,
+        )
+        # Low activity: steps far below baseline (z <= -2.5); more is better, so
+        # it uses the same higher-better z as HRV. No activity fact for a day
+        # means no signal (never an imputed zero).
+        self._vital_signal(
+            signals,
+            code=AnomalyCode.LOW_ACTIVITY,
+            series=self._features.daily_activity_steps(tenant_id=tenant_id, local_health_days=span),
+            local_health_day=local_health_day,
+            window=window,
+            family=MetricFamily.ACTIVITY,
+            direction=Direction.HIGHER_BETTER,
+            detect=detect_low_activity,
+            clears=clears_low_activity,
         )
 
         # Short sleep: shortfall vs target OR a low sleep-duration z, cleared
