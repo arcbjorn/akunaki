@@ -1,9 +1,10 @@
-"""TodaySurfaceService: the ACWR wiring into the training label.
+"""TodaySurfaceService: ACWR and symptom-burden wiring into the training label.
 
-The composite now reads the day's descriptive ACWR from a load source and feeds
-it to the pure training-label rules. These verify that a real over-load ratio
-drives the downshift, that an undefined ratio (or no load source) leaves the
-label untouched, and that the same ratio reaches the recommendation rules.
+The composite reads the day's descriptive ACWR from a load source and the
+symptom burden from a check-in source, feeding both to the pure training-label
+rules. These verify that a real over-load ratio downshifts, that a high symptom
+burden floors the label at light, and that absent/undefined inputs (or no source
+wired) leave the base label untouched — never a fabricated value.
 """
 
 from __future__ import annotations
@@ -59,11 +60,20 @@ class _Load:
         return self._acwr
 
 
-def _service(acwr: float | None) -> TodaySurfaceService:
+class _Symptoms:
+    def __init__(self, burden: float | None) -> None:
+        self._burden = burden
+
+    def symptom_burden_for_day(self, *, tenant_id: str, local_health_day: str) -> float | None:
+        return self._burden
+
+
+def _service(acwr: float | None, *, symptom_burden: float | None = None) -> TodaySurfaceService:
     return TodaySurfaceService(
         recovery=_Recovery(),
         sleep=SleepSurfaceService(durations=_Durations()),
         load=_Load(acwr),
+        symptoms=_Symptoms(symptom_burden),
     )
 
 
@@ -82,6 +92,31 @@ def test_balanced_acwr_leaves_the_hard_label() -> None:
 def test_undefined_acwr_leaves_the_hard_label() -> None:
     # No load coverage -> None -> load rules dormant -> HARD stands.
     surface = _service(acwr=None).today_for_day(tenant_id="tenant-1", local_health_day=TARGET_DAY)
+    assert surface.training_label is TrainingLabel.HARD
+
+
+def test_high_symptom_burden_floors_the_label_at_light() -> None:
+    # A recorded symptom burden at/above the 0.75 threshold floors a HARD day
+    # at LIGHT via the training-label symptom rule.
+    surface = _service(acwr=1.0, symptom_burden=0.9).today_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert surface.training_label is TrainingLabel.LIGHT
+
+
+def test_low_symptom_burden_leaves_the_hard_label() -> None:
+    # A mild burden below the threshold does not downshift.
+    surface = _service(acwr=1.0, symptom_burden=0.2).today_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert surface.training_label is TrainingLabel.HARD
+
+
+def test_absent_symptom_burden_leaves_the_hard_label() -> None:
+    # No check-in recorded -> None -> symptom rule dormant -> HARD stands.
+    surface = _service(acwr=1.0, symptom_burden=None).today_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
     assert surface.training_label is TrainingLabel.HARD
 
 

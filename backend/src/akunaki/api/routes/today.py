@@ -128,6 +128,9 @@ def _today_service(
         # The same input service the recovery score reads load from, so the
         # composite's ACWR ratio and the prior-load component never disagree.
         load=inputs,
+        # And the same check-in source, so the composite's symptom burden and
+        # the subjective recovery component read one value.
+        symptoms=inputs,
     )
 
 

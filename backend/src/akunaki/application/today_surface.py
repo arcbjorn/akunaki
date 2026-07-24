@@ -58,6 +58,14 @@ class AcwrSource(Protocol):
         ...
 
 
+class SymptomSource(Protocol):
+    """Port: the day's normalized symptom burden [0, 1], or None if unrecorded."""
+
+    def symptom_burden_for_day(self, *, tenant_id: str, local_health_day: str) -> float | None:
+        """Return the day's symptom burden, or None when no check-in recorded it."""
+        ...
+
+
 # Blocks named in the design's /v1/today body that do not ship in v0.1.0.
 # (The training recommendation *does* ship — it is a deterministic label, not a
 # blocked score — so it is not listed here.)
@@ -94,11 +102,13 @@ class TodaySurfaceService:
         sleep: SleepSurfaceService,
         anomalies: AnomalySource | None = None,
         load: AcwrSource | None = None,
+        symptoms: SymptomSource | None = None,
     ) -> None:
         self._recovery = recovery
         self._sleep = sleep
         self._anomalies = anomalies
         self._load = load
+        self._symptoms = symptoms
 
     def today_for_day(
         self,
@@ -146,6 +156,17 @@ class TodaySurfaceService:
             if self._load is not None
             else None
         )
+        # Symptom burden from the day's completed check-in, if any. None leaves
+        # the symptom rules dormant. There is no distinct severe-symptom marker
+        # in the v0.1.0 check-in, so severe_symptom_flag stays False — a high
+        # burden still floors the label at light via the burden threshold.
+        symptom_burden = (
+            self._symptoms.symptom_burden_for_day(
+                tenant_id=tenant_id, local_health_day=local_health_day
+            )
+            if self._symptoms is not None
+            else None
+        )
         hrv_c = _hrv_component_c(recovery)
         label = training_label(
             TrainingInputs(
@@ -153,7 +174,7 @@ class TodaySurfaceService:
                 recovery_status=recovery.status.value,
                 confidence=recovery.confidence,
                 has_high_severity_anomaly=high_anomaly,
-                symptom_burden_n=None,
+                symptom_burden_n=symptom_burden,
                 severe_symptom_flag=False,
                 acwr=acwr,
                 hrv_component_c=hrv_c,
