@@ -22,7 +22,7 @@ import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import NoReturn
+from typing import NoReturn, Protocol
 
 from akunaki.domain.activity_normalizer import normalize_activity_payload
 from akunaki.domain.connections import ConnectionStatus
@@ -32,9 +32,11 @@ from akunaki.domain.jobs import (
     INCREMENTAL_SYNC_JOB_TYPE,
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
+    RECONCILE_SWEEP_JOB_TYPE,
     SCORE_RECOMPUTE_JOB_TYPE,
     JobClaim,
     parse_utc_rfc3339,
+    to_utc_rfc3339,
 )
 from akunaki.domain.record_split import split_page
 from akunaki.domain.retry import PermanentJobError, TransientJobError
@@ -56,9 +58,11 @@ __all__ = [
     "INCREMENTAL_SYNC_JOB_TYPE",
     "INITIAL_SYNC_JOB_TYPE",
     "NORMALIZE_JOB_TYPE",
+    "RECONCILE_SWEEP_JOB_TYPE",
     "IncrementalSyncHandler",
     "InitialSyncHandler",
     "NormalizeHandler",
+    "ReconcileSweepHandler",
     "SyncConfig",
     "sync_config_for_provider",
 ]
@@ -375,6 +379,68 @@ class IncrementalSyncHandler:
             return lookback_start
         # Never resume before the lookback horizon (guards a stale cursor).
         return max(resumed, lookback_start)
+
+
+class StaleConnectionSource(Protocol):
+    """Port: active connections whose last successful sync predates a cutoff."""
+
+    def stale_connections(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str]]:
+        """Return ``(connection_id, tenant_id)`` for stale active connections."""
+        ...
+
+
+class ReconcileSweepHandler:
+    """Scheduled reconciliation: catch gaps a missed webhook or sync left behind.
+
+    Finds active connections whose last successful sync is older than the
+    staleness cutoff (or that never synced) and enqueues an incremental sync for
+    each. The enqueue is idempotency-keyed on the connection, so a connection
+    already queued by a webhook or an earlier sweep is not double-scheduled — the
+    sweep only fills gaps, it never piles work on a healthy connection.
+    """
+
+    def __init__(
+        self,
+        *,
+        connections: StaleConnectionSource,
+        jobs: JobRepositoryPort,
+        new_id: Callable[[], str],
+        staleness: timedelta = timedelta(hours=6),
+        batch_limit: int = 100,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._connections = connections
+        self._jobs = jobs
+        self._new_id = new_id
+        self._staleness = staleness
+        self._batch_limit = batch_limit
+        self._clock = clock
+
+    def __call__(self, claim: JobClaim) -> None:
+        """Execute one reconciliation sweep."""
+        now = self._clock()
+        cutoff = to_utc_rfc3339(now - self._staleness)
+        stale = self._connections.stale_connections(cutoff=cutoff, limit=self._batch_limit)
+
+        enqueued = 0
+        for connection_id, tenant_id in stale:
+            outcome = self._jobs.enqueue_job(
+                job_id=self._new_id(),
+                tenant_id=tenant_id,
+                job_type=INCREMENTAL_SYNC_JOB_TYPE,
+                payload_json=json.dumps({"connection_id": connection_id}),
+                now=now,
+                # One in-flight reconcile refetch per connection: a webhook or
+                # an earlier sweep may already have queued the same work.
+                idempotency_key=f"reconcile:{connection_id}",
+            )
+            if outcome.created:
+                enqueued += 1
+
+        logger.info(
+            "reconcile sweep completed",
+            extra={"stale": len(stale), "enqueued": enqueued},
+        )
 
 
 def _parse_payload(payload_json: str) -> dict[str, str]:
