@@ -29,6 +29,7 @@ from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
 from akunaki.domain.recovery import ComponentCode, RecoveryStatus, evaluate_recovery
+from akunaki.domain.subjective import SubjectiveInputs
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -750,3 +751,66 @@ def test_acwr_for_day_is_none_without_coverage(factory: sessionmaker[Session]) -
         tenant_id="tenant-1", local_health_day=TARGET_DAY
     )
     assert acwr is None
+
+
+class _EmptyFeatures:
+    """A feature source with nothing known — the symptom path ignores it."""
+
+    def daily_sleep_durations(self, *, tenant_id: str, local_health_days: list[str]):
+        return {}
+
+    def daily_sleep_efficiency(self, *, tenant_id: str, local_health_days: list[str]):
+        return {}
+
+    def daily_hrv(self, *, tenant_id: str, local_health_days: list[str]):
+        return {}
+
+    def daily_resting_hr(self, *, tenant_id: str, local_health_days: list[str]):
+        return {}
+
+    def daily_temperature_deviation(self, *, tenant_id: str, local_health_days: list[str]):
+        return {}
+
+    def daily_respiratory_rate(self, *, tenant_id: str, local_health_days: list[str]):
+        return {}
+
+    def daily_principal_sleep_midpoint(self, *, tenant_id: str, local_health_days: list[str]):
+        return {}
+
+    def daily_strain_load(self, *, tenant_id: str, local_health_days: list[str]):
+        return {}
+
+
+class _FakeSubjective:
+    """A subjective source returning one fixed check-in (or absence)."""
+
+    def __init__(self, inputs: SubjectiveInputs | None) -> None:
+        self._inputs = inputs
+
+    def current_check_in_inputs(
+        self, *, tenant_id: str, local_health_day: str
+    ) -> SubjectiveInputs | None:
+        return self._inputs
+
+
+def test_symptom_burden_for_day_reads_the_checkin() -> None:
+    service = RecoveryInputService(
+        features=_EmptyFeatures(),
+        subjective=_FakeSubjective(
+            SubjectiveInputs(energy_n=0.8, stress_n=0.2, symptom_burden_n=0.9)
+        ),
+    )
+    assert service.symptom_burden_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    ) == pytest.approx(0.9)
+
+
+def test_symptom_burden_for_day_is_none_without_a_checkin() -> None:
+    service = RecoveryInputService(features=_EmptyFeatures(), subjective=_FakeSubjective(None))
+    assert service.symptom_burden_for_day(tenant_id="tenant-1", local_health_day=TARGET_DAY) is None
+
+
+def test_symptom_burden_for_day_is_none_without_a_source() -> None:
+    # No subjective source wired at all -> None, never a fabricated zero.
+    service = RecoveryInputService(features=_EmptyFeatures())
+    assert service.symptom_burden_for_day(tenant_id="tenant-1", local_health_day=TARGET_DAY) is None

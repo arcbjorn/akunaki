@@ -293,6 +293,23 @@ class RecoveryInputService:
             chronic_daily_loads=chronic_loads,
         ).acwr
 
+    def symptom_burden_for_day(self, *, tenant_id: str, local_health_day: str) -> float | None:
+        """The day's normalized symptom burden [0, 1], or None when unrecorded.
+
+        Sourced from the current completed check-in — the same subjective source
+        the recovery component reads. None when no completed check-in exists or
+        it left the symptom field blank; a blank is never read as "no symptoms".
+        The training-label symptom rules read this value.
+        """
+        if self._subjective is None:
+            return None
+        inputs = self._subjective.current_check_in_inputs(
+            tenant_id=tenant_id, local_health_day=local_health_day
+        )
+        if inputs is None:
+            return None
+        return inputs.symptom_burden_n
+
     def feature_signals(
         self,
         *,
