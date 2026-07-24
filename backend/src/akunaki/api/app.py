@@ -16,11 +16,12 @@ from akunaki.adapters.db.engine import (
     probe_database_ready,
 )
 from akunaki.api.headers import security_headers_middleware
+from akunaki.api.request_context import request_id_middleware
 from akunaki.api.routes.health import router as health_router
 from akunaki.config import Settings, get_settings
 
 # Only these headers may accompany a credentialed cross-origin request.
-_CORS_ALLOWED_HEADERS = ("content-type", "x-akunaki-csrf")
+_CORS_ALLOWED_HEADERS = ("content-type", "x-akunaki-csrf", "x-request-id")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -54,6 +55,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Security headers on every response, including errors.
     app.middleware("http")(security_headers_middleware)
 
+    # Request-id binding runs **outermost** (registered last, so it wraps the
+    # others): the correlation id is bound before any downstream middleware or
+    # handler logs, and echoed on the response.
+    app.middleware("http")(request_id_middleware)
+
     # CORS only for the configured browser origins, with credentials. An empty
     # allow-list means no cross-origin browser access (same-origin deployment);
     # a credentialed request never uses a wildcard origin.
@@ -64,6 +70,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_credentials=True,
             allow_methods=["GET", "POST"],
             allow_headers=list(_CORS_ALLOWED_HEADERS),
+            # Let a browser client read the correlation id off the response.
+            expose_headers=["x-request-id"],
         )
 
     app.include_router(health_router)
