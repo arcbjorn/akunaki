@@ -13,6 +13,9 @@ dependencies = [
     "alembic==1.18.5",
     "sqlalchemy-libsql==0.2.0",
     "cryptography==49.0.0",
+    # httpx2 is the legitimate Pydantic-published next-generation httpx fork
+    # (author Tom Christie, homepage github.com/pydantic/httpx2), not a typosquat
+    # of `httpx`. It backs every outbound provider HTTP call.
     "httpx2==2.6.0",
     "pyjwt==2.13.0",
 ]
