@@ -812,6 +812,39 @@ class WorkoutSession(Base):
     )
 
 
+class DailyActivity(Base):
+    """A day's activity totals, one-to-one with its fact header.
+
+    ``steps`` is an integer count; ``active_minutes`` is moderate+ minutes. At
+    least one must be present (an empty-signal row carries nothing), and both
+    are non-negative. Feeds the low-activity anomaly; the ``activity`` *score*
+    stays blocked until its formula and golden fixtures are accepted.
+    """
+
+    __tablename__ = "daily_activity"
+
+    fact_record_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("fact_records.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "steps IS NOT NULL OR active_minutes IS NOT NULL",
+            name="activity_at_least_one_signal",
+        ),
+        CheckConstraint("steps IS NULL OR steps >= 0", name="activity_steps_nonneg"),
+        CheckConstraint(
+            "active_minutes IS NULL OR active_minutes >= 0",
+            name="activity_active_minutes_nonneg",
+        ),
+    )
+
+
 class OvernightVitals(Base):
     """Typed overnight-vitals detail, one-to-one with its fact header.
 
