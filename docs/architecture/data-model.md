@@ -888,6 +888,8 @@ See [ADR 0003](../adr/0003-libsql-operational-store.md) and [api-tools-and-agent
 
 See [repository-and-services.md](repository-and-services.md). Key fields: `tenant_id`, `job_type`, `payload_json` (TEXT `json_valid`), `status`, `priority`, `run_after`, `attempts`, `max_attempts`, `idempotency_key`, `fence_token`, `last_error_class`.
 
+`idempotency_key` is unique per tenant across **unsettled** jobs only — the partial index `ux_jobs_live_idempotency_key` (`WHERE status IN ('ready', 'leased')`). It prevents a *concurrent* duplicate; it does not reserve the key permanently. A retry returns a job to `ready` and keeps the key; a terminal status releases it so the next legitimate enqueue (a periodic sweep's next interval) can proceed. An all-status UNIQUE would make every keyed job a one-shot, since nothing clears the key on settle.
+
 ### `idempotency_keys`
 
 | Column | Notes |
