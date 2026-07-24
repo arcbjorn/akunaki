@@ -148,11 +148,10 @@ def test_db_behind_head_is_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyP
 def test_migrations_are_packaged_not_path_derived() -> None:
     """Readiness must resolve the migration head without a source checkout.
 
-    Regression: ``_alembic_config`` walked four parent directories to find
-    ``alembic.ini`` and a sibling ``alembic/`` tree. Neither ships in the
-    wheel, so ``/readyz`` raised on any installed deployment instead of
-    reporting readiness. The scripts now live inside the package and are
-    located by import.
+    The scripts live inside the package and are located by import, so a wheel
+    carries them. Deriving the location by walking parent directories, or
+    requiring ``alembic.ini`` on disk, would make ``/readyz`` raise on any
+    installed deployment instead of reporting readiness.
     """
     from alembic.script import ScriptDirectory
 

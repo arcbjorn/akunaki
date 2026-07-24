@@ -486,9 +486,9 @@ def test_schedule_fires_once_per_interval() -> None:
 def test_deduped_schedule_is_not_counted_as_scheduled() -> None:
     """``scheduled`` counts real enqueues only.
 
-    Regression: the counter incremented on every attempt, so a schedule that
-    was silently deduped every tick still reported healthy — the metric hid
-    exactly the failure it should have surfaced.
+    Counting attempts rather than creations would let a schedule that is
+    silently deduped every tick still report healthy — the metric would hide
+    exactly the failure it exists to surface.
     """
     repo = FakeRepository(enqueue_creates=False)
     worker = JobWorker(

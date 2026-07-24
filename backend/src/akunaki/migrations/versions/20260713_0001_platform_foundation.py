@@ -72,11 +72,19 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "tenant_id",
-            "idempotency_key",
-            name="uq_jobs_tenant_idempotency_key",
-        ),
+    )
+    # Idempotency uniqueness is **partial**: only an unsettled job reserves its
+    # key. The guarantee is one *in-flight* job per key, not one for all time —
+    # nothing clears the key when a job settles, so an all-status UNIQUE would
+    # make every keyed job a one-shot (a periodic schedule would fire once and
+    # then dedupe forever against its own completed run). A retry returns a job
+    # to 'ready', so it keeps holding the key while it is still alive.
+    op.create_index(
+        "ux_jobs_live_idempotency_key",
+        "jobs",
+        ["tenant_id", "idempotency_key"],
+        unique=True,
+        sqlite_where=sa.text("status IN ('ready', 'leased')"),
     )
     op.create_index(
         "ix_jobs_due",

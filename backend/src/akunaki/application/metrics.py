@@ -241,9 +241,9 @@ JOBS_LEASE_LOST = REGISTRY.counter(
     "Job attempts whose lease was lost mid-execution (no false success).",
 )
 
-# Split by result so a schedule that is firing and one that is silently
-# deduped every tick are distinguishable — the failure mode that motivated
-# this module.
+# Split by result so a schedule that is genuinely firing and one that is
+# silently deduped every tick are distinguishable. Collapsed into a single
+# count, a stalled schedule is indistinguishable from a healthy one.
 JOBS_SCHEDULED = REGISTRY.counter(
     "akunaki_jobs_scheduled_total",
     "Periodic schedule fires by the leader, by enqueue result.",

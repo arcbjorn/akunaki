@@ -400,9 +400,10 @@ def test_settled_job_releases_its_idempotency_key(
 ) -> None:
     """A key is held for the run, not forever.
 
-    Regression: the uniqueness spanned every status and no code path cleared
-    the key on settle, so one succeeded job deduped its own key permanently.
-    The reconciliation sweep enqueued once and was dead until restart.
+    Nothing clears ``idempotency_key`` when a job settles, so the uniqueness
+    must be scoped to live statuses. Were it not, one succeeded job would
+    dedupe its own key permanently and a periodic schedule would enqueue once
+    and then be dead until restart.
     """
     first = repository.enqueue_job(
         job_id="job-1",
