@@ -12,14 +12,17 @@ from __future__ import annotations
 from akunaki.application.recovery_surface import RecoverySurface
 from akunaki.application.sleep_surface import SleepSurfaceService
 from akunaki.application.today_surface import TodaySurfaceService
+from akunaki.domain.recommendations import RuleId
 from akunaki.domain.recovery import RecoveryFactor, RecoveryStatus
 from akunaki.domain.training_label import TrainingLabel
 
 TARGET_DAY = "2026-07-22"
 
 
-def _hard_recovery(day: str) -> RecoverySurface:
-    # A high recovery score with a strong HRV component -> base label HARD.
+def _hard_recovery(day: str, *, hrv_magnitude: float = 85.0) -> RecoverySurface:
+    # A high recovery score -> base label HARD. The HRV component magnitude is
+    # tunable: the load_ease recommendation needs a weak HRV (< 40) as well as
+    # over-load, so a strong HRV alone must not fire it.
     return RecoverySurface(
         local_health_day=day,
         score_code="recovery",
@@ -28,7 +31,7 @@ def _hard_recovery(day: str) -> RecoverySurface:
         confidence=0.9,
         available_weight=0.9,
         factors=(
-            RecoveryFactor(factor_code="hrv", present=True, weight=0.25, magnitude=85.0),
+            RecoveryFactor(factor_code="hrv", present=True, weight=0.25, magnitude=hrv_magnitude),
             RecoveryFactor(factor_code="resting_hr", present=True, weight=0.20, magnitude=80.0),
         ),
         data_gaps=(),
@@ -37,10 +40,13 @@ def _hard_recovery(day: str) -> RecoverySurface:
 
 
 class _Recovery:
+    def __init__(self, hrv_magnitude: float = 85.0) -> None:
+        self._hrv_magnitude = hrv_magnitude
+
     def recovery_for_day(
         self, *, tenant_id: str, local_health_day: str, target_min: int = 480
     ) -> RecoverySurface:
-        return _hard_recovery(local_health_day)
+        return _hard_recovery(local_health_day, hrv_magnitude=self._hrv_magnitude)
 
 
 class _Durations:
@@ -68,19 +74,55 @@ class _Symptoms:
         return self._burden
 
 
-def _service(acwr: float | None, *, symptom_burden: float | None = None) -> TodaySurfaceService:
+def _service(
+    acwr: float | None,
+    *,
+    symptom_burden: float | None = None,
+    hrv_magnitude: float = 85.0,
+) -> TodaySurfaceService:
     return TodaySurfaceService(
-        recovery=_Recovery(),
+        recovery=_Recovery(hrv_magnitude=hrv_magnitude),
         sleep=SleepSurfaceService(durations=_Durations()),
         load=_Load(acwr),
         symptoms=_Symptoms(symptom_burden),
     )
 
 
+def _fired_rules(surface: object) -> set[RuleId]:
+    recs = {surface.primary_recommendation, *surface.supporting_recommendations}  # type: ignore[attr-defined]
+    return {rec.rule_id for rec in recs if rec is not None}
+
+
 def test_overload_acwr_downshifts_the_hard_label() -> None:
     # ACWR past the 1.3 red band caps a HARD day at MODERATE.
     surface = _service(acwr=1.6).today_for_day(tenant_id="tenant-1", local_health_day=TARGET_DAY)
     assert surface.training_label is TrainingLabel.MODERATE
+
+
+def test_overload_with_weak_hrv_surfaces_load_ease() -> None:
+    # The load_ease rule is conjunctive: over-load AND a weakened HRV component
+    # (< 40). With both, the same ACWR that downshifts the label also surfaces
+    # the recommendation.
+    surface = _service(acwr=1.6, hrv_magnitude=30.0).today_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert RuleId.LOAD_EASE in _fired_rules(surface)
+
+
+def test_overload_with_strong_hrv_fires_no_load_ease() -> None:
+    # Over-load but a healthy HRV component -> load_ease stays dormant; the
+    # rule never fires on the ratio alone.
+    surface = _service(acwr=1.6, hrv_magnitude=85.0).today_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert RuleId.LOAD_EASE not in _fired_rules(surface)
+
+
+def test_balanced_acwr_fires_no_load_ease() -> None:
+    surface = _service(acwr=1.0, hrv_magnitude=30.0).today_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+    assert RuleId.LOAD_EASE not in _fired_rules(surface)
 
 
 def test_balanced_acwr_leaves_the_hard_label() -> None:
