@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from urllib.parse import urlparse
 
@@ -11,6 +12,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Safe local default: relative file under the process CWD.
 # Parent directory is created when the engine is built, not at settings load.
 DEFAULT_DATABASE_URL = "sqlite+libsql:///.local/akunaki.db"
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorOAuthConfig:
+    """A connector's fully-configured OAuth credentials."""
+
+    client_id: str
+    client_secret: str
+    redirect_uri: str
 
 
 def _is_local_libsql_url(value: str) -> bool:
@@ -129,6 +139,41 @@ class Settings(BaseSettings):
             "registered at all unless this is explicitly set."
         ),
     )
+
+    # Per-connector OAuth credentials. Each provider is link-enabled only when
+    # its id, secret, and redirect are all set — an unconfigured provider is not
+    # mounted, so there is no half-built connect surface (as with OIDC login).
+    oura_client_id: str = Field(default="", description="Oura OAuth client id.")
+    oura_client_secret: str = Field(default="", description="Oura OAuth client secret.")
+    oura_redirect_uri: str = Field(default="", description="Oura OAuth callback URI.")
+    polar_client_id: str = Field(default="", description="Polar OAuth client id.")
+    polar_client_secret: str = Field(default="", description="Polar OAuth client secret.")
+    polar_redirect_uri: str = Field(default="", description="Polar OAuth callback URI.")
+    google_health_client_id: str = Field(default="", description="Google Health OAuth client id.")
+    google_health_client_secret: str = Field(
+        default="", description="Google Health OAuth client secret."
+    )
+    google_health_redirect_uri: str = Field(
+        default="", description="Google Health OAuth callback URI."
+    )
+
+    def connector_oauth(self, provider: str) -> ConnectorOAuthConfig | None:
+        """Return a provider's OAuth config, or None when not fully configured.
+
+        A provider is link-enabled only when its id, secret, and redirect are
+        all present; otherwise it is treated as absent (never a partial surface).
+        """
+        prefix = provider  # matches the flat field names below
+        client_id = getattr(self, f"{prefix}_client_id", "")
+        client_secret = getattr(self, f"{prefix}_client_secret", "")
+        redirect_uri = getattr(self, f"{prefix}_redirect_uri", "")
+        if not (client_id.strip() and client_secret.strip() and redirect_uri.strip()):
+            return None
+        return ConnectorOAuthConfig(
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+        )
 
     @field_validator("database_url")
     @classmethod

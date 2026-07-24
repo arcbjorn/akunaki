@@ -281,6 +281,17 @@ def test_construction_requires_credentials() -> None:
         PolarOAuthClient(client_id=CLIENT_ID, client_secret="  ")
 
 
+def test_refresh_is_never_possible() -> None:
+    # Polar has no refresh token; refresh returns a permanent failure (drives
+    # needs_reauth) rather than making a request or raising.
+    client, seen = _client(_json_response(200, TOKEN_BODY))
+    result = client.refresh(refresh_token="anything", now=T0)
+    assert not result.ok
+    assert result.failure is TokenExchangeFailure.INVALID_GRANT
+    assert result.failure.retryable is False
+    assert seen == []  # no network call was made
+
+
 # ---------------------------------------------------------------------------
 # Secret leak resistance
 # ---------------------------------------------------------------------------

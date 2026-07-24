@@ -146,6 +146,16 @@ class PolarOAuthClient:
             now=now,
         )
 
+    def refresh(self, *, refresh_token: str, now: datetime) -> TokenExchangeResult:
+        """Polar issues no refresh token, so a refresh is never possible.
+
+        An AccessLink access token is long-lived; a connection that somehow
+        needs to refresh must be re-authorized. Returning the permanent
+        ``INVALID_GRANT`` failure (rather than raising) keeps the uniform client
+        port and drives ``needs_reauth`` through the same path as any dead grant.
+        """
+        return TokenExchangeResult(failure=TokenExchangeFailure.INVALID_GRANT)
+
     def _post_token(self, form: dict[str, str], *, now: datetime) -> TokenExchangeResult:
         """POST to the token endpoint with Basic auth; map to a typed result."""
         try:
