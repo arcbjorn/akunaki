@@ -123,10 +123,17 @@ class Job(Base):
         CheckConstraint("attempts >= 0", name="job_attempts_nonneg"),
         CheckConstraint("max_attempts >= 1", name="job_max_attempts_pos"),
         CheckConstraint("fence_token >= 0", name="job_fence_token_nonneg"),
-        UniqueConstraint(
+        # Partial: only an unsettled job reserves its idempotency key. A
+        # terminal job (succeeded / failed / cancelled / dead_letter) releases
+        # it, so a periodic enqueue is deduped against concurrent duplicates
+        # without being blocked forever by its own completed run. A retry
+        # returns the job to 'ready', so it stays covered.
+        Index(
+            "ux_jobs_live_idempotency_key",
             "tenant_id",
             "idempotency_key",
-            name="uq_jobs_tenant_idempotency_key",
+            unique=True,
+            sqlite_where=text("status IN ('ready', 'leased')"),
         ),
         Index(
             "ix_jobs_due",

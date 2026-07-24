@@ -55,6 +55,11 @@ _CLAIM_NEXT_BUDGET_S = 0.25
 _MAX_REDACTED_ERROR_MESSAGE_LENGTH = 500
 _WORKER_LEASE_EXPIRED = "worker_lease_expired"
 
+# Statuses in which a job still owns its idempotency key. Must match the
+# partial predicate on ``ux_jobs_live_idempotency_key``: a settled job releases
+# its key, and a retry returns to READY so it keeps holding one.
+_LIVE_JOB_STATUSES = (JobStatus.READY.value, JobStatus.LEASED.value)
+
 
 def _is_database_locked(exc: BaseException) -> bool:
     """Return True only for SQLite/libSQL lock-contention errors."""
@@ -179,7 +184,13 @@ class JobRepository:
         Dedupe is a single ``INSERT ... ON CONFLICT DO NOTHING`` followed by a
         read of the surviving row, so two concurrent enqueues of the same key
         cannot both insert and neither raises. A ``None`` key always inserts
-        (SQL ``NULL`` never conflicts under the unique constraint).
+        (SQL ``NULL`` never conflicts under the unique index).
+
+        Only an **unsettled** job (``ready`` / ``leased``) holds its key: the
+        guarantee is one in-flight job per key, not one for all time. Once a
+        job reaches a terminal status it releases the key, so a periodic
+        enqueue is never blocked by its own completed run. A retry returns the
+        job to ``ready``, so it continues to dedupe while it is still alive.
         """
         _require_nonempty(job_id, field_name="job_id")
         _require_nonempty(tenant_id, field_name="tenant_id")
@@ -203,6 +214,7 @@ class JobRepository:
                     select(Job.id, Job.job_type, Job.role).where(
                         Job.tenant_id == tenant_id,
                         Job.idempotency_key == idempotency_key,
+                        Job.status.in_(_LIVE_JOB_STATUSES),
                     )
                 ).one_or_none()
                 if existing is not None:
@@ -251,6 +263,7 @@ class JobRepository:
                     select(Job.id, Job.job_type, Job.role).where(
                         Job.tenant_id == tenant_id,
                         Job.idempotency_key == idempotency_key,
+                        Job.status.in_(_LIVE_JOB_STATUSES),
                     )
                 ).one_or_none()
                 if winner is not None:
@@ -263,8 +276,9 @@ class JobRepository:
                         created=False,
                     )
 
-            # No idempotency key: the conflict can only be the primary key, so
-            # this job id is already taken by a different logical job.
+            # Either no key was supplied, or the key's holder settled between
+            # the conflict and this read. Both leave the primary key as the
+            # only explanation: this job id belongs to a different logical job.
             msg = f"job id {job_id!r} already exists"
             raise ValueError(msg)
 

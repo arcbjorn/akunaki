@@ -22,7 +22,13 @@ from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import Job, Tenant
 from akunaki.config import Settings, clear_settings_cache
-from akunaki.domain.jobs import JobRole, JobStatus, to_utc_rfc3339
+from akunaki.domain.jobs import (
+    JobClaim,
+    JobFailureDisposition,
+    JobRole,
+    JobStatus,
+    to_utc_rfc3339,
+)
 
 T0 = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -373,4 +379,149 @@ def test_concurrent_enqueue_of_same_key_inserts_once(enqueue_db: str) -> None:
     # Exactly one caller created the job; all agree on the winner.
     assert created_flags.count(True) == 1
     assert len(set(winning_ids)) == 1
+    assert len(_jobs(enqueue_db)) == 1
+
+
+def _claim(repository: JobRepository, *, now: datetime = T0) -> JobClaim:
+    """Claim the single ready job, asserting one was available."""
+    claim = repository.claim_next(
+        role=JobRole.CORE,
+        owner="worker-1",
+        lease_ttl=timedelta(seconds=30),
+        now=now,
+        limit=8,
+    )
+    assert claim is not None
+    return claim
+
+
+def test_settled_job_releases_its_idempotency_key(
+    repository: JobRepository, enqueue_db: str
+) -> None:
+    """A key is held for the run, not forever.
+
+    Regression: the uniqueness spanned every status and no code path cleared
+    the key on settle, so one succeeded job deduped its own key permanently.
+    The reconciliation sweep enqueued once and was dead until restart.
+    """
+    first = repository.enqueue_job(
+        job_id="job-1",
+        tenant_id="tenant-1",
+        job_type="sync.reconcile_sweep",
+        payload_json="{}",
+        now=T0,
+        idempotency_key="reconcile_sweep",
+    )
+    assert first.created is True
+
+    claim = _claim(repository)
+    assert repository.complete_job(
+        job_id=claim.job_id,
+        owner="worker-1",
+        fence_token=claim.fence_token,
+        now=T0,
+    )
+
+    # The next interval must enqueue real work, not return the completed run.
+    later = T0 + timedelta(minutes=30)
+    second = repository.enqueue_job(
+        job_id="job-2",
+        tenant_id="tenant-1",
+        job_type="sync.reconcile_sweep",
+        payload_json="{}",
+        now=later,
+        idempotency_key="reconcile_sweep",
+    )
+    assert second.created is True
+    assert second.job_id == "job-2"
+
+    jobs = _jobs(enqueue_db)
+    assert [job.status for job in jobs] == [JobStatus.SUCCEEDED.value, JobStatus.READY.value]
+
+
+def test_dead_lettered_job_releases_its_idempotency_key(repository: JobRepository) -> None:
+    """Dead-letter is terminal too, so a later sweep can retry the connection."""
+    repository.enqueue_job(
+        job_id="job-1",
+        tenant_id="tenant-1",
+        job_type="connection.incremental_sync",
+        payload_json="{}",
+        now=T0,
+        max_attempts=1,
+        idempotency_key="reconcile:c1",
+    )
+    claim = _claim(repository)
+    result = repository.fail_job(
+        job_id=claim.job_id,
+        owner="worker-1",
+        fence_token=claim.fence_token,
+        retryable=False,
+        retry_delay=timedelta(0),
+        error_class="PermanentJobError",
+        redacted_error_message=None,
+        now=T0,
+    )
+    assert result is not None
+    assert result.disposition is JobFailureDisposition.DEAD_LETTERED
+
+    retried = repository.enqueue_job(
+        job_id="job-2",
+        tenant_id="tenant-1",
+        job_type="connection.incremental_sync",
+        payload_json="{}",
+        now=T0 + timedelta(hours=6),
+        idempotency_key="reconcile:c1",
+    )
+    assert retried.created is True
+
+
+def test_key_still_dedupes_while_job_is_live(repository: JobRepository, enqueue_db: str) -> None:
+    """The in-flight guarantee survives: leased and retry-scheduled both hold."""
+    repository.enqueue_job(
+        job_id="job-1",
+        tenant_id="tenant-1",
+        job_type="connection.incremental_sync",
+        payload_json="{}",
+        now=T0,
+        idempotency_key="reconcile:c1",
+    )
+
+    # Leased: a sweep must not queue a second refetch behind the running one.
+    claim = _claim(repository)
+    while_leased = repository.enqueue_job(
+        job_id="job-2",
+        tenant_id="tenant-1",
+        job_type="connection.incremental_sync",
+        payload_json="{}",
+        now=T0 + timedelta(seconds=5),
+        idempotency_key="reconcile:c1",
+    )
+    assert while_leased.created is False
+    assert while_leased.job_id == "job-1"
+
+    # A retryable failure returns the job to READY; it is still the same live
+    # unit of work, so the key must keep deduping.
+    result = repository.fail_job(
+        job_id=claim.job_id,
+        owner="worker-1",
+        fence_token=claim.fence_token,
+        retryable=True,
+        retry_delay=timedelta(minutes=1),
+        error_class="TransientJobError",
+        redacted_error_message=None,
+        now=T0,
+    )
+    assert result is not None
+    assert result.disposition is JobFailureDisposition.RETRY_SCHEDULED
+
+    while_retrying = repository.enqueue_job(
+        job_id="job-3",
+        tenant_id="tenant-1",
+        job_type="connection.incremental_sync",
+        payload_json="{}",
+        now=T0 + timedelta(seconds=10),
+        idempotency_key="reconcile:c1",
+    )
+    assert while_retrying.created is False
+    assert while_retrying.job_id == "job-1"
     assert len(_jobs(enqueue_db)) == 1
