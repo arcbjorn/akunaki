@@ -45,6 +45,14 @@ class ConnectionRepositoryPort(Protocol):
         """Return the stored sealed tokens for a connection, if any."""
         ...
 
+    def get_connection(self, *, connection_id: str) -> LinkedConnection | None:
+        """Return a connection's identity (tenant, provider, status), or None."""
+        ...
+
+    def stale_connections(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str]]:
+        """Active connections whose last successful sync predates ``cutoff``."""
+        ...
+
 
 class OAuthStateRepositoryPort(Protocol):
     """Create and atomically consume OAuth authorize state rows."""

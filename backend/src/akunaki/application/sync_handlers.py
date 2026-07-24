@@ -62,6 +62,7 @@ __all__ = [
     "IncrementalSyncHandler",
     "InitialSyncHandler",
     "NormalizeHandler",
+    "ProviderDispatchSyncHandler",
     "ReconcileSweepHandler",
     "SyncConfig",
     "sync_config_for_provider",
@@ -379,6 +380,58 @@ class IncrementalSyncHandler:
             return lookback_start
         # Never resume before the lookback horizon (guards a stale cursor).
         return max(resumed, lookback_start)
+
+
+class ConnectionProviderSource(Protocol):
+    """Port: resolve a connection's provider from its id."""
+
+    def get_connection(self, *, connection_id: str) -> LinkedConnectionLike | None:
+        """Return the connection (carrying its provider), or None."""
+        ...
+
+
+class LinkedConnectionLike(Protocol):
+    """The bit of a connection the dispatcher needs: its provider."""
+
+    @property
+    def provider(self) -> object:
+        """Provider enum whose ``.value`` is the provider string."""
+        ...
+
+
+class ProviderDispatchSyncHandler:
+    """Route a sync job to the per-provider handler for its connection.
+
+    A single worker handles connections for **all** providers, but each
+    ``InitialSyncHandler``/``IncrementalSyncHandler`` is fixed to one provider's
+    fetch client and stream config. This dispatcher looks up the connection's
+    provider and delegates to the matching handler. A connection whose provider
+    has no registered handler is a permanent error (a wiring gap), not a retry.
+    """
+
+    def __init__(
+        self,
+        *,
+        connections: ConnectionProviderSource,
+        handlers: dict[str, Callable[[JobClaim], None]],
+    ) -> None:
+        self._connections = connections
+        self._handlers = handlers
+
+    def __call__(self, claim: JobClaim) -> None:
+        """Dispatch one sync job to its provider's handler."""
+        connection_id = _parse_payload(claim.payload_json)["connection_id"]
+        connection = self._connections.get_connection(connection_id=connection_id)
+        if connection is None:
+            msg = f"connection {connection_id!r} not found"
+            raise PermanentJobError(msg)
+        provider = str(connection.provider.value)  # type: ignore[attr-defined]
+        handler = self._handlers.get(provider)
+        if handler is None:
+            supported = ", ".join(sorted(self._handlers))
+            msg = f"no sync handler for provider {provider!r} (have: {supported})"
+            raise PermanentJobError(msg)
+        handler(claim)
 
 
 class StaleConnectionSource(Protocol):
