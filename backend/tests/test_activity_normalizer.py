@@ -84,6 +84,22 @@ def test_negative_and_huge_values_are_dropped() -> None:
     assert normalize_activity_payload(page) == []
 
 
+def test_zero_steps_is_a_valid_confirmed_rest() -> None:
+    # Zero is a real value (a rest day), not a dropped signal.
+    page = _page(_day("2026-07-22T00:00:00Z", "2026-07-23T00:00:00Z", steps=0))
+    facts = normalize_activity_payload(page)
+    assert len(facts) == 1
+    assert facts[0].steps == 0
+
+
+def test_steps_bound_is_inclusive() -> None:
+    # Exactly the sanity cap (200_000) is kept; one past it is dropped.
+    at_cap = _page(_day("2026-07-22T00:00:00Z", "2026-07-23T00:00:00Z", steps=200_000))
+    over_cap = _page(_day("2026-07-22T00:00:00Z", "2026-07-23T00:00:00Z", steps=200_001))
+    assert normalize_activity_payload(at_cap)[0].steps == 200_000
+    assert normalize_activity_payload(over_cap) == []
+
+
 def test_boolean_is_not_read_as_a_count() -> None:
     page = _page(_day("2026-07-22T00:00:00Z", "2026-07-23T00:00:00Z", steps=True))
     assert normalize_activity_payload(page) == []

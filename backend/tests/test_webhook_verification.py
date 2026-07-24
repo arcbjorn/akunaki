@@ -16,6 +16,16 @@ def test_hmac_providers_are_oura_and_polar() -> None:
     assert frozenset({"oura", "polar"}) == HMAC_PROVIDERS
 
 
+def test_hmac_is_sha256_known_answer() -> None:
+    # A fixed known-answer digest pins the algorithm to SHA-256: a test that
+    # recomputes the expected value via the helper could not catch the helper
+    # silently switching hash functions, so hardcode the digest here.
+    assert (
+        hmac_sha256_hex(secret="known-secret", body=b"known-body")
+        == "efc95a5ec01cd6682b64974cc39761c04773905bc7902fbb553716ba44c6dcd9"
+    )
+
+
 def test_valid_signature_verifies() -> None:
     sig = hmac_sha256_hex(secret=SECRET, body=BODY)
     assert verify_hmac_signature(secret=SECRET, body=BODY, provided_signature=sig)
@@ -47,6 +57,14 @@ def test_empty_secret_or_signature_fails() -> None:
     sig = hmac_sha256_hex(secret=SECRET, body=BODY)
     assert not verify_hmac_signature(secret="", body=BODY, provided_signature=sig)
     assert not verify_hmac_signature(secret=SECRET, body=BODY, provided_signature="")
+
+
+def test_empty_secret_rejects_even_a_self_consistent_signature() -> None:
+    # The empty-secret guard must fire *before* the compare: a signature
+    # correctly computed under the empty secret must still be rejected, or a
+    # misconfigured (blank) secret would accept an attacker-computable digest.
+    sig = hmac_sha256_hex(secret="", body=BODY)
+    assert not verify_hmac_signature(secret="", body=BODY, provided_signature=sig)
 
 
 def test_garbage_signature_fails() -> None:

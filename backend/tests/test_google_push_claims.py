@@ -83,6 +83,44 @@ def test_expired_token_is_rejected() -> None:
     assert result.rejection is PushRejection.EXPIRED
 
 
+def test_expiry_boundary_is_inclusive() -> None:
+    # A token whose exp is exactly now-minus-skew is expired (>= boundary), so a
+    # `>` mutation would wrongly accept it.
+    epoch = int(NOW.timestamp())
+    result = validate_google_push_claims(
+        _claims(exp=epoch - 60),  # exp == now - CLOCK_SKEW_SECONDS
+        expected_audience=AUD,
+        expected_service_account=SA,
+        now=NOW,
+    )
+    assert result.rejection is PushRejection.EXPIRED
+
+
+def test_skew_tolerates_a_recently_expired_token() -> None:
+    # Just inside the 60s skew: expired 30s ago is still accepted. A zeroed skew
+    # or a flipped skew sign would reject this.
+    epoch = int(NOW.timestamp())
+    result = validate_google_push_claims(
+        _claims(exp=epoch - 30),
+        expected_audience=AUD,
+        expected_service_account=SA,
+        now=NOW,
+    )
+    assert result.ok
+
+
+def test_beyond_skew_is_rejected() -> None:
+    # Expired 90s ago is beyond the 60s skew: rejected.
+    epoch = int(NOW.timestamp())
+    result = validate_google_push_claims(
+        _claims(exp=epoch - 90),
+        expected_audience=AUD,
+        expected_service_account=SA,
+        now=NOW,
+    )
+    assert result.rejection is PushRejection.EXPIRED
+
+
 def test_missing_exp_is_malformed() -> None:
     claims = _claims()
     del claims["exp"]

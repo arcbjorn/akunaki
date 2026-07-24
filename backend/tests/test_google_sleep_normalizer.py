@@ -150,6 +150,21 @@ def test_bad_segments_are_skipped_not_fatal() -> None:
     assert facts[0].rem_min == pytest.approx(240.0)
 
 
+def test_zero_duration_segment_does_not_extend_the_session() -> None:
+    # A zero-duration segment (start == end) must be dropped at parse time, so it
+    # cannot widen the session bounds. A valid 4h night plus a later zero-length
+    # blip: if the blip leaked in, session_end would jump to it and inflate
+    # time-in-bed. The `end <= start` guard (not just `end < start`) prevents it.
+    page = _page(
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_LIGHT"),
+        _seg("2026-07-22T09:00:00+02:00", "2026-07-22T09:00:00+02:00", "SLEEP_STAGE_AWAKE"),
+    )
+    facts = normalize_google_sleep_payload(page)
+    assert len(facts) == 1
+    # Session spans only the real 4h segment, not out to the 09:00 blip.
+    assert facts[0].time_in_bed_min == pytest.approx(240.0)
+
+
 def test_malformed_payload_raises() -> None:
     with pytest.raises(NormalizationError):
         normalize_google_sleep_payload("not json")
