@@ -16,6 +16,7 @@ import pytest
 from akunaki.application.handlers import NOOP_JOB_TYPE, HandlerRegistry
 from akunaki.application.worker_runtime import REAPER_LEASE_NAME, JobWorker, WorkerConfig
 from akunaki.domain.jobs import (
+    EnqueuedJob,
     JobCandidate,
     JobClaim,
     JobFailureDisposition,
@@ -25,6 +26,7 @@ from akunaki.domain.jobs import (
     to_utc_rfc3339,
 )
 from akunaki.domain.retry import PermanentJobError, TransientJobError
+from akunaki.domain.schedule import ScheduleSpec
 
 NOW = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -51,6 +53,7 @@ class FakeRepository:
         self.dead_letter_calls = 0
         self.leader_acquires = 0
         self.leader_heartbeats = 0
+        self.enqueued: list[tuple[str, str, str | None]] = []
 
     def claim_next(
         self,
@@ -122,6 +125,25 @@ class FakeRepository:
     def dead_letter_expired_jobs(self, *, now: datetime) -> int:
         self.dead_letter_calls += 1
         return 1
+
+    def enqueue_job(
+        self,
+        *,
+        job_id: str,
+        tenant_id: str,
+        job_type: str,
+        payload_json: str,
+        now: datetime,
+        role: JobRole = JobRole.CORE,
+        priority: int = 100,
+        run_after: datetime | None = None,
+        max_attempts: int = 5,
+        idempotency_key: str | None = None,
+    ) -> EnqueuedJob:
+        self.enqueued.append((job_type, tenant_id, idempotency_key))
+        return EnqueuedJob(
+            job_id=job_id, tenant_id=tenant_id, job_type=job_type, role=role, created=True
+        )
 
     def try_acquire_leader(
         self, *, lease_name: str, owner: str, lease_ttl: timedelta, now: datetime
@@ -386,6 +408,78 @@ def test_empty_owner_is_rejected() -> None:
 def test_reaper_lease_name_is_stable() -> None:
     # Standby promotion depends on both workers contending for the same name.
     assert REAPER_LEASE_NAME == "core-reaper"
+
+
+def _reconcile_spec() -> ScheduleSpec:
+    return ScheduleSpec(
+        job_type="connection.reconcile_sweep",
+        interval=timedelta(minutes=30),
+        tenant_id="tenant-1",
+        idempotency_key="reconcile",
+    )
+
+
+def test_leader_fires_due_schedules() -> None:
+    repo = FakeRepository()
+    worker = JobWorker(
+        repo,
+        owner="worker-1",
+        clock=lambda: NOW,
+        sleep=lambda _s: None,
+        jitter=lambda: 0.0,
+        schedules=[_reconcile_spec()],
+    )
+
+    worker.run_once()
+
+    assert repo.enqueued == [("connection.reconcile_sweep", "tenant-1", "reconcile")]
+    assert worker.stats.scheduled == 1
+
+
+def test_non_leader_never_schedules() -> None:
+    repo = FakeRepository(leader_available=False)
+    worker = JobWorker(
+        repo,
+        owner="worker-1",
+        clock=lambda: NOW,
+        sleep=lambda _s: None,
+        jitter=lambda: 0.0,
+        schedules=[_reconcile_spec()],
+    )
+
+    worker.run_once()
+
+    assert repo.enqueued == []
+
+
+def test_schedule_fires_once_per_interval() -> None:
+    repo = FakeRepository()
+    clock = _AdvancingClock(NOW)
+    worker = JobWorker(
+        repo,
+        owner="worker-1",
+        config=WorkerConfig(reaper_interval=timedelta(seconds=15)),
+        clock=clock,
+        sleep=lambda _s: None,
+        jitter=lambda: 0.0,
+        schedules=[_reconcile_spec()],
+    )
+
+    worker.run_once()  # fires (never fired before)
+    clock.advance(timedelta(seconds=20))  # reaper interval elapsed, schedule not
+    worker.run_once()
+    assert worker.stats.scheduled == 1  # still within the 30-min schedule interval
+
+    clock.advance(timedelta(minutes=31))
+    worker.run_once()
+    assert worker.stats.scheduled == 2
+
+
+def test_no_schedules_enqueues_nothing() -> None:
+    repo = FakeRepository()
+    worker = make_worker(repo)
+    worker.run_once()
+    assert repo.enqueued == []
 
 
 class _AdvancingClock:

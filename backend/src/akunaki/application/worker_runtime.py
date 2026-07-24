@@ -27,6 +27,7 @@ from akunaki.domain.retry import (
     error_class_of,
     redact_error_message,
 )
+from akunaki.domain.schedule import ScheduleSpec, due_schedules
 from akunaki.ports.jobs import JobRepositoryPort
 
 logger = logging.getLogger("akunaki.worker")
@@ -90,6 +91,7 @@ class WorkerStats:
     requeued_expired: int = 0
     dead_lettered_expired: int = 0
     idle_polls: int = 0
+    scheduled: int = 0
 
 
 class JobWorker:
@@ -111,6 +113,7 @@ class JobWorker:
         clock: Callable[[], datetime] = _utc_now,
         sleep: Callable[[float], None] | None = None,
         jitter: Callable[[], float] = random.random,
+        schedules: list[ScheduleSpec] | None = None,
     ) -> None:
         if not owner.strip():
             msg = "owner must be a non-empty string"
@@ -128,6 +131,11 @@ class JobWorker:
         self.stats = WorkerStats()
         self._leader_fence: int | None = None
         self._next_reap_at: datetime | None = None
+        # Periodic jobs the leader enqueues (reconcile sweep, …), with in-memory
+        # last-fired tracking. Only the leader fires them, so at most one worker
+        # schedules; the enqueue is idempotency-keyed as a further backstop.
+        self._schedules = schedules or []
+        self._last_fired: dict[str, datetime] = {}
 
     @property
     def owner(self) -> str:
@@ -302,7 +310,7 @@ class JobWorker:
             self.stats.dead_lettered += 1
 
     def _maybe_reap(self) -> None:
-        """Run leader-gated expiry reaping when the interval has elapsed."""
+        """Run leader-gated expiry reaping (and scheduling) when due."""
         now = self._clock()
         if self._next_reap_at is not None and now < self._next_reap_at:
             return
@@ -313,6 +321,23 @@ class JobWorker:
 
         self.stats.requeued_expired += self._repository.requeue_expired_leases(now=now)
         self.stats.dead_lettered_expired += self._repository.dead_letter_expired_jobs(now=now)
+        # The leader also fires periodic jobs; a lost lease between here and now
+        # only skips a tick, and the enqueue is idempotency-keyed regardless.
+        self._fire_schedules(now)
+
+    def _fire_schedules(self, now: datetime) -> None:
+        """Enqueue any periodic jobs whose interval has elapsed (leader only)."""
+        for spec in due_schedules(self._schedules, last_fired=self._last_fired, now=now):
+            self._repository.enqueue_job(
+                job_id=f"sched-{spec.job_type}-{int(now.timestamp())}",
+                tenant_id=spec.tenant_id,
+                job_type=spec.job_type,
+                payload_json=spec.payload_json,
+                now=now,
+                idempotency_key=spec.idempotency_key,
+            )
+            self._last_fired[spec.idempotency_key] = now
+            self.stats.scheduled += 1
 
     def _ensure_leadership(self, now: datetime) -> bool:
         """Acquire or extend the reaper leader lease. False when another owner leads."""
