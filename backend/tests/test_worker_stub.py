@@ -27,6 +27,10 @@ def test_worker_runs_and_shuts_down_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", settings.database_url)
+    # The worker builds the full product registry at boot, which constructs the
+    # envelope sealer (sync opens sealed tokens), so a real worker needs a KEK.
+    monkeypatch.setenv("AKUNAKI_SECRET_KEKS", "v1:QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=")
+    monkeypatch.setenv("AKUNAKI_ACTIVE_KEK_VERSION", "v1")
     clear_settings_cache()
     _migrate(settings)
 

@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 import uuid
+from datetime import timedelta
 from types import FrameType
 
 from akunaki.adapters.db.engine import (
@@ -19,8 +20,16 @@ from akunaki.adapters.db.engine import (
     probe_database_ready,
 )
 from akunaki.adapters.db.job_repository import JobRepository
+from akunaki.adapters.wiring.registry import build_registry
+from akunaki.application.sync_handlers import RECONCILE_SWEEP_JOB_TYPE
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import get_settings
+from akunaki.domain.schedule import ScheduleSpec
+from akunaki.domain.tenants import SYSTEM_TENANT_ID
+
+# How often the leader enqueues a reconciliation sweep. The sweep skips fresh
+# connections, so a frequent tick is cheap; staleness is decided by the handler.
+_RECONCILE_INTERVAL = timedelta(minutes=30)
 
 logger = logging.getLogger("akunaki.worker")
 
@@ -71,12 +80,26 @@ def run_worker(*, stop_event: threading.Event | None = None) -> int:
         if stop_event is None:
             install_signal_handlers(event)
 
-        repository = JobRepository(create_session_factory(engine))
+        session_factory = create_session_factory(engine)
+        repository = JobRepository(session_factory)
+        registry = build_registry(settings, session_factory)
+        # The leader enqueues a reconciliation sweep on an interval, owned by the
+        # reserved system tenant; the sweep fans out per-connection syncs.
+        schedules = [
+            ScheduleSpec(
+                job_type=RECONCILE_SWEEP_JOB_TYPE,
+                interval=_RECONCILE_INTERVAL,
+                tenant_id=SYSTEM_TENANT_ID,
+                idempotency_key="reconcile_sweep",
+            )
+        ]
         worker = JobWorker(
             repository,
             owner=build_owner(),
             config=WorkerConfig(),
+            registry=registry,
             stop_event=event,
+            schedules=schedules,
         )
         stats = worker.run_forever()
         logger.info(
