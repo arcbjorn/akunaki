@@ -68,6 +68,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health_router)
 
+    # Readiness is imported lazily: it imports the app module for the engine /
+    # session-factory dependencies, so a top-level import would cycle.
+    from akunaki.api.routes.ready import router as ready_router
+
+    app.include_router(ready_router)
+
     # Session routes are always mounted: every endpoint on them requires a
     # valid session cookie, so mounting them exposes nothing on its own.
     from akunaki.api.routes.checkin import router as checkin_router
