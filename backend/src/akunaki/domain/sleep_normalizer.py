@@ -30,6 +30,15 @@ ENTITY_TYPE = "sleep_session"
 # treated as a nap rather than a main sleep bout.
 NAP_MAX_MINUTES = 180.0
 
+# Oura V2 sleep `type` vocabulary. The **principal overnight sleep is
+# `long_sleep`** — `sleep` denotes a short main-sleep bout, `late_nap` a nap,
+# and `rest` a detected rest period (not confirmed sleep). Only `long_sleep`
+# is a non-nap session; every other present type is a nap. `deleted` is a
+# tombstone and must never be ingested as real sleep.
+PRINCIPAL_SLEEP_TYPE = "long_sleep"
+DELETED_SLEEP_TYPE = "deleted"
+_NON_NAP_TYPES = frozenset({PRINCIPAL_SLEEP_TYPE})
+
 
 class NormalizationError(Exception):
     """Payload could not be normalized. Carries no vendor body."""
@@ -110,6 +119,11 @@ def _normalize_record(record: dict[str, Any]) -> SleepFact | None:
     if not isinstance(bedtime_start, str) or not isinstance(bedtime_end, str):
         return None
 
+    sleep_type = record.get("type")
+    # A tombstoned session is not sleep; drop it rather than ingest a phantom.
+    if isinstance(sleep_type, str) and sleep_type == DELETED_SLEEP_TYPE:
+        return None
+
     try:
         start = parse_utc_rfc3339(bedtime_start)
         end = parse_utc_rfc3339(bedtime_end)
@@ -141,8 +155,12 @@ def _normalize_record(record: dict[str, Any]) -> SleepFact | None:
         has_total=total_sleep_min is not None,
     )
 
-    sleep_type = record.get("type")
-    is_nap = sleep_type == "nap" if isinstance(sleep_type, str) else duration_min <= NAP_MAX_MINUTES
+    # Only `long_sleep` is a principal session. Any other declared type is a
+    # nap; when the vendor omits a type, fall back to the duration threshold.
+    if isinstance(sleep_type, str) and sleep_type:
+        is_nap = sleep_type not in _NON_NAP_TYPES
+    else:
+        is_nap = duration_min <= NAP_MAX_MINUTES
 
     fact = SleepFact(
         vendor_record_id=vendor_id,

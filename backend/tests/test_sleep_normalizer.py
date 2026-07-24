@@ -178,8 +178,32 @@ def test_missing_total_falls_back_to_bed_interval_at_low_quality() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_vendor_nap_type_is_honored() -> None:
-    [fact] = normalize_sleep_payload(_page(_record(type="nap")))
+def test_long_sleep_is_the_principal_session_not_a_nap() -> None:
+    """Oura's main overnight sleep is `long_sleep`, never a nap."""
+    [fact] = normalize_sleep_payload(_page(_record(type="long_sleep")))
+    assert fact.is_nap is False
+
+
+def test_short_sleep_type_is_treated_as_a_nap() -> None:
+    """`sleep` (a short main-sleep bout) and `late_nap` are non-principal."""
+    for nap_type in ("sleep", "late_nap", "rest"):
+        [fact] = normalize_sleep_payload(_page(_record(type=nap_type)))
+        assert fact.is_nap is True, nap_type
+
+
+def test_deleted_sessions_are_dropped_not_ingested() -> None:
+    """A tombstoned session must never surface as real sleep."""
+    facts = normalize_sleep_payload(
+        _page(_record(id="tombstone", type="deleted"), _record(id="good"))
+    )
+    assert [f.vendor_record_id for f in facts] == ["good"]
+
+
+def test_missing_type_falls_back_to_duration_threshold() -> None:
+    """Without a vendor type, a short bout is a nap by duration."""
+    record = _record(type=None, total_sleep_duration=2400)  # 40 min
+    record.pop("type")
+    [fact] = normalize_sleep_payload(_page(record))
     assert fact.is_nap is True
 
 
@@ -190,7 +214,7 @@ def test_multiple_sessions_per_day_are_all_kept() -> None:
             _record(id="main"),
             _record(
                 id="nap-1",
-                type="nap",
+                type="late_nap",
                 bedtime_start="2026-07-19T14:00:00+02:00",
                 bedtime_end="2026-07-19T14:45:00+02:00",
                 total_sleep_duration=2400,
