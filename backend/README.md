@@ -55,6 +55,8 @@ uv run python -m akunaki.api
 
 `/readyz` is the deployment readiness probe: it reports the **migration head** (is the DB at the code's revision?), **queue depth** (ready/leased/dead-letter job counts), and whether a worker holds the **`core-reaper` leader lease**. It returns **503** unless the DB is reachable *and* at the migration head — so a deployment whose migrations haven't run reads not-ready. Queue depth and leader presence are reported for dashboards but do not gate readiness. It is read-only, so probing it never perturbs the queue or leases.
 
+Every response carries an **`X-Request-ID`** correlation id — a trusted inbound one (bounded/validated so it can't poison logs) or a fresh UUID — bound to a `ContextVar` for the request. A logging filter puts that id on every log record, and the entrypoint's JSON log format includes `request_id`, so a request's logs across all layers share one id.
+
 ## Run worker
 
 ```bash
