@@ -130,6 +130,16 @@ class Settings(BaseSettings):
             "with credentials."
         ),
     )
+    metrics_enabled: bool = Field(
+        default=False,
+        description=(
+            "Mount the unauthenticated /metrics endpoint (Prometheus text format). "
+            "The exposition is PHI-free — counts and liveness gauges labelled with "
+            "bounded tokens, never tenant ids or health values — but it still "
+            "describes internal operations, so it is off unless explicitly enabled "
+            "and should be reachable only from the scraper's network."
+        ),
+    )
     debug_routes_enabled: bool = Field(
         default=False,
         description=(

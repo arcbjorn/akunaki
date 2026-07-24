@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn, Protocol
 
+from akunaki.application.metrics import CONNECTOR_FETCH
 from akunaki.domain.activity_normalizer import normalize_activity_payload
 from akunaki.domain.connections import ConnectionStatus
 from akunaki.domain.fetch import FetchFailure
@@ -226,6 +227,14 @@ class InitialSyncHandler:
                 now=now,
             )
             envelope = result.envelope
+            # One choke point for every provider's fetch outcome, so a
+            # connector rejecting every call is visible without per-connector
+            # instrumentation. The label is the typed failure class, never a
+            # vendor message.
+            CONNECTOR_FETCH.inc(
+                provider=self._fetch.provider,
+                result="ok" if envelope is not None else str(result.failure),
+            )
             if envelope is None:
                 # Always raises; every failure is permanent or transient.
                 self._handle_fetch_failure(

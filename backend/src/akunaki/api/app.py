@@ -111,6 +111,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.include_router(auth_router)
 
+    # Metrics only when enabled: the endpoint is unauthenticated (a scraper
+    # cannot hold a session cookie), so it is not registered at all unless the
+    # deployment opts in and can restrict who reaches the port.
+    if resolved.metrics_enabled:
+        from akunaki.api.routes.metrics import router as metrics_router
+
+        app.include_router(metrics_router)
+
     if resolved.debug_routes_enabled:
         # Imported lazily so the unauthenticated router cannot be reached at
         # all — not even as a registered-but-guarded path — unless explicitly

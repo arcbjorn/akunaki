@@ -130,6 +130,12 @@ Emit and chart (where applicable) distinct timestamps:
 
 ### Metrics (candidates)
 
+**Built (v0.1.0).** A dependency-free registry (`akunaki.application.metrics`) exposes counters and gauges in the **Prometheus text format** — which an OpenTelemetry collector scrapes directly, so the OTel-compatible intent holds without adding an SDK to a core install CI proves boots on a minimal dependency set. Served at `GET /metrics` **only when `AKUNAKI_METRICS_ENABLED=true`**: the endpoint is unauthenticated (a scraper holds no session cookie), so it is not registered at all unless a deployment opts in and can restrict who reaches the port. PHI-free by construction — values are counts, labels are bounded tokens (provider, outcome class), never a tenant id, user id, or health value.
+
+Shipped families: `akunaki_jobs_settled_total{disposition}`, `akunaki_jobs_dead_letters_total`, `akunaki_jobs_lease_lost_total`, `akunaki_jobs_scheduled_total{job_type,result}`, `akunaki_connector_fetch_total{provider,result}`, `akunaki_worker_liveness`, `akunaki_worker_leader`.
+
+Each process serves its own registry (they cannot share in-memory state). The API reports its counters; the worker is additionally observable through the queue-depth and leader fields on `/readyz`. Histograms from the table below are not built — the shipped set is the counters and gauges that make a stalled worker or a failing connector visible.
+
 | Metric | Type |
 |--------|------|
 | `http_request_duration_ms` | histogram |

@@ -531,3 +531,41 @@ def _raise(exc: Exception):  # type: ignore[no-untyped-def]
         raise exc
 
     return handler
+
+
+def test_worker_records_metrics_for_settled_jobs() -> None:
+    """The counters a monitor alerts on must move with the lifecycle."""
+    from akunaki.application.metrics import (
+        JOBS_DEAD_LETTERED,
+        JOBS_SCHEDULED,
+        JOBS_SETTLED,
+        REGISTRY,
+        WORKER_LIVENESS,
+    )
+
+    REGISTRY.reset()
+    try:
+        repo = FakeRepository(claims=[make_claim()])
+        worker = JobWorker(
+            repo,
+            owner="worker-1",
+            clock=lambda: NOW,
+            sleep=lambda _s: None,
+            jitter=lambda: 0.0,
+            schedules=[_reconcile_spec()],
+        )
+
+        worker.run_once()
+
+        assert JOBS_SETTLED.value(disposition="succeeded") == 1
+        assert JOBS_SCHEDULED.value(job_type="connection.reconcile_sweep", result="created") == 1
+        assert JOBS_SCHEDULED.value(job_type="connection.reconcile_sweep", result="deduped") == 0
+        assert JOBS_DEAD_LETTERED.value() == 0
+
+        # Liveness returns to 0 once the loop exits, so a dead worker never
+        # reads healthy.
+        worker.request_stop()
+        worker.run_forever()
+        assert WORKER_LIVENESS.value() == 0
+    finally:
+        REGISTRY.reset()

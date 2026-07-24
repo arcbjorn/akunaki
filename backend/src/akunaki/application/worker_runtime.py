@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from akunaki.application.handlers import HandlerRegistry, default_registry
+from akunaki.application.metrics import (
+    JOBS_DEAD_LETTERED,
+    JOBS_LEASE_LOST,
+    JOBS_SCHEDULED,
+    JOBS_SETTLED,
+    WORKER_LEADER,
+    WORKER_LIVENESS,
+)
 from akunaki.domain.jobs import JobClaim, JobRole
 from akunaki.domain.retry import (
     FailureKind,
@@ -156,11 +164,19 @@ class JobWorker:
             "worker starting",
             extra={"owner": self._owner, "role": str(self._config.role)},
         )
-        while not self._stop_event.is_set():
-            worked = self.run_once()
-            if not worked and not self._stop_event.is_set():
-                self.stats.idle_polls += 1
-                self._sleep(self._config.poll_interval.total_seconds())
+        WORKER_LIVENESS.set(1)
+        try:
+            while not self._stop_event.is_set():
+                worked = self.run_once()
+                if not worked and not self._stop_event.is_set():
+                    self.stats.idle_polls += 1
+                    self._sleep(self._config.poll_interval.total_seconds())
+        finally:
+            # In a finally block so a crash out of the loop reports "not
+            # running" too. A stuck 1 after the loop died is worse than no
+            # gauge at all: it says healthy while nothing is draining.
+            WORKER_LIVENESS.set(0)
+            WORKER_LEADER.set(0)
         logger.info("worker stopped", extra={"owner": self._owner})
         return self.stats
 
@@ -250,6 +266,7 @@ class JobWorker:
             # own this job. Completing under a stale fence would be rejected
             # anyway; record the loss rather than reporting a false success.
             self.stats.lease_lost += 1
+            JOBS_LEASE_LOST.inc()
             logger.warning(
                 "lease lost during execution; not completing",
                 extra={"job_id": claim.job_id, "fence_token": claim.fence_token},
@@ -264,8 +281,10 @@ class JobWorker:
         )
         if completed:
             self.stats.succeeded += 1
+            JOBS_SETTLED.inc(disposition="succeeded")
         else:
             self.stats.lease_lost += 1
+            JOBS_LEASE_LOST.inc()
             logger.warning(
                 "completion rejected by fence",
                 extra={"job_id": claim.job_id, "fence_token": claim.fence_token},
@@ -303,11 +322,15 @@ class JobWorker:
         if result is None:
             # Fence rejected the failure record: the lease was already lost.
             self.stats.lease_lost += 1
+            JOBS_LEASE_LOST.inc()
             return
 
         if result.disposition.value == "retry_scheduled":
             self.stats.retried += 1
+            JOBS_SETTLED.inc(disposition="retry_scheduled")
         else:
+            JOBS_SETTLED.inc(disposition="dead_lettered")
+            JOBS_DEAD_LETTERED.inc()
             self.stats.dead_lettered += 1
 
     def _maybe_reap(self) -> None:
@@ -344,8 +367,10 @@ class JobWorker:
             # healthy schedule even when nothing was ever queued.
             if outcome.created:
                 self.stats.scheduled += 1
+                JOBS_SCHEDULED.inc(job_type=spec.job_type, result="created")
             else:
                 self.stats.schedule_deduped += 1
+                JOBS_SCHEDULED.inc(job_type=spec.job_type, result="deduped")
                 logger.info(
                     "scheduled job already in flight; not re-enqueued",
                     extra={"job_type": spec.job_type, "idempotency_key": spec.idempotency_key},
@@ -362,6 +387,7 @@ class JobWorker:
                 now=now,
             )
             if extended:
+                WORKER_LEADER.set(1)
                 return True
             # Lost leadership; fall through and try to reacquire cleanly.
             self._leader_fence = None
@@ -373,8 +399,12 @@ class JobWorker:
             now=now,
         )
         if leader is None:
+            # A standby is healthy, not broken: the gauge says "not me", and
+            # the leader's own process reports the 1.
+            WORKER_LEADER.set(0)
             return False
         self._leader_fence = leader.fence_token
+        WORKER_LEADER.set(1)
         return True
 
 
