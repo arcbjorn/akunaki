@@ -72,7 +72,7 @@ Infra manifests would live under proposed `infra/` (not present yet).
 
 ### Schema migrations
 
-1. Alembic revision in `backend/alembic` (proposed path).
+1. Alembic revision in `backend/src/akunaki/migrations/versions` — **inside** the package, so an installed wheel carries the scripts and `/readyz` can compare the DB against the code's head.
 2. CI runs migrations against ephemeral DB.
 3. Deploy order: migrate then roll api/core worker (**N / N−1 rolling** expand/contract for breaking changes).
 4. Phase zero must prove Turso + SQLAlchemy 2 + Alembic lock/concurrency behavior.

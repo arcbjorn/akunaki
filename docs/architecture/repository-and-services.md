@@ -14,8 +14,9 @@ Authoritative for **service boundaries**, **repository structure**, and **job sy
 akunaki/
   backend/                 # Python package + process entrypoints
     pyproject.toml         # core deps; optional extras: [agent], [mcp]
-    alembic/
+    alembic.ini            # script_location -> src/akunaki/migrations
     src/akunaki/
+      migrations/          # alembic env + versions; packaged so a wheel ships them
       domain/              # pure deterministic core (no model SDKs)
       application/         # use cases, tool registry
       ports/               # protocols (incl. optional model port)
