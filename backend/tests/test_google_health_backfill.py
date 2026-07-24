@@ -53,15 +53,25 @@ _SLEEP_PAGE = json.dumps(
     {
         "dataPoints": [
             {
-                "startTime": "2026-07-22T00:00:00+02:00",
-                "endTime": "2026-07-22T04:00:00+02:00",
-                "sleepType": "SLEEP_STAGE_LIGHT",
-            },
-            {
-                "startTime": "2026-07-22T04:00:00+02:00",
-                "endTime": "2026-07-22T07:00:00+02:00",
-                "sleepType": "SLEEP_STAGE_DEEP",
-            },
+                "sleep": {
+                    "interval": {
+                        "startTime": "2026-07-22T00:00:00+02:00",
+                        "endTime": "2026-07-22T07:00:00+02:00",
+                    },
+                    "sleepStages": [
+                        {
+                            "startTime": "2026-07-22T00:00:00+02:00",
+                            "endTime": "2026-07-22T04:00:00+02:00",
+                            "stageType": "LIGHT",
+                        },
+                        {
+                            "startTime": "2026-07-22T04:00:00+02:00",
+                            "endTime": "2026-07-22T07:00:00+02:00",
+                            "stageType": "DEEP",
+                        },
+                    ],
+                }
+            }
         ]
     }
 )

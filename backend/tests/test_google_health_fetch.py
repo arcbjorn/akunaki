@@ -21,9 +21,19 @@ _SLEEP_PAGE = json.dumps(
         "dataPoints": [
             {
                 "name": "dp-1",
-                "startTime": "2026-07-22T00:10:00Z",
-                "endTime": "2026-07-22T07:50:00Z",
-                "value": {"sleepType": "SLEEP_STAGE_DEEP"},
+                "sleep": {
+                    "interval": {
+                        "startTime": "2026-07-22T00:10:00Z",
+                        "endTime": "2026-07-22T07:50:00Z",
+                    },
+                    "sleepStages": [
+                        {
+                            "startTime": "2026-07-22T00:10:00Z",
+                            "endTime": "2026-07-22T07:50:00Z",
+                            "stageType": "DEEP",
+                        }
+                    ],
+                },
             }
         ],
         "nextPageToken": "page-2",
@@ -48,14 +58,14 @@ def _fetch(client: GoogleHealthFetchClient, *, page_token: str | None = None) ->
     )
 
 
-def test_reconcile_posts_window_and_returns_exact_body() -> None:
+def test_list_gets_window_filter_and_returns_exact_body() -> None:
     captured: dict[str, object] = {}
 
     def responder(request: httpx2.Request) -> httpx2.Response:
         captured["url"] = str(request.url)
         captured["method"] = request.method
         captured["auth"] = request.headers.get("authorization")
-        captured["body"] = request.content.decode()
+        captured["params"] = dict(request.url.params)
         return httpx2.Response(200, text=_SLEEP_PAGE, headers={"content-type": "application/json"})
 
     result = _fetch(_client(responder))
@@ -69,17 +79,19 @@ def test_reconcile_posts_window_and_returns_exact_body() -> None:
     # nextPageToken is surfaced so the backfill loop can advance.
     assert envelope.next_page_token == "page-2"
 
-    # Reconcile is a POST carrying the data type and RFC3339 window.
-    assert captured["method"] == "POST"
-    assert str(captured["url"]).endswith(
-        "/v4/users/me/dataTypes/com.google.sleep.segment/dataPoints:reconcile"
+    # List is a GET whose path names the data type and whose filter windows it.
+    assert captured["method"] == "GET"
+    assert str(captured["url"]).split("?")[0].endswith(
+        "/v4/users/me/dataTypes/com.google.sleep/dataPoints"
     )
     assert captured["auth"] == "Bearer AT"
-    sent = json.loads(str(captured["body"]))
-    assert sent["dataTypeName"] == "com.google.sleep.segment"
-    assert sent["startTime"] == "2026-06-24T00:00:00Z"
-    assert sent["endTime"] == "2026-07-22T00:00:00Z"
-    assert "pageToken" not in sent
+    params = captured["params"]
+    assert isinstance(params, dict)
+    filter_expr = params["filter"]
+    assert 'sleep.interval.start_time >= "2026-06-24T00:00:00Z"' in filter_expr
+    assert 'sleep.interval.start_time < "2026-07-22T00:00:00Z"' in filter_expr
+    assert params["pageSize"] == "25"
+    assert "pageToken" not in params
     # The redacted request meta carries no token.
     assert "AT" not in json.dumps(envelope.request_meta)
 
@@ -88,7 +100,7 @@ def test_page_token_advances_the_request() -> None:
     captured: dict[str, object] = {}
 
     def responder(request: httpx2.Request) -> httpx2.Response:
-        captured["body"] = request.content.decode()
+        captured["params"] = dict(request.url.params)
         return httpx2.Response(200, text=json.dumps({"dataPoints": []}))
 
     result = _fetch(_client(responder), page_token="page-2")
@@ -97,8 +109,9 @@ def test_page_token_advances_the_request() -> None:
     # A page with no nextPageToken ends the loop.
     assert envelope.next_page_token is None
     assert envelope.page_token == "page-2"
-    sent = json.loads(str(captured["body"]))
-    assert sent["pageToken"] == "page-2"
+    params = captured["params"]
+    assert isinstance(params, dict)
+    assert params["pageToken"] == "page-2"
 
 
 def test_empty_access_token_is_rejected() -> None:

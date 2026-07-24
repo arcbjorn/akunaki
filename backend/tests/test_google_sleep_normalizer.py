@@ -18,14 +18,17 @@ from akunaki.domain.google_sleep_normalizer import (
 from akunaki.domain.sleep_normalizer import NormalizationError
 
 
-def _page(*segments: dict[str, str]) -> str:
-    return json.dumps({"dataPoints": list(segments)})
+def _page(*stages: dict[str, str]) -> str:
+    """Wrap stage segments as one v4 sleep data point's sleepStages array."""
+    return json.dumps(
+        {"dataPoints": [{"sleep": {"sleepStages": list(stages)}}]}
+    )
 
 
 def _seg(start: str, end: str, stage: str | None) -> dict[str, str]:
     point: dict[str, str] = {"startTime": start, "endTime": end}
     if stage is not None:
-        point["sleepType"] = stage
+        point["stageType"] = stage
     return point
 
 
@@ -141,7 +144,7 @@ def test_bad_segments_are_skipped_not_fatal() -> None:
         _seg(
             "2026-07-22T05:00:00+02:00", "2026-07-22T01:00:00+02:00", "SLEEP_STAGE_LIGHT"
         ),  # reversed
-        {"startTime": "not-a-time", "endTime": "also-bad", "sleepType": "SLEEP_STAGE_DEEP"},  # type: ignore[arg-type]
+        {"startTime": "not-a-time", "endTime": "also-bad", "stageType": "DEEP"},  # type: ignore[arg-type]
         _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_REM"),
     )
     facts = normalize_google_sleep_payload(page)
@@ -174,3 +177,41 @@ def test_malformed_payload_raises() -> None:
 
 def test_empty_page_yields_no_facts() -> None:
     assert normalize_google_sleep_payload(_page()) == []
+
+
+def test_bare_enum_stage_names_are_accepted() -> None:
+    """The real v4 REST payload uses bare `stageType` names, not prefixed."""
+    page = _page(
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T02:00:00+02:00", "LIGHT"),
+        _seg("2026-07-22T02:00:00+02:00", "2026-07-22T04:00:00+02:00", "DEEP"),
+    )
+    [fact] = normalize_google_sleep_payload(page)
+    assert fact.light_min == pytest.approx(60.0)
+    assert fact.deep_min == pytest.approx(120.0)
+
+
+def test_session_interval_used_when_no_stage_detail() -> None:
+    """A point with only a session interval still yields a low-quality night."""
+    payload = json.dumps(
+        {
+            "dataPoints": [
+                {
+                    "sleep": {
+                        "interval": {
+                            "startTime": "2026-07-22T01:00:00+02:00",
+                            "endTime": "2026-07-22T06:00:00+02:00",
+                        }
+                    }
+                }
+            ]
+        }
+    )
+    [fact] = normalize_google_sleep_payload(payload)
+    assert fact.time_in_bed_min == pytest.approx(300.0)
+    assert fact.quality == "low"
+    assert fact.light_min is None
+
+
+def test_point_without_sleep_object_is_skipped() -> None:
+    payload = json.dumps({"dataPoints": [{"steps": {"count": 100}}]})
+    assert normalize_google_sleep_payload(payload) == []

@@ -6,9 +6,9 @@ Oura and Polar clients' secrets discipline: the access token rides in the
 Authorization header and is never logged, and response bodies never reach log
 records or exceptions.
 
-Google Health v4 reads history through ``users.dataTypes.dataPoints.reconcile``
-(a **POST** with a windowed JSON body), unlike the Oura/Polar collection GETs.
-The window is sent as an RFC3339 time range and the response paginates via
+Google Health v4 reads history through ``users.dataTypes.dataPoints.list``
+(a **GET**), like the Oura/Polar collection GETs. The window is expressed as an
+AIP-160 ``filter`` on the data type's interval, and the response paginates via
 ``nextPageToken``; the request carries the prior ``pageToken`` to advance.
 
 Only the ``sleep`` stream is supported in v0.1.0 — the Fitbit-origin cloud sleep
@@ -19,7 +19,6 @@ against Polar workouts for overlap exclusion.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from datetime import datetime
 
@@ -34,10 +33,17 @@ PROVIDER = "google_health"
 API_BASE = "https://health.googleapis.com/v4"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
-# Streams this connector can fetch, mapped to their Google Health data type id.
-# The data type names the reconcile query; a stream absent here is unsupported.
+# Google caps the sleep/exercise data-type page at 25 points per request.
+SLEEP_PAGE_SIZE = 25
+
+# Streams this connector can fetch, mapped to their Google Health data type id
+# and the filter field path used to window the read. A stream absent here is
+# unsupported.
 STREAM_DATA_TYPES = {
-    "sleep": "com.google.sleep.segment",
+    "sleep": "com.google.sleep",
+}
+STREAM_FILTER_FIELDS = {
+    "sleep": "sleep.interval.start_time",
 }
 
 
@@ -76,15 +82,16 @@ class GoogleHealthFetchClient:
     ) -> FetchResult:
         """Fetch one page of ``stream`` for the given time window.
 
-        Reconcile takes an RFC3339 ``[startTime, endTime)`` window in the POST
-        body; a ``pageToken`` advances through pages, and the response carries a
-        ``nextPageToken`` until the window is exhausted.
+        The list call windows the read with an AIP-160 ``filter`` over the data
+        type's interval start time; a ``pageToken`` advances through pages, and
+        the response carries a ``nextPageToken`` until the window is exhausted.
         """
         if not access_token:
             msg = "access_token must be non-empty"
             raise ValueError(msg)
         data_type = STREAM_DATA_TYPES.get(stream)
-        if data_type is None:
+        filter_field = STREAM_FILTER_FIELDS.get(stream)
+        if data_type is None or filter_field is None:
             msg = f"unsupported Google Health stream {stream!r}"
             raise ValueError(msg)
 
@@ -96,17 +103,18 @@ class GoogleHealthFetchClient:
 
         start_s = to_utc_rfc3339(start)
         end_s = to_utc_rfc3339(end)
-        body: dict[str, object] = {
-            "dataTypeName": data_type,
-            "startTime": start_s,
-            "endTime": end_s,
+        # Half-open [start, end) window over the interval start time.
+        filter_expr = f'{filter_field} >= "{start_s}" AND {filter_field} < "{end_s}"'
+        params: dict[str, str] = {
+            "filter": filter_expr,
+            "pageSize": str(SLEEP_PAGE_SIZE),
         }
         if page_token:
-            body["pageToken"] = page_token
+            params["pageToken"] = page_token
 
-        url = f"{self._api_base}/users/me/dataTypes/{data_type}/dataPoints:reconcile"
+        url = f"{self._api_base}/users/me/dataTypes/{data_type}/dataPoints"
         try:
-            response = self._send(url, body, access_token)
+            response = self._send(url, params, access_token)
         except httpx2.HTTPError:
             # The exception text can echo the request, which carries the token.
             logger.warning("google_health fetch transport error", extra={"stream": stream})
@@ -142,7 +150,7 @@ class GoogleHealthFetchClient:
                 fetched_at=to_utc_rfc3339(require_aware(now, field_name="now")),
                 # Redacted: a path template and window bounds, never the token.
                 request_meta={
-                    "url_template": f"v4/users/me/dataTypes/{data_type}/dataPoints:reconcile",
+                    "url_template": f"v4/users/me/dataTypes/{data_type}/dataPoints",
                     "start_time": start_s,
                     "end_time": end_s,
                 },
@@ -151,19 +159,19 @@ class GoogleHealthFetchClient:
             )
         )
 
-    def _send(self, url: str, body: dict[str, object], access_token: str) -> httpx2.Response:
+    def _send(
+        self, url: str, params: dict[str, str], access_token: str
+    ) -> httpx2.Response:
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
-            "Content-Type": "application/json",
         }
-        content = json.dumps(body)
         if self._transport is not None:
-            return self._transport.post(
-                url, content=content, headers=headers, timeout=self._timeout
+            return self._transport.get(
+                url, params=params, headers=headers, timeout=self._timeout
             )
         with httpx2.Client(timeout=self._timeout) as client:
-            return client.post(url, content=content, headers=headers)
+            return client.get(url, params=params, headers=headers)
 
     def _classify_error(self, response: httpx2.Response, *, stream: str) -> FetchResult:
         """Map a non-2xx response to a typed failure. The body is never logged."""
