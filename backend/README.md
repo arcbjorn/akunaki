@@ -1,4 +1,4 @@
-# Akunaki backend (Phase Zero foundation)
+# Akunaki 飽くなき backend (Phase Zero foundation)
 
 Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 

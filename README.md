@@ -1,4 +1,4 @@
-# Akunaki
+# Akunaki 飽くなき
 
 A single-user health intelligence backend. It syncs wearable data from Oura, Google
 Health, and Polar, normalizes it into typed facts with full lineage, selects one

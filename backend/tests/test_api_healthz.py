@@ -12,7 +12,7 @@ from akunaki.config import Settings
 def test_core_only_boot_without_model_config(settings: Settings) -> None:
     """API factory succeeds with only core settings (no MODEL_*)."""
     app = create_app(settings)
-    assert app.title == "Akunaki API"
+    assert app.title == "Akunaki 飽くなき API"
     assert app.state.settings.database_url.startswith("sqlite+libsql:")
     assert not hasattr(settings, "model_provider")
 

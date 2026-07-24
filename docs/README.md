@@ -1,4 +1,4 @@
-# Akunaki documentation
+# Akunaki 飽くなき documentation
 
 **Status:** Proposed architecture + **partial Phase Zero implementation**
 

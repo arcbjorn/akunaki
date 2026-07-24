@@ -39,7 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine.dispose()
 
     app = FastAPI(
-        title="Akunaki API",
+        title="Akunaki 飽くなき API",
         version="0.1.0",
         description=(
             "Core platform API foundation. Product surfaces and model/agent "
