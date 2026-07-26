@@ -56,15 +56,18 @@ def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
     except ValueError:
         return [_whole_page_slice(stream, payload_text)]
 
-    if not isinstance(parsed, dict):
-        return [_whole_page_slice(stream, payload_text)]
-
-    # Oura collection pages carry "data"; the Polar fetch client assembles its
-    # transaction into "exercises". Google Health's "dataPoints" is deliberately
-    # absent: its sleep normalizer aggregates *across* a page's segments into one
-    # session per night, so splitting the page per point would break that
-    # grouping. A Google page therefore stays a whole-page slice.
-    records = _record_list(parsed)
+    # Polar's `GET /v3/exercises` answers with a bare JSON array; Oura
+    # collection pages wrap their records under "data". Google Health's
+    # "dataPoints" is deliberately not split: its sleep normalizer aggregates
+    # *across* a page's segments into one session per night, so splitting the
+    # page per point would break that grouping — a Google page therefore stays
+    # a whole-page slice.
+    if isinstance(parsed, list):
+        records: list[Any] | None = parsed
+    elif isinstance(parsed, dict):
+        records = _record_list(parsed)
+    else:
+        records = None
     if records is None:
         return [_whole_page_slice(stream, payload_text)]
 
@@ -80,16 +83,20 @@ def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
             continue
         seen.add(record_slice.vendor_record_id)
         slices.append(record_slice)
+
+    if records and not slices:
+        # The collection held only non-object entries, so nothing was split out.
+        # Degrade to a whole-page slice rather than silently discarding a body
+        # the vendor did send. An *empty* collection is different: it really
+        # carries no records, and yields no slices.
+        return [_whole_page_slice(stream, payload_text)]
     return slices
 
 
 def _record_list(parsed: dict[str, Any]) -> list[Any] | None:
     """Return the record array under a recognized collection key, or None."""
-    for key in ("data", "exercises"):
-        value = parsed.get(key)
-        if isinstance(value, list):
-            return value
-    return None
+    value = parsed.get("data")
+    return value if isinstance(value, list) else None
 
 
 def _slice_for(stream: str, record: dict[str, Any]) -> RecordSlice:

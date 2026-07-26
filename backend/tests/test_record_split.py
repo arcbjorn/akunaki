@@ -104,6 +104,23 @@ def test_empty_page_yields_no_slices() -> None:
     assert split_page("sleep", _page()) == []
 
 
+def test_bare_array_page_splits_per_record() -> None:
+    """Polar's `GET /v3/exercises` answers with a bare array, not an envelope.
+
+    Each exercise must become its own slice so revision identity is per
+    workout; leaving the array unsplit would key every revision to the page
+    hash, so one changed workout would supersede the whole page.
+    """
+    payload = json.dumps([{"id": "ex-1"}, {"id": "ex-2"}])
+    slices = split_page("workout", payload)
+    assert [s.vendor_record_id for s in slices] == ["workout:ex-1", "workout:ex-2"]
+    assert all(s.has_stable_id for s in slices)
+
+
+def test_empty_bare_array_yields_no_slices() -> None:
+    assert split_page("workout", "[]") == []
+
+
 def test_non_object_entries_are_skipped() -> None:
     slices = split_page("sleep", json.dumps({"data": ["nope", 5, {"id": "s1"}]}))
     assert len(slices) == 1
