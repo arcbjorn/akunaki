@@ -107,7 +107,7 @@ def authorize(
     redirect = service.start_link(
         tenant_id=session.tenant_id,
         redirect_uri=config.redirect_uri,
-        scopes=_DEFAULT_SCOPES[provider],
+        scopes=DEFAULT_SCOPES[provider],
         now=datetime.now(UTC),
     )
     return AuthorizeResponse(authorize_url=redirect.authorize_url, provider=provider)
@@ -158,7 +158,7 @@ def _status_for(rejection: LinkRejection | None) -> int:
 # Default scopes requested per provider at authorize time. Least privilege: each
 # provider is asked only for the streams its connector actually fetches
 # (see `sync_config_for_provider`), never a blanket read-everything grant.
-_DEFAULT_SCOPES: dict[str, tuple[str, ...]] = {
+DEFAULT_SCOPES: dict[str, tuple[str, ...]] = {
     # Oura backfills the detailed `sleep` collection (which also carries the
     # overnight vitals). Verified 2026-07-25 against the official OpenAPI spec
     # (api.ouraring.com/v2/static/json/openapi-1.37.json): every endpoint
@@ -181,4 +181,4 @@ _DEFAULT_SCOPES: dict[str, tuple[str, ...]] = {
 }
 
 
-__all__ = ["router"]
+__all__ = ["DEFAULT_SCOPES", "router"]

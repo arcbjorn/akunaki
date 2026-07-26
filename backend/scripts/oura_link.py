@@ -39,6 +39,7 @@ from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.models import Tenant
 from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
+from akunaki.api.routes.connections import DEFAULT_SCOPES
 from akunaki.application.oauth_linking import OAuthLinkingService
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
@@ -46,22 +47,11 @@ from akunaki.domain.jobs import to_utc_rfc3339
 PROVIDER = "oura"
 TENANT_ID = "dev-tenant"
 
-# Every scope granted to the app. The connector only reads sleep today, but a
-# dev link asks broadly so a stream can be tried without re-consenting (Oura
-# does not support incremental scope upgrades).
-SCOPES = (
-    "personal",
-    "daily",
-    "heartrate",
-    "tag",
-    "workout",
-    "session",
-    "spo2Daily",
-    "ring_configuration",
-    "stress",
-    "heart_health",
-    "email",
-)
+# The same scopes the HTTP link route requests, so a dev link exercises the
+# real consent set rather than a broader one — asking for more here would mask
+# exactly the scope shortfall this script is useful for detecting (an
+# under-scoped Oura token returns empty arrays, not errors).
+SCOPES = DEFAULT_SCOPES[PROVIDER]
 
 
 def _service(settings: Settings) -> tuple[OAuthLinkingService, object]:
