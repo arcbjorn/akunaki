@@ -222,6 +222,52 @@ def test_malformed_cursor_falls_back_to_lookback(factory: sessionmaker[Session])
     assert _start_date(captured[0]) == expected
 
 
+def test_min_window_widens_a_too_narrow_resume(factory: sessionmaker[Session]) -> None:
+    # Google Health rejects a query range narrower than 14 days. A cursor from
+    # 2 hours ago would resume a window far under that floor, so a provider
+    # carrying a min_window must widen it backwards rather than send a request
+    # the vendor refuses. Re-read days dedupe on content hash downstream.
+    cursor_at = T0 - timedelta(hours=2)
+    with factory() as session, session.begin():
+        session.add(
+            SyncCursor(
+                id="conn-1:sleep",
+                tenant_id="tenant-1",
+                connection_id="conn-1",
+                cursor_type="timestamp",
+                stream="sleep",
+                cursor_value=to_utc_rfc3339(cursor_at),
+                updated_at=NOW_S,
+            )
+        )
+
+    captured: list[str] = []
+    ingestion = IngestionRepository(factory)
+    ids = (f"id-{n}" for n in _ID_COUNTER)
+    backfill = InitialSyncHandler(
+        fetch_client=OuraFetchClient(
+            transport=httpx2.Client(transport=httpx2.MockTransport(_capturing_responder(captured)))
+        ),
+        ingestion=ingestion,
+        connections=ConnectionRepository(factory),
+        sealer=EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1"),
+        new_id=lambda: next(ids),
+        config=SyncConfig(max_pages=5),
+        clock=lambda: T0,
+    )
+    handler = IncrementalSyncHandler(
+        backfill=backfill,
+        cursors=ingestion,
+        config=SyncConfig(max_pages=5, min_window=timedelta(days=14)),
+        clock=lambda: T0,
+    )
+    _run(factory, handler)
+
+    # The window starts a full 14 days back, not 2 hours (minus overlap).
+    expected = (T0 - timedelta(days=14)).date().isoformat()
+    assert _start_date(captured[0]) == expected
+
+
 def test_stale_cursor_is_clamped_to_lookback(factory: sessionmaker[Session]) -> None:
     # A cursor older than the lookback horizon must not widen the window beyond
     # it (guards an abandoned connection re-activated much later).

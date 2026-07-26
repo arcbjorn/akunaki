@@ -14,6 +14,7 @@ import pytest
 
 from akunaki.application.sync_handlers import (
     DEFAULT_LOOKBACK_DAYS,
+    GOOGLE_HEALTH_MIN_WINDOW,
     sync_config_for_provider,
 )
 
@@ -42,6 +43,15 @@ def test_google_health_backfills_the_sleep_stream() -> None:
     assert config.stream == "sleep"
     assert config.schema_version == "google_health.v4"
     assert config.schema_version.startswith("google_health.")
+
+
+def test_google_health_carries_the_vendor_minimum_window() -> None:
+    # v4 rejects a query range narrower than 14 days, so the config must carry
+    # that floor; providers without such a limit carry none.
+    assert sync_config_for_provider("google_health").min_window == GOOGLE_HEALTH_MIN_WINDOW
+    assert timedelta(days=14) == GOOGLE_HEALTH_MIN_WINDOW
+    assert sync_config_for_provider("oura").min_window == timedelta(0)
+    assert sync_config_for_provider("polar").min_window == timedelta(0)
 
 
 def test_unwired_provider_fails_loudly() -> None:

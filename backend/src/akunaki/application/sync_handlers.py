@@ -79,6 +79,13 @@ DEFAULT_OVERLAP = timedelta(hours=36)
 
 MAX_PAGES = 50
 
+# Google Health v4 rejects a query whose date range is shorter than 14 days
+# (ranges are restricted to between 14 and 90 days per request), so an
+# incremental window resumed from a recent cursor would be refused outright.
+# Widening the window is always safe: re-fetched records dedupe on content hash
+# in the ingestion layer, so a wider read costs vendor calls, never duplicates.
+GOOGLE_HEALTH_MIN_WINDOW = timedelta(days=14)
+
 
 @dataclass(frozen=True, slots=True)
 class SyncConfig:
@@ -89,6 +96,10 @@ class SyncConfig:
     max_pages: int = MAX_PAGES
     stream: str = "sleep"
     schema_version: str = "oura.v2"
+    # Vendor-imposed floor on the width of a single query window. Zero means the
+    # provider imposes none; a positive value widens a too-narrow window
+    # backwards so the request stays inside what the vendor accepts.
+    min_window: timedelta = timedelta(0)
 
     def __post_init__(self) -> None:
         if self.lookback_days < 1:
@@ -96,6 +107,9 @@ class SyncConfig:
             raise ValueError(msg)
         if self.max_pages < 1:
             msg = "max_pages must be >= 1"
+            raise ValueError(msg)
+        if self.min_window < timedelta(0):
+            msg = "min_window must not be negative"
             raise ValueError(msg)
 
 
@@ -110,8 +124,14 @@ _PROVIDER_STREAMS: dict[str, tuple[str, str]] = {
     "oura": ("sleep", "oura.v2"),
     # Polar: the AccessLink exercises list, normalized to canonical workouts.
     "polar": ("workout", "polar.v1"),
-    # Google Health: the v4 sleep-segment reconcile stream (Fitbit-origin sleep).
+    # Google Health: the v4 sleep data-point list (Fitbit-origin sleep).
     "google_health": ("sleep", "google_health.v4"),
+}
+
+# Vendor-imposed minimum query-window width, per provider. A provider absent
+# here imposes none.
+_PROVIDER_MIN_WINDOWS: dict[str, timedelta] = {
+    "google_health": GOOGLE_HEALTH_MIN_WINDOW,
 }
 
 
@@ -140,6 +160,7 @@ def sync_config_for_provider(
         max_pages=max_pages,
         stream=stream,
         schema_version=schema_version,
+        min_window=_PROVIDER_MIN_WINDOWS.get(provider, timedelta(0)),
     )
 
 
@@ -376,7 +397,7 @@ class IncrementalSyncHandler:
         lookback_start = now - timedelta(days=self._config.lookback_days) - self._config.overlap
         if cursor is None:
             # No prior sync for this stream: behave like an initial backfill.
-            return lookback_start
+            return self._widen_to_min_window(lookback_start, now=now)
         try:
             resumed = parse_utc_rfc3339(cursor) - self._config.overlap
         except ValueError:
