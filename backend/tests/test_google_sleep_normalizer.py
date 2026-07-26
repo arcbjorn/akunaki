@@ -1,8 +1,8 @@
 """Golden tests for the Google Health sleep-segment normalizer.
 
 Hand-computed from the segment aggregation rules: stage minutes summed per
-sleepType, total sleep = non-awake stages, time-in-bed = session span, wake-date
-grouping, and quality degradation without stage detail.
+stage `type`, total sleep = non-awake stages, time-in-bed = session span,
+wake-date grouping, and quality degradation without stage detail.
 """
 
 from __future__ import annotations
@@ -37,10 +37,10 @@ def test_normalizer_version_is_pinned() -> None:
 def test_aggregates_one_night_from_stage_segments() -> None:
     # 60 light + 60 deep + 300 rem = 420 sleep; +30 awake -> 450 min in bed.
     page = _page(
-        _seg("2026-07-22T00:00:00+02:00", "2026-07-22T01:00:00+02:00", "SLEEP_STAGE_LIGHT"),
-        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T02:00:00+02:00", "SLEEP_STAGE_DEEP"),
-        _seg("2026-07-22T02:00:00+02:00", "2026-07-22T07:00:00+02:00", "SLEEP_STAGE_REM"),
-        _seg("2026-07-22T07:00:00+02:00", "2026-07-22T07:30:00+02:00", "SLEEP_STAGE_AWAKE"),
+        _seg("2026-07-22T00:00:00+02:00", "2026-07-22T01:00:00+02:00", "LIGHT"),
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T02:00:00+02:00", "DEEP"),
+        _seg("2026-07-22T02:00:00+02:00", "2026-07-22T07:00:00+02:00", "REM"),
+        _seg("2026-07-22T07:00:00+02:00", "2026-07-22T07:30:00+02:00", "AWAKE"),
     )
     facts = normalize_google_sleep_payload(page)
     assert len(facts) == 1
@@ -63,8 +63,8 @@ def test_aggregates_one_night_from_stage_segments() -> None:
 def test_wake_date_groups_across_midnight() -> None:
     # A 23:00 -> 07:00 night: all segments belong to the wake morning.
     page = _page(
-        _seg("2026-07-21T23:00:00+02:00", "2026-07-22T03:00:00+02:00", "SLEEP_STAGE_LIGHT"),
-        _seg("2026-07-22T03:00:00+02:00", "2026-07-22T06:30:00+02:00", "SLEEP_STAGE_DEEP"),
+        _seg("2026-07-21T23:00:00+02:00", "2026-07-22T03:00:00+02:00", "LIGHT"),
+        _seg("2026-07-22T03:00:00+02:00", "2026-07-22T06:30:00+02:00", "DEEP"),
     )
     facts = normalize_google_sleep_payload(page)
     assert len(facts) == 1
@@ -75,8 +75,8 @@ def test_wake_date_groups_across_midnight() -> None:
 
 def test_two_nights_become_two_sorted_facts() -> None:
     page = _page(
-        _seg("2026-07-23T01:00:00+02:00", "2026-07-23T05:00:00+02:00", "SLEEP_STAGE_LIGHT"),
-        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_LIGHT"),
+        _seg("2026-07-23T01:00:00+02:00", "2026-07-23T05:00:00+02:00", "LIGHT"),
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "LIGHT"),
     )
     facts = normalize_google_sleep_payload(page)
     assert [f.local_health_day for f in facts] == ["2026-07-22", "2026-07-23"]
@@ -85,8 +85,8 @@ def test_two_nights_become_two_sorted_facts() -> None:
 def test_unknown_stage_counts_as_in_bed_but_not_sleep() -> None:
     # An unspecified stage adds to the span (time-in-bed) but no stage bucket.
     page = _page(
-        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_LIGHT"),
-        _seg("2026-07-22T05:00:00+02:00", "2026-07-22T05:30:00+02:00", "SLEEP_STAGE_UNSPECIFIED"),
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "LIGHT"),
+        _seg("2026-07-22T05:00:00+02:00", "2026-07-22T05:30:00+02:00", "UNSPECIFIED"),
     )
     facts = normalize_google_sleep_payload(page)
     fact = facts[0]
@@ -101,7 +101,7 @@ def test_unknown_stage_counts_as_in_bed_but_not_sleep() -> None:
 def test_no_recognized_stages_is_low_quality() -> None:
     # A night present only as unspecified segments: duration from span, low q.
     page = _page(
-        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T06:00:00+02:00", "SLEEP_STAGE_UNSPECIFIED"),
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T06:00:00+02:00", "UNSPECIFIED"),
     )
     facts = normalize_google_sleep_payload(page)
     fact = facts[0]
@@ -112,7 +112,7 @@ def test_no_recognized_stages_is_low_quality() -> None:
 
 def test_short_night_is_a_nap() -> None:
     page = _page(
-        _seg("2026-07-22T13:00:00+02:00", "2026-07-22T14:00:00+02:00", "SLEEP_STAGE_LIGHT"),
+        _seg("2026-07-22T13:00:00+02:00", "2026-07-22T14:00:00+02:00", "LIGHT"),
     )
     facts = normalize_google_sleep_payload(page)
     assert facts[0].is_nap is True
@@ -120,7 +120,7 @@ def test_short_night_is_a_nap() -> None:
 
 def test_re_run_is_byte_identical() -> None:
     page = _page(
-        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_LIGHT"),
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "LIGHT"),
     )
     first = normalize_google_sleep_payload(page)
     second = normalize_google_sleep_payload(page)
@@ -129,21 +129,19 @@ def test_re_run_is_byte_identical() -> None:
 
 def test_content_hash_changes_with_the_values() -> None:
     a = normalize_google_sleep_payload(
-        _page(_seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_LIGHT"))
+        _page(_seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "LIGHT"))
     )
     b = normalize_google_sleep_payload(
-        _page(_seg("2026-07-22T01:00:00+02:00", "2026-07-22T06:00:00+02:00", "SLEEP_STAGE_LIGHT"))
+        _page(_seg("2026-07-22T01:00:00+02:00", "2026-07-22T06:00:00+02:00", "LIGHT"))
     )
     assert a[0].content_hash != b[0].content_hash
 
 
 def test_bad_segments_are_skipped_not_fatal() -> None:
     page = _page(
-        _seg(
-            "2026-07-22T05:00:00+02:00", "2026-07-22T01:00:00+02:00", "SLEEP_STAGE_LIGHT"
-        ),  # reversed
+        _seg("2026-07-22T05:00:00+02:00", "2026-07-22T01:00:00+02:00", "LIGHT"),  # reversed
         {"startTime": "not-a-time", "endTime": "also-bad", "type": "DEEP"},  # type: ignore[arg-type]
-        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_REM"),
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "REM"),
     )
     facts = normalize_google_sleep_payload(page)
     # Only the one usable segment survives, as a valid night.
@@ -157,8 +155,8 @@ def test_zero_duration_segment_does_not_extend_the_session() -> None:
     # blip: if the blip leaked in, session_end would jump to it and inflate
     # time-in-bed. The `end <= start` guard (not just `end < start`) prevents it.
     page = _page(
-        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_LIGHT"),
-        _seg("2026-07-22T09:00:00+02:00", "2026-07-22T09:00:00+02:00", "SLEEP_STAGE_AWAKE"),
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "LIGHT"),
+        _seg("2026-07-22T09:00:00+02:00", "2026-07-22T09:00:00+02:00", "AWAKE"),
     )
     facts = normalize_google_sleep_payload(page)
     assert len(facts) == 1
@@ -177,15 +175,20 @@ def test_empty_page_yields_no_facts() -> None:
     assert normalize_google_sleep_payload(_page()) == []
 
 
-def test_bare_enum_stage_names_are_accepted() -> None:
-    """The real v4 REST payload uses bare `type` names, not prefixed ones."""
+def test_prefixed_stage_names_are_not_recognized() -> None:
+    """Only the bare v4 enum names are read.
+
+    The RPC docs spell the enum `SLEEP_STAGE_TYPE_UNSPECIFIED`, but the REST
+    payload carries bare names (`LIGHT`, `DEEP`, ...). A `SLEEP_STAGE_`-prefixed
+    value is not a shape the API sends, so it names no stage — the night is
+    still present via its span, but graded low rather than silently staged.
+    """
     page = _page(
-        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T02:00:00+02:00", "LIGHT"),
-        _seg("2026-07-22T02:00:00+02:00", "2026-07-22T04:00:00+02:00", "DEEP"),
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_DEEP"),
     )
     [fact] = normalize_google_sleep_payload(page)
-    assert fact.light_min == pytest.approx(60.0)
-    assert fact.deep_min == pytest.approx(120.0)
+    assert fact.deep_min is None
+    assert fact.quality == "low"
 
 
 def test_v4_field_names_are_stages_and_type() -> None:

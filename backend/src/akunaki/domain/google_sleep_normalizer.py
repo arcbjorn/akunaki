@@ -40,26 +40,21 @@ ENTITY_TYPE = "sleep_session"
 NAP_MAX_MINUTES = 180.0
 
 # Google Health v4 `Sleep.SleepStageType` vocabulary -> canonical stage bucket.
-# The documented enum is UNSPECIFIED / AWAKE / LIGHT / DEEP / REM / ASLEEP /
-# RESTLESS. `ASLEEP` is undifferentiated sleep (a classic, non-staged night):
-# it counts as sleep but names no stage, so it maps to None rather than being
+# The documented enum is SLEEP_STAGE_TYPE_UNSPECIFIED / AWAKE / LIGHT / DEEP /
+# REM / ASLEEP / RESTLESS; the REST payload carries the bare names.
+#
+# `ASLEEP` is undifferentiated sleep (a classic, non-staged night): it counts
+# as sleep but names no stage, so it gets its own bucket rather than being
 # forced into a stage it does not describe. Values absent here (UNSPECIFIED,
-# RESTLESS, ...) contribute to neither sleep nor a stage. The older
-# `SLEEP_STAGE_`-prefixed spellings are also accepted so a payload from either
-# representation normalizes.
+# RESTLESS) contribute to neither sleep nor a stage.
 _ASLEEP_UNSTAGED = "asleep"
 
-_STAGE_MAP: dict[str, str | None] = {
+_STAGE_MAP: dict[str, str] = {
     "LIGHT": "light",
     "DEEP": "deep",
     "REM": "rem",
     "AWAKE": "awake",
     "ASLEEP": _ASLEEP_UNSTAGED,
-    "SLEEP_STAGE_LIGHT": "light",
-    "SLEEP_STAGE_DEEP": "deep",
-    "SLEEP_STAGE_REM": "rem",
-    "SLEEP_STAGE_AWAKE": "awake",
-    "SLEEP_STAGE_ASLEEP": _ASLEEP_UNSTAGED,
 }
 
 
