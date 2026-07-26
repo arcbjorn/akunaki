@@ -212,6 +212,24 @@ class InitialSyncHandler:
             status=ConnectionStatus.ACTIVE,
             now=now,
         )
+        if new_revisions == 0:
+            # A first backfill over the whole lookback that yields nothing is
+            # not proof of an empty account. Oura in particular answers a
+            # scope-deficient token with an **empty array, not an error**, so an
+            # under-scoped grant is indistinguishable from "no data" at the
+            # transport layer. Surfacing it keeps a silently empty connection
+            # from looking like a healthy one; it is deliberately not an error,
+            # because a genuinely new user really does have nothing yet.
+            logger.warning(
+                "initial sync produced no records over the full lookback window",
+                extra={
+                    "connection_id": connection_id,
+                    "provider": self._fetch.provider,
+                    "stream": self._config.stream,
+                    "lookback_days": self._config.lookback_days,
+                    "hint": "verify the granted OAuth scopes cover this stream",
+                },
+            )
         logger.info(
             "initial sync completed",
             extra={"connection_id": connection_id, "new_revisions": new_revisions},
@@ -407,9 +425,22 @@ class IncrementalSyncHandler:
                 "incremental sync ignoring malformed cursor",
                 extra={"connection_id": connection_id},
             )
-            return lookback_start
+            return self._widen_to_min_window(lookback_start, now=now)
         # Never resume before the lookback horizon (guards a stale cursor).
-        return max(resumed, lookback_start)
+        return self._widen_to_min_window(max(resumed, lookback_start), now=now)
+
+    def _widen_to_min_window(self, window_start: datetime, *, now: datetime) -> datetime:
+        """Widen a too-narrow window backwards to the provider's floor.
+
+        A fresh cursor makes the resumed window only hours wide, which a vendor
+        with a minimum range (Google Health: 14 days) rejects outright. Widening
+        backwards re-reads already-seen days; the ingestion layer dedupes them on
+        content hash, so this costs vendor calls but never duplicate revisions.
+        """
+        min_window = self._config.min_window
+        if min_window <= timedelta(0):
+            return window_start
+        return min(window_start, now - min_window)
 
 
 class ConnectionProviderSource(Protocol):

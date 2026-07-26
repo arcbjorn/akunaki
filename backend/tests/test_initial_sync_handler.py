@@ -197,6 +197,40 @@ def test_sync_persists_transport_revision_and_cursor(
     assert cursor.stream == "sleep"
 
 
+def test_empty_backfill_warns_about_scopes(
+    factory: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A full-lookback backfill that yields nothing must not look healthy.
+
+    Oura answers a scope-deficient token with an empty array rather than an
+    error, so an under-scoped grant is indistinguishable from an empty account
+    at the transport layer. The job still succeeds (a brand-new user genuinely
+    has no data), but it says so loudly enough to diagnose.
+    """
+    empty = json.dumps({"data": [], "next_token": None})
+    with caplog.at_level("WARNING"):
+        worker = _run_job(factory, _handler(factory, _ok(empty)))
+
+    # Not an error: an empty account is legitimate.
+    assert worker.stats.succeeded == 1
+    assert _job_status(factory) == JobStatus.SUCCEEDED.value
+
+    records = [r for r in caplog.records if "no records over the full lookback" in r.message]
+    assert len(records) == 1
+    assert records[0].hint == "verify the granted OAuth scopes cover this stream"  # type: ignore[attr-defined]
+    assert records[0].provider == "oura"  # type: ignore[attr-defined]
+
+
+def test_non_empty_backfill_does_not_warn(
+    factory: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The scope warning must not fire on a healthy sync."""
+    with caplog.at_level("WARNING"):
+        _run_job(factory, _handler(factory, _ok(PAGE_ONE)))
+
+    assert not [r for r in caplog.records if "no records over the full lookback" in r.message]
+
+
 def test_request_metadata_carries_no_token(factory: sessionmaker[Session]) -> None:
     """Persisted transport metadata must never contain credentials."""
     _run_job(factory, _handler(factory, _ok(PAGE_ONE)))
