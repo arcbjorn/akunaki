@@ -45,8 +45,16 @@ NAP_MAX_MINUTES = 180.0
 #
 # `ASLEEP` is undifferentiated sleep (a classic, non-staged night): it counts
 # as sleep but names no stage, so it gets its own bucket rather than being
-# forced into a stage it does not describe. Values absent here (UNSPECIFIED,
-# RESTLESS) contribute to neither sleep nor a stage.
+# forced into a stage it does not describe.
+#
+# `RESTLESS` is **not** sleep: Google's own classic-sleep summary sums the
+# asleep stages "excluding AWAKE and RESTLESS", so it is in-bed non-sleep and
+# buckets with `awake`. Leaving it unmapped would drop its minutes from sleep
+# *and* from the awake total, so a restless night would report a badly
+# understated efficiency while still grading as fully staged.
+#
+# `SLEEP_STAGE_TYPE_UNSPECIFIED` stays unmapped: it names no state at all, so it
+# contributes to the session span (time in bed) but to no stage total.
 _ASLEEP_UNSTAGED = "asleep"
 
 _STAGE_MAP: dict[str, str] = {
@@ -54,6 +62,7 @@ _STAGE_MAP: dict[str, str] = {
     "DEEP": "deep",
     "REM": "rem",
     "AWAKE": "awake",
+    "RESTLESS": "awake",
     "ASLEEP": _ASLEEP_UNSTAGED,
 }
 

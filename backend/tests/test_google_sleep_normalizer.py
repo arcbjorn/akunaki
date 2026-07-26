@@ -98,6 +98,26 @@ def test_unknown_stage_counts_as_in_bed_but_not_sleep() -> None:
     assert fact.awake_min is None
 
 
+def test_restless_is_in_bed_not_asleep() -> None:
+    """`RESTLESS` buckets with awake, not sleep and not nothing.
+
+    Google's classic-sleep summary sums the asleep stages "excluding AWAKE and
+    RESTLESS", so restless time is in-bed non-sleep. Leaving it unmapped would
+    drop its minutes from both the sleep and the awake totals, silently losing
+    time that the session span still counts as in bed.
+    """
+    page = _page(
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T02:00:00+02:00", "LIGHT"),
+        _seg("2026-07-22T02:00:00+02:00", "2026-07-22T07:00:00+02:00", "RESTLESS"),
+    )
+    [fact] = normalize_google_sleep_payload(page)
+    assert fact.duration_min == pytest.approx(60.0)  # restless is not sleep
+    assert fact.awake_min == pytest.approx(300.0)  # ...but it is accounted for
+    assert fact.time_in_bed_min == pytest.approx(360.0)
+    # Sleep + awake reconcile with the session span; no minutes go missing.
+    assert fact.duration_min + fact.awake_min == pytest.approx(fact.time_in_bed_min)
+
+
 def test_no_recognized_stages_is_low_quality() -> None:
     # A night present only as unspecified segments: duration from span, low q.
     page = _page(
