@@ -58,16 +58,16 @@ _SLEEP_PAGE = json.dumps(
                         "startTime": "2026-07-22T00:00:00+02:00",
                         "endTime": "2026-07-22T07:00:00+02:00",
                     },
-                    "sleepStages": [
+                    "stages": [
                         {
                             "startTime": "2026-07-22T00:00:00+02:00",
                             "endTime": "2026-07-22T04:00:00+02:00",
-                            "stageType": "LIGHT",
+                            "type": "LIGHT",
                         },
                         {
                             "startTime": "2026-07-22T04:00:00+02:00",
                             "endTime": "2026-07-22T07:00:00+02:00",
-                            "stageType": "DEEP",
+                            "type": "DEEP",
                         },
                     ],
                 }
@@ -121,7 +121,7 @@ def factory(sync_db: str) -> Iterator[sessionmaker[Session]]:
             json.dumps({"access_token": ACCESS_TOKEN, "refresh_token": "rt"}).encode(),
             aad=b"conn-google",
         ),
-        scopes=("https://www.googleapis.com/auth/health.sleep.read",),
+        scopes=("https://www.googleapis.com/auth/googlehealth.sleep.readonly",),
         external_user_id=None,
         now=T0,
     )

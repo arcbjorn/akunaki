@@ -6,8 +6,8 @@ facts, which is what makes normalization safely repeatable.
 
 Google Health delivers sleep as **session data points** (the ``sleep`` data
 type). Each data point carries a ``sleep`` object with a session ``interval``
-and a ``sleepStages`` array — each stage a ``{startTime, endTime, stageType}``
-slice — unlike Oura's one-record-per-night flat model. This normalizer
+and a ``stages`` array — each stage a ``{startTime, endTime, type}`` slice —
+unlike Oura's one-record-per-night flat model. This normalizer
 **aggregates the stages of one night into a single canonical session**:
 
 - **Wake-date grouping.** Segments are grouped by the local date of their *end*
@@ -40,18 +40,26 @@ ENTITY_TYPE = "sleep_session"
 NAP_MAX_MINUTES = 180.0
 
 # Google Health v4 `Sleep.SleepStageType` vocabulary -> canonical stage bucket.
-# Values absent here (UNSPECIFIED, OUT_OF_BED, ...) contribute to neither sleep
-# nor a stage. Both the bare enum names and the older `SLEEP_STAGE_`-prefixed
-# forms are accepted so a payload from either representation normalizes.
-_STAGE_MAP = {
+# The documented enum is UNSPECIFIED / AWAKE / LIGHT / DEEP / REM / ASLEEP /
+# RESTLESS. `ASLEEP` is undifferentiated sleep (a classic, non-staged night):
+# it counts as sleep but names no stage, so it maps to None rather than being
+# forced into a stage it does not describe. Values absent here (UNSPECIFIED,
+# RESTLESS, ...) contribute to neither sleep nor a stage. The older
+# `SLEEP_STAGE_`-prefixed spellings are also accepted so a payload from either
+# representation normalizes.
+_ASLEEP_UNSTAGED = "asleep"
+
+_STAGE_MAP: dict[str, str | None] = {
     "LIGHT": "light",
     "DEEP": "deep",
     "REM": "rem",
     "AWAKE": "awake",
+    "ASLEEP": _ASLEEP_UNSTAGED,
     "SLEEP_STAGE_LIGHT": "light",
     "SLEEP_STAGE_DEEP": "deep",
     "SLEEP_STAGE_REM": "rem",
     "SLEEP_STAGE_AWAKE": "awake",
+    "SLEEP_STAGE_ASLEEP": _ASLEEP_UNSTAGED,
 }
 
 
@@ -78,7 +86,7 @@ def normalize_google_sleep_payload(payload_text: str) -> list[SleepFact]:
         raise NormalizationError(msg)
 
     # Group usable stage segments by their wake local-date, preserving order.
-    # Each data point holds a `sleep` session whose `sleepStages` are the
+    # Each data point holds a `sleep` session whose `stages` are the
     # segments; a point may also carry a session-level interval when it has no
     # per-stage detail.
     groups: dict[str, list[_Segment]] = defaultdict(list)
@@ -122,17 +130,18 @@ class _Segment:
 def _segments_from_point(point: dict[str, Any]) -> list[_Segment]:
     """Extract the usable stage segments from one sleep data point.
 
-    Reads the v4 ``sleep`` session object: its ``sleepStages`` array yields the
-    per-stage segments. When a point carries no stage detail, its session-level
-    ``interval`` becomes a single stage-less segment so the night is still
-    present (graded low quality later), rather than silently dropped.
+    Reads the v4 ``sleep`` session object: its ``stages`` array yields the
+    per-stage segments, each a ``{startTime, endTime, type}`` slice. When a
+    point carries no stage detail, its session-level ``interval`` becomes a
+    single stage-less segment so the night is still present (graded low quality
+    later), rather than silently dropped.
     """
     sleep = point.get("sleep")
     if not isinstance(sleep, dict):
         return []
 
     segments: list[_Segment] = []
-    raw_stages = sleep.get("sleepStages")
+    raw_stages = sleep.get("stages")
     if isinstance(raw_stages, list):
         for raw in raw_stages:
             if not isinstance(raw, dict):
@@ -140,7 +149,7 @@ def _segments_from_point(point: dict[str, Any]) -> list[_Segment]:
             segment = _parse_segment(
                 start_text=raw.get("startTime"),
                 end_text=raw.get("endTime"),
-                stage_raw=raw.get("stageType"),
+                stage_raw=raw.get("type"),
             )
             if segment is not None:
                 segments.append(segment)
@@ -196,7 +205,13 @@ def _session_from_segments(wake_date: str, segments: list[_Segment]) -> SleepFac
     if session_end <= session_start:
         return None
 
-    stage_minutes: dict[str, float] = {"light": 0.0, "deep": 0.0, "rem": 0.0, "awake": 0.0}
+    stage_minutes: dict[str, float] = {
+        "light": 0.0,
+        "deep": 0.0,
+        "rem": 0.0,
+        "awake": 0.0,
+        _ASLEEP_UNSTAGED: 0.0,
+    }
     for seg in segments:
         if seg.stage is not None:
             stage_minutes[seg.stage] += _span_minutes(seg.start, seg.end)
@@ -206,12 +221,19 @@ def _session_from_segments(wake_date: str, segments: list[_Segment]) -> SleepFac
     rem = _nonzero_or_none(stage_minutes["rem"])
     awake = _nonzero_or_none(stage_minutes["awake"])
 
-    sleep_minutes = stage_minutes["light"] + stage_minutes["deep"] + stage_minutes["rem"]
-    has_stages = sleep_minutes > 0.0
-    # With recognized sleep stages, duration is their sum; otherwise fall back to
-    # the session span (a night present but with no stage detail).
+    # `ASLEEP` is sleep the vendor did not break into stages, so it counts
+    # toward duration but is never reported as light/deep/rem — inventing a
+    # stage split it never sent would fabricate detail.
+    staged_minutes = stage_minutes["light"] + stage_minutes["deep"] + stage_minutes["rem"]
+    sleep_minutes = staged_minutes + stage_minutes[_ASLEEP_UNSTAGED]
+    has_sleep = sleep_minutes > 0.0
+    # A night is fully staged only when every asleep minute carries a stage;
+    # an undifferentiated `ASLEEP` night is present but graded lower.
+    has_stages = staged_minutes > 0.0 and stage_minutes[_ASLEEP_UNSTAGED] == 0.0
+    # With recognized sleep, duration is the sum of asleep minutes; otherwise
+    # fall back to the session span (a night present but with no stage detail).
     duration_min = (
-        round(sleep_minutes, 3) if has_stages else _span_minutes(session_start, session_end)
+        round(sleep_minutes, 3) if has_sleep else _span_minutes(session_start, session_end)
     )
     time_in_bed_min = _span_minutes(session_start, session_end)
 

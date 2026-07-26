@@ -27,16 +27,16 @@ _SLEEP_PAGE = json.dumps(
                         "startTime": "2026-07-22T00:00:00+02:00",
                         "endTime": "2026-07-22T07:00:00+02:00",
                     },
-                    "sleepStages": [
+                    "stages": [
                         {
                             "startTime": "2026-07-22T00:00:00+02:00",
                             "endTime": "2026-07-22T04:00:00+02:00",
-                            "stageType": "LIGHT",
+                            "type": "LIGHT",
                         },
                         {
                             "startTime": "2026-07-22T04:00:00+02:00",
                             "endTime": "2026-07-22T07:00:00+02:00",
-                            "stageType": "DEEP",
+                            "type": "DEEP",
                         },
                     ],
                 }

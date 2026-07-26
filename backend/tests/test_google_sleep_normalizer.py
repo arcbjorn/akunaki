@@ -19,14 +19,14 @@ from akunaki.domain.sleep_normalizer import NormalizationError
 
 
 def _page(*stages: dict[str, str]) -> str:
-    """Wrap stage segments as one v4 sleep data point's sleepStages array."""
-    return json.dumps({"dataPoints": [{"sleep": {"sleepStages": list(stages)}}]})
+    """Wrap stage segments as one v4 sleep data point's `stages` array."""
+    return json.dumps({"dataPoints": [{"sleep": {"stages": list(stages)}}]})
 
 
 def _seg(start: str, end: str, stage: str | None) -> dict[str, str]:
     point: dict[str, str] = {"startTime": start, "endTime": end}
     if stage is not None:
-        point["stageType"] = stage
+        point["type"] = stage
     return point
 
 
@@ -142,7 +142,7 @@ def test_bad_segments_are_skipped_not_fatal() -> None:
         _seg(
             "2026-07-22T05:00:00+02:00", "2026-07-22T01:00:00+02:00", "SLEEP_STAGE_LIGHT"
         ),  # reversed
-        {"startTime": "not-a-time", "endTime": "also-bad", "stageType": "DEEP"},  # type: ignore[arg-type]
+        {"startTime": "not-a-time", "endTime": "also-bad", "type": "DEEP"},  # type: ignore[arg-type]
         _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "SLEEP_STAGE_REM"),
     )
     facts = normalize_google_sleep_payload(page)
@@ -178,7 +178,7 @@ def test_empty_page_yields_no_facts() -> None:
 
 
 def test_bare_enum_stage_names_are_accepted() -> None:
-    """The real v4 REST payload uses bare `stageType` names, not prefixed."""
+    """The real v4 REST payload uses bare `type` names, not prefixed ones."""
     page = _page(
         _seg("2026-07-22T01:00:00+02:00", "2026-07-22T02:00:00+02:00", "LIGHT"),
         _seg("2026-07-22T02:00:00+02:00", "2026-07-22T04:00:00+02:00", "DEEP"),
@@ -186,6 +186,52 @@ def test_bare_enum_stage_names_are_accepted() -> None:
     [fact] = normalize_google_sleep_payload(page)
     assert fact.light_min == pytest.approx(60.0)
     assert fact.deep_min == pytest.approx(120.0)
+
+
+def test_v4_field_names_are_stages_and_type() -> None:
+    """The legacy `sleepStages`/`stageType` spelling must not be read.
+
+    Guards the corrected v4 contract: a payload using the old names carries no
+    readable stages, so it degrades to a stage-less night rather than silently
+    normalizing as if it had stage detail.
+    """
+    legacy = json.dumps(
+        {
+            "dataPoints": [
+                {
+                    "sleep": {
+                        "sleepStages": [
+                            {
+                                "startTime": "2026-07-22T01:00:00+02:00",
+                                "endTime": "2026-07-22T05:00:00+02:00",
+                                "stageType": "DEEP",
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    assert normalize_google_sleep_payload(legacy) == []
+
+
+def test_asleep_counts_as_sleep_without_inventing_a_stage() -> None:
+    """`ASLEEP` is undifferentiated sleep: it adds duration, names no stage."""
+    page = _page(
+        _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "ASLEEP"),
+        _seg("2026-07-22T05:00:00+02:00", "2026-07-22T05:30:00+02:00", "AWAKE"),
+    )
+    [fact] = normalize_google_sleep_payload(page)
+    # The 4h asleep span counts toward duration...
+    assert fact.duration_min == pytest.approx(240.0)
+    assert fact.time_in_bed_min == pytest.approx(270.0)
+    # ...but is never attributed to light/deep/rem, which it never described.
+    assert fact.light_min is None
+    assert fact.deep_min is None
+    assert fact.rem_min is None
+    assert fact.awake_min == pytest.approx(30.0)
+    # An unstaged night is honestly graded lower than a fully staged one.
+    assert fact.quality == "low"
 
 
 def test_session_interval_used_when_no_stage_detail() -> None:
