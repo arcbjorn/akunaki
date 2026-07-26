@@ -35,7 +35,7 @@ TOKEN_BODY = {
     "access_token": ACCESS_TOKEN,
     "refresh_token": REFRESH_TOKEN,
     "expires_in": 3600,
-    "scope": "https://www.googleapis.com/auth/health.sleep.read",
+    "scope": "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
     "token_type": "Bearer",
 }
 
@@ -113,7 +113,7 @@ def test_authorize_url_carries_pkce_offline_and_consent() -> None:
         state="state-abc",
         code_challenge="challenge-xyz",
         redirect_uri=REDIRECT,
-        scopes=("https://www.googleapis.com/auth/health.sleep.read",),
+        scopes=("https://www.googleapis.com/auth/googlehealth.sleep.readonly",),
     )
 
     parsed = urlparse(url)

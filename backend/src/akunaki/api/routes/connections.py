@@ -155,11 +155,29 @@ def _status_for(rejection: LinkRejection | None) -> int:
     return 400
 
 
-# Default scopes requested per provider at authorize time.
+# Default scopes requested per provider at authorize time. Least privilege: each
+# provider is asked only for the streams its connector actually fetches
+# (see `sync_config_for_provider`), never a blanket read-everything grant.
 _DEFAULT_SCOPES: dict[str, tuple[str, ...]] = {
+    # Oura backfills the detailed `sleep` collection (which also carries the
+    # overnight vitals). Verified 2026-07-25 against the official OpenAPI spec
+    # (api.ouraring.com/v2/static/json/openapi-1.37.json): every endpoint
+    # declares `OAuth2: []` — an **empty** scope list — so Oura publishes no
+    # per-endpoint scope mapping at all. Of the eight real scopes, `daily`
+    # ("daily summaries of sleep, activity and readiness") is the only one
+    # mentioning sleep, so it is the correct ask; the others (email, personal,
+    # heartrate, workout, tag, session, spo2Daily) cover data no connector
+    # reads and are omitted for least privilege.
+    #
+    # Caveat worth knowing: an under-scoped Oura token returns an **empty
+    # array, not an error**, so a scope shortfall would look like "no data"
+    # rather than failing loudly. `InitialSyncHandler` therefore warns when a
+    # full-lookback backfill yields zero records.
     "oura": ("daily",),
     "polar": ("accesslink.read_all",),
-    "google_health": ("https://www.googleapis.com/auth/health.sleep.read",),
+    # Google Health scopes are all `.../auth/googlehealth.*` and are Restricted
+    # (they require Google's security review before production use).
+    "google_health": ("https://www.googleapis.com/auth/googlehealth.sleep.readonly",),
 }
 
 

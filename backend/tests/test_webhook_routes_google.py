@@ -121,7 +121,7 @@ def factory(route_db: str) -> Iterator[sessionmaker[Session]]:
         tenant_id="tenant-1",
         provider=Provider.GOOGLE_HEALTH,
         sealed_secret=sealer.seal(b'{"access_token":"at"}', aad=b"conn-g"),
-        scopes=("health.sleep.read",),
+        scopes=("googlehealth.sleep.readonly",),
         external_user_id=None,
         now=datetime.now(UTC),
     )
