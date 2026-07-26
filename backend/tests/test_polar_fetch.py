@@ -1,9 +1,7 @@
 """Tests for the Polar AccessLink fetch client (mock transport, no network).
 
-The client drives the AccessLink exercise **transaction** lifecycle: open a
-transaction (POST), list its exercise URLs (GET), fetch each summary and its
-heart-rate zones (GET), then commit (PUT). The responder below routes on method
-and path to model that flow.
+The client reads the non-transactional `GET /v3/exercises?zones=true`: one call
+returning a bare JSON array of exercises with their HR zones already inlined.
 """
 
 from __future__ import annotations
@@ -22,41 +20,23 @@ T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
 WINDOW_START = datetime(2026, 6, 24, tzinfo=UTC)
 WINDOW_END = datetime(2026, 7, 22, tzinfo=UTC)
 
-_TX = "https://www.polaraccesslink.com/v3/users/self/exercise-transactions/42"
-_EX = "https://www.polaraccesslink.com/v3/users/self/exercise-transactions/42/exercises/ex-1"
+# The `exerciseHashId` shape: snake_case, naive local `start_time` plus a
+# separate offset, and zones inlined by `zones=true`.
+_EXERCISES = [
+    {
+        "id": "2AC312F",
+        "start_time": "2026-07-22T06:00:00",
+        "start_time_utc_offset": 120,
+        "duration": "PT1H",
+        "sport": "RUNNING",
+        "heart_rate_zones": [{"index": i, "in-zone": "PT10M"} for i in range(1, 6)],
+    }
+]
+_BODY = json.dumps(_EXERCISES)
 
-_SUMMARY = {
-    "id": "ex-1",
-    "start-time": "2026-07-22T06:00:00.000",
-    "duration": "PT1H",
-    "sport": "RUNNING",
-}
-_ZONES = {"zone": [{"index": i, "in-zone": "PT10M"} for i in range(1, 6)]}
 
-
-def _transactional_responder(
-    calls: list[tuple[str, str]],
-) -> Callable[[httpx2.Request], httpx2.Response]:
-    """Model the create → list → summary → zones → commit flow."""
-
-    def responder(request: httpx2.Request) -> httpx2.Response:
-        method = request.method
-        url = str(request.url)
-        calls.append((method, url))
-        json_headers = {"content-type": "application/json"}
-        if method == "POST" and url.endswith("/exercise-transactions"):
-            return httpx2.Response(201, json={"resource-uri": _TX}, headers=json_headers)
-        if method == "GET" and url == _TX:
-            return httpx2.Response(200, json={"exercises": [_EX]}, headers=json_headers)
-        if method == "GET" and url == _EX:
-            return httpx2.Response(200, json=_SUMMARY, headers=json_headers)
-        if method == "GET" and url == f"{_EX}/heart-rate-zones":
-            return httpx2.Response(200, json=_ZONES, headers=json_headers)
-        if method == "PUT" and url == _TX:
-            return httpx2.Response(200, headers=json_headers)
-        return httpx2.Response(500, text="unexpected")
-
-    return responder
+def _ok(request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(200, text=_BODY, headers={"content-type": "application/json"})
 
 
 def _client(responder: Callable[[httpx2.Request], httpx2.Response]) -> PolarFetchClient:
@@ -74,35 +54,43 @@ def _fetch(client: PolarFetchClient) -> object:
     )
 
 
-def test_drains_transaction_and_assembles_exercises() -> None:
+def test_lists_exercises_with_zones_in_one_call() -> None:
     calls: list[tuple[str, str]] = []
-    result = _fetch(_client(_transactional_responder(calls)))
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        calls.append((request.method, str(request.url)))
+        return _ok(request)
+
+    result = _fetch(_client(responder))
 
     assert result.failure is None  # type: ignore[attr-defined]
     envelope = result.envelope  # type: ignore[attr-defined]
     assert envelope is not None
     assert envelope.provider == "polar"
     assert envelope.stream == "workout"
+    # The resource is unpaginated.
     assert envelope.next_page_token is None
+    assert envelope.page_token is None
 
-    # The assembled page carries the exercise with its zones inlined.
-    body = json.loads(envelope.payload_text)
-    assert [ex["id"] for ex in body["exercises"]] == ["ex-1"]
-    assert body["exercises"][0]["heart_rate_zones"] == _ZONES["zone"]
+    # Exactly one GET against the non-transactional resource, asking for zones.
+    assert len(calls) == 1
+    method, url = calls[0]
+    assert method == "GET"
+    assert url.split("?")[0].endswith("/v3/exercises")
+    assert "zones=true" in url
+    # The deprecated transaction lifecycle is not touched.
+    assert "exercise-transactions" not in url
 
-    # The full lifecycle ran, ending in a commit.
-    methods = [m for m, _ in calls]
-    assert methods == ["POST", "GET", "GET", "GET", "PUT"]
-    assert calls[0][0] == "POST" and calls[0][1].endswith("/exercise-transactions")
-    assert calls[-1] == ("PUT", _TX)
+    # The vendor body is retained byte for byte.
+    assert envelope.payload_text == _BODY
 
 
 def test_auth_header_carries_the_token_but_meta_does_not() -> None:
     captured: dict[str, str | None] = {}
 
     def responder(request: httpx2.Request) -> httpx2.Response:
-        captured.setdefault("auth", request.headers.get("authorization"))
-        return _transactional_responder([])(request)
+        captured["auth"] = request.headers.get("authorization")
+        return _ok(request)
 
     result = _fetch(_client(responder))
     envelope = result.envelope  # type: ignore[attr-defined]
@@ -110,16 +98,16 @@ def test_auth_header_carries_the_token_but_meta_does_not() -> None:
     assert "AT" not in json.dumps(envelope.request_meta)
 
 
-def test_no_new_data_204_is_an_empty_page() -> None:
-    def responder(request: httpx2.Request) -> httpx2.Response:
-        if request.method == "POST":
-            return httpx2.Response(204)
-        return httpx2.Response(500, text="should not be called")
+def test_empty_exercise_list_is_a_valid_page() -> None:
+    """No workouts in the vendor's 30-day window is data, not a failure."""
+
+    def responder(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="[]", headers={"content-type": "application/json"})
 
     result = _fetch(_client(responder))
     envelope = result.envelope  # type: ignore[attr-defined]
     assert envelope is not None
-    assert json.loads(envelope.payload_text) == {"exercises": []}
+    assert json.loads(envelope.payload_text) == []
 
 
 def test_empty_access_token_is_rejected() -> None:
@@ -158,7 +146,7 @@ def test_reversed_window_is_rejected() -> None:
         )
 
 
-def test_401_on_open_is_unauthorized() -> None:
+def test_401_is_unauthorized() -> None:
     def responder(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(401, text="nope")
 
@@ -166,7 +154,17 @@ def test_401_on_open_is_unauthorized() -> None:
     assert result.failure is FetchFailure.UNAUTHORIZED  # type: ignore[attr-defined]
 
 
-def test_429_on_open_is_rate_limit_with_retry_after() -> None:
+def test_403_missing_consent_is_unauthorized() -> None:
+    """AccessLink answers 403 when the user has not accepted all consents."""
+
+    def responder(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(403, text="consent")
+
+    result = _fetch(_client(responder))
+    assert result.failure is FetchFailure.UNAUTHORIZED  # type: ignore[attr-defined]
+
+
+def test_429_is_rate_limit_with_retry_after() -> None:
     def responder(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(429, text="slow down", headers={"retry-after": "30"})
 
@@ -175,34 +173,21 @@ def test_429_on_open_is_rate_limit_with_retry_after() -> None:
     assert result.retry_after_seconds == 30  # type: ignore[attr-defined]
 
 
-def test_500_on_summary_is_provider_error() -> None:
-    def responder(request: httpx2.Request) -> httpx2.Response:
-        json_headers = {"content-type": "application/json"}
-        if request.method == "POST":
-            return httpx2.Response(201, json={"resource-uri": _TX}, headers=json_headers)
-        if request.method == "GET" and str(request.url) == _TX:
-            return httpx2.Response(200, json={"exercises": [_EX]}, headers=json_headers)
+def test_500_is_provider_error() -> None:
+    def responder(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(503, text="down")
 
     result = _fetch(_client(responder))
     assert result.failure is FetchFailure.PROVIDER_ERROR  # type: ignore[attr-defined]
 
 
-def test_missing_resource_uri_is_malformed() -> None:
-    def responder(request: httpx2.Request) -> httpx2.Response:
-        if request.method == "POST":
-            return httpx2.Response(
-                201, json={"nope": 1}, headers={"content-type": "application/json"}
-            )
-        return httpx2.Response(500, text="unexpected")
+def test_non_json_body_is_malformed() -> None:
+    def responder(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="not json", headers={"content-type": "text/plain"})
 
     result = _fetch(_client(responder))
     assert result.failure is FetchFailure.MALFORMED_RESPONSE  # type: ignore[attr-defined]
 
 
-def test_non_json_transaction_body_is_malformed() -> None:
-    def responder(request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(201, text="not json", headers={"content-type": "text/plain"})
-
-    result = _fetch(_client(responder))
-    assert result.failure is FetchFailure.MALFORMED_RESPONSE  # type: ignore[attr-defined]
+def test_repr_names_the_provider() -> None:
+    assert "polar" in repr(PolarFetchClient())
