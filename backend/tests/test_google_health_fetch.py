@@ -26,11 +26,11 @@ _SLEEP_PAGE = json.dumps(
                         "startTime": "2026-07-22T00:10:00Z",
                         "endTime": "2026-07-22T07:50:00Z",
                     },
-                    "sleepStages": [
+                    "stages": [
                         {
                             "startTime": "2026-07-22T00:10:00Z",
                             "endTime": "2026-07-22T07:50:00Z",
-                            "stageType": "DEEP",
+                            "type": "DEEP",
                         }
                     ],
                 },
@@ -81,11 +81,9 @@ def test_list_gets_window_filter_and_returns_exact_body() -> None:
 
     # List is a GET whose path names the data type and whose filter windows it.
     assert captured["method"] == "GET"
-    assert (
-        str(captured["url"])
-        .split("?")[0]
-        .endswith("/v4/users/me/dataTypes/com.google.sleep/dataPoints")
-    )
+    # The v4 data type id is the bare name, never a legacy `com.google.*` one.
+    assert str(captured["url"]).split("?")[0].endswith("/v4/users/me/dataTypes/sleep/dataPoints")
+    assert "com.google" not in str(captured["url"])
     assert captured["auth"] == "Bearer AT"
     params = captured["params"]
     assert isinstance(params, dict)

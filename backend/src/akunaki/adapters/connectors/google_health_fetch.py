@@ -39,8 +39,12 @@ SLEEP_PAGE_SIZE = 25
 # Streams this connector can fetch, mapped to their Google Health data type id
 # and the filter field path used to window the read. A stream absent here is
 # unsupported.
+#
+# The v4 data type id is the bare name (`sleep`), kebab-cased in a path when it
+# has more than one word (`body-fat`) and snake-cased in a filter (`body_fat`).
+# It is *not* the legacy Google Fit `com.google.*` namespace, which v4 rejects.
 STREAM_DATA_TYPES = {
-    "sleep": "com.google.sleep",
+    "sleep": "sleep",
 }
 STREAM_FILTER_FIELDS = {
     "sleep": "sleep.interval.start_time",
