@@ -129,8 +129,45 @@ def test_out_of_range_respiratory_is_dropped() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_nap_is_skipped() -> None:
-    assert normalize_vitals_payload(_page(_record(type="nap"))) == []
+@pytest.mark.parametrize("nap_type", ["late_nap", "rest", "sleep"])
+def test_non_principal_sleep_types_are_skipped(nap_type: str) -> None:
+    """Only `long_sleep` carries overnight vitals.
+
+    Oura's real `PublicSleepType` vocabulary is
+    `deleted`/`sleep`/`long_sleep`/`late_nap`/`rest` — there is no bare `nap`.
+    A full-length `late_nap`/`rest`/`sleep` record must still be skipped: it is
+    the *type*, not the duration, that decides. Guards the earlier bug where a
+    literal `"nap"` comparison let every typed record bypass the check and land
+    in the HRV/RHR baselines.
+    """
+    long_bout = _record(
+        type=nap_type,
+        bedtime_start="2026-07-18T23:10:00+02:00",
+        bedtime_end="2026-07-19T07:20:00+02:00",
+    )
+    assert normalize_vitals_payload(_page(long_bout)) == []
+
+
+def test_deleted_session_is_skipped() -> None:
+    """A tombstoned night must not yield phantom vitals."""
+    assert normalize_vitals_payload(_page(_record(type="deleted"))) == []
+
+
+def test_untyped_short_bout_falls_back_to_the_duration_rule() -> None:
+    """With no vendor `type`, duration still decides nap-ness."""
+    short = _record(
+        bedtime_start="2026-07-19T13:00:00+02:00",
+        bedtime_end="2026-07-19T14:00:00+02:00",
+    )
+    short.pop("type")
+    assert normalize_vitals_payload(_page(short)) == []
+
+    long_bout = _record(
+        bedtime_start="2026-07-18T23:10:00+02:00",
+        bedtime_end="2026-07-19T07:20:00+02:00",
+    )
+    long_bout.pop("type")
+    assert len(normalize_vitals_payload(_page(long_bout))) == 1
 
 
 def test_record_with_no_vitals_is_skipped() -> None:

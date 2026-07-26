@@ -13,6 +13,10 @@ sleep session is, so a night's vitals and its sleep share a local health day.
 Only the **main** sleep bout carries meaningful overnight vitals; naps are
 skipped. A record with none of the four signals yields no fact — an empty-signal
 row would violate the detail table's "at least one" invariant and carry nothing.
+
+The ``type`` vocabulary is shared with the sleep normalizer (Oura's
+``PublicSleepType``: ``deleted`` / ``sleep`` / ``long_sleep`` / ``late_nap`` /
+``rest``), so both normalizers classify a record the same way.
 """
 
 from __future__ import annotations
@@ -24,11 +28,16 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from akunaki.domain.jobs import parse_utc_rfc3339, to_utc_rfc3339
+from akunaki.domain.sleep_normalizer import (
+    DELETED_SLEEP_TYPE,
+    PRINCIPAL_SLEEP_TYPE,
+)
 
 NORMALIZER_VERSION = "oura_vitals_v0.1.0"
 ENTITY_TYPE = "overnight_vitals"
 
 # A short bout is a nap; overnight vitals are read from the main sleep only.
+# Used only when the vendor declares no `type`.
 NAP_MAX_MINUTES = 180.0
 
 # Physiologic sanity bounds; a value outside these is dropped, not stored.
@@ -125,10 +134,23 @@ def _normalize_record(record: dict[str, Any]) -> VitalsFact | None:
     if end <= start:
         return None
 
-    # Naps do not carry overnight vitals; skip them explicitly.
     sleep_type = record.get("type")
+    # A tombstoned session is not sleep; drop it rather than ingest phantom
+    # vitals for a night the user deleted.
+    if isinstance(sleep_type, str) and sleep_type == DELETED_SLEEP_TYPE:
+        return None
+
+    # Naps do not carry overnight vitals; skip them explicitly. Oura's real
+    # vocabulary has no bare `nap` value — the nap-ish types are `late_nap` and
+    # `rest`, and only `long_sleep` is a principal session — so anything other
+    # than `long_sleep` is treated as a nap, mirroring the sleep normalizer.
+    # Matching a literal `"nap"` here would have let every typed record skip the
+    # duration check and be ingested as overnight vitals.
     span_min = (end - start).total_seconds() / 60.0
-    is_nap = sleep_type == "nap" if isinstance(sleep_type, str) else span_min <= NAP_MAX_MINUTES
+    if isinstance(sleep_type, str) and sleep_type:
+        is_nap = sleep_type != PRINCIPAL_SLEEP_TYPE
+    else:
+        is_nap = span_min <= NAP_MAX_MINUTES
     if is_nap:
         return None
 
