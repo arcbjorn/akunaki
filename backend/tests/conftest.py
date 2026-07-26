@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Generator, Iterator
 from pathlib import Path
 
@@ -20,6 +21,27 @@ from akunaki.config import Settings, clear_settings_cache
 
 def _backend_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+    """Keep the suite independent of the developer's local environment.
+
+    ``Settings`` reads ``backend/.env`` and every ``AKUNAKI_*`` variable, so a
+    real local config (connector credentials, a KEK, a database URL) would leak
+    into tests that assert defaults — passing or failing depending on whose
+    machine ran them. Anchoring the env-file at an empty temp path and clearing
+    the prefix makes each test start from documented defaults; tests that need
+    a value still set it explicitly via monkeypatch.
+    """
+    for key in list(os.environ):
+        if key.startswith("AKUNAKI_"):
+            monkeypatch.delenv(key, raising=False)
+    # Point pydantic-settings at a path that does not exist, so no .env is read.
+    monkeypatch.chdir(tmp_path)
+    clear_settings_cache()
+    yield
+    clear_settings_cache()
 
 
 def head_revision() -> str:
