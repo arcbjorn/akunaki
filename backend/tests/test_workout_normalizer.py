@@ -55,14 +55,16 @@ def test_fact_key_and_entity_type() -> None:
 
 
 def test_numeric_seconds_zone_durations() -> None:
+    # AccessLink documents ISO-8601 `in-zone`, but the parser also accepts a
+    # numeric seconds value, so a vendor sending raw seconds still normalizes.
     record = _record(
-        heart_rate_zones={
-            "zone1": 600,
-            "zone2": 1200,
-            "zone3": 1800,
-            "zone4": 300,
-            "zone5": 120,
-        }
+        heart_rate_zones=[
+            {"index": 1, "in-zone": 600},
+            {"index": 2, "in-zone": 1200},
+            {"index": 3, "in-zone": 1800},
+            {"index": 4, "in-zone": 300},
+            {"index": 5, "in-zone": 120},
+        ]
     )
     fact = normalize_workout_payload(_page(record))[0]
     assert fact.session_load == pytest.approx(170.0)  # same minutes as the ISO case
@@ -72,10 +74,10 @@ def test_incomplete_zones_are_skipped() -> None:
     # Only four zones -> not a usable record.
     record = _record(
         heart_rate_zones=[
-            {"index": 1, "in_zone": "PT10M"},
-            {"index": 2, "in_zone": "PT20M"},
-            {"index": 3, "in_zone": "PT30M"},
-            {"index": 4, "in_zone": "PT5M"},
+            {"index": 1, "in-zone": "PT10M"},
+            {"index": 2, "in-zone": "PT20M"},
+            {"index": 3, "in-zone": "PT30M"},
+            {"index": 4, "in-zone": "PT5M"},
         ]
     )
     assert normalize_workout_payload(_page(record)) == []
@@ -95,11 +97,11 @@ def test_deterministic_and_hash_tracks_load() -> None:
         _page(
             _record(
                 heart_rate_zones=[
-                    {"index": 1, "in_zone": "PT10M"},
-                    {"index": 2, "in_zone": "PT20M"},
-                    {"index": 3, "in_zone": "PT30M"},
-                    {"index": 4, "in_zone": "PT30M"},
-                    {"index": 5, "in_zone": "PT2M"},
+                    {"index": 1, "in-zone": "PT10M"},
+                    {"index": 2, "in-zone": "PT20M"},
+                    {"index": 3, "in-zone": "PT30M"},
+                    {"index": 4, "in-zone": "PT30M"},
+                    {"index": 5, "in-zone": "PT2M"},
                 ]
             )
         )
@@ -117,19 +119,38 @@ def test_no_records_raises() -> None:
         normalize_workout_payload(json.dumps({"meta": {}}))
 
 
-def test_bare_list_payload_is_accepted() -> None:
-    facts = normalize_workout_payload(json.dumps([_record()]))
-    assert len(facts) == 1
+def test_single_record_slice_is_accepted() -> None:
+    """`split_page` stores one exercise per revision, so a bare object parses.
+
+    This is the shape the normalize handler actually passes in production.
+    """
+    [fact] = normalize_workout_payload(json.dumps(_record()))
+    assert fact.session_load == pytest.approx(170.0)
 
 
-def test_underscore_field_forms_still_parse() -> None:
-    """Legacy `start_time`/`in_zone` forms remain accepted alongside hyphens."""
+def test_unknown_envelopes_are_rejected() -> None:
+    """Shapes nothing in-tree produces fail loudly rather than being guessed at.
+
+    A bare list and a `{"data": [...]}` envelope are neither what AccessLink
+    returns nor what the fetch client or record splitter emit.
+    """
+    with pytest.raises(NormalizationError, match="exercise object or an exercises page"):
+        normalize_workout_payload(json.dumps([_record()]))
+    with pytest.raises(NormalizationError, match="no exercise records"):
+        normalize_workout_payload(json.dumps({"data": [_record()]}))
+
+
+def test_underscore_field_forms_are_not_accepted() -> None:
+    """`start_time`/`in_zone` belong to the non-transactional `/v3/exercises`.
+
+    This connector drives the transactional lifecycle, whose `exercise` schema
+    is hyphenated throughout. Accepting the underscore spelling would mean
+    guessing at a surface we do not call, so a record using it is unusable.
+    """
     record = {
-        "id": "ex-legacy",
+        "id": "ex-underscore",
         "start_time": "2026-07-22T06:00:00+02:00",
         "duration": "PT1H",
         "heart_rate_zones": [{"index": i, "in_zone": "PT10M"} for i in range(1, 6)],
     }
-    fact = normalize_workout_payload(_page(record))[0]
-    # 10*1 + 10*2 + 10*3 + 10*4 + 10*5 = 150.
-    assert fact.session_load == pytest.approx(150.0)
+    assert normalize_workout_payload(_page(record)) == []

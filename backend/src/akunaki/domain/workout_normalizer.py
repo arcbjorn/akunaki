@@ -70,14 +70,18 @@ def normalize_workout_payload(payload_text: str) -> list[WorkoutFact]:
         msg = "payload is not valid json"
         raise NormalizationError(msg) from exc
 
-    if isinstance(parsed, list):
-        records = parsed
-    elif isinstance(parsed, dict) and isinstance(parsed.get("exercises"), list):
-        # The fetch client assembles a transaction into {"exercises": [...]}.
+    # Two shapes reach this normalizer, both produced in-tree:
+    #   * one bare exercise object — the per-record slice `split_page` stores as
+    #     a revision, which is what the normalize handler actually passes;
+    #   * the whole `{"exercises": [...]}` page the fetch client assembles,
+    #     used when normalizing a page directly.
+    # Anything else is an upstream bug rather than a payload to guess at.
+    if not isinstance(parsed, dict):
+        msg = "payload must be an exercise object or an exercises page"
+        raise NormalizationError(msg)
+    if isinstance(parsed.get("exercises"), list):
         records = parsed["exercises"]
-    elif isinstance(parsed, dict) and isinstance(parsed.get("data"), list):
-        records = parsed["data"]
-    elif isinstance(parsed, dict) and ("start_time" in parsed or "start-time" in parsed):
+    elif "start-time" in parsed:
         records = [parsed]
     else:
         msg = "payload has no exercise records"
@@ -96,7 +100,11 @@ def normalize_workout_payload(payload_text: str) -> list[WorkoutFact]:
 def _normalize_record(record: dict[str, Any]) -> WorkoutFact | None:
     """Normalize one Polar exercise record, or None when unusable."""
     vendor_id = record.get("id")
-    start_text = record.get("start_time") or record.get("start-time")
+    # AccessLink's transactional `exercise` schema is hyphenated throughout
+    # (`start-time`, `upload-time`, `heart-rate`); the underscore spelling
+    # belongs to the non-transactional `/v3/exercises` surface, which this
+    # connector does not use.
+    start_text = record.get("start-time")
     if not isinstance(vendor_id, str) or not vendor_id:
         return None
     if not isinstance(start_text, str):
@@ -107,7 +115,9 @@ def _normalize_record(record: dict[str, Any]) -> WorkoutFact | None:
     except ValueError:
         return None
 
-    zones = _zone_minutes(record.get("heart_rate_zones") or record.get("zones"))
+    # `heart_rate_zones` is inlined by the fetch client (step 3 of the
+    # transaction drain), not a vendor field on the exercise summary itself.
+    zones = _zone_minutes(record.get("heart_rate_zones"))
     if zones is None:
         return None
     load = session_load(zones)
@@ -139,24 +149,19 @@ def _normalize_record(record: dict[str, Any]) -> WorkoutFact | None:
 def _zone_minutes(raw: object) -> ZoneMinutes | None:
     """Parse the five HR-zone durations (minutes), or None when incomplete.
 
-    Accepts a list of five zone objects each with an ``in_zone`` duration, or a
-    mapping ``{"zone1": min, ...}``. All five must be present and in range.
+    The vendor's ``zone`` array: five objects, each with an ISO-8601 ``in-zone``
+    duration. All five must be present and in range — a partial set is dropped
+    rather than zero-filled, since a missing zone is unknown, not zero.
     """
-    values: list[float] = []
-    if isinstance(raw, list) and len(raw) == 5:
-        for entry in raw:
-            minutes = _zone_entry_minutes(entry)
-            if minutes is None:
-                return None
-            values.append(minutes)
-    elif isinstance(raw, dict):
-        for key in ("zone1", "zone2", "zone3", "zone4", "zone5"):
-            minutes = _duration_minutes(raw.get(key))
-            if minutes is None:
-                return None
-            values.append(minutes)
-    else:
+    if not isinstance(raw, list) or len(raw) != 5:
         return None
+
+    values: list[float] = []
+    for entry in raw:
+        minutes = _zone_entry_minutes(entry)
+        if minutes is None:
+            return None
+        values.append(minutes)
 
     if any(not 0.0 <= v <= _MAX_ZONE_MINUTES for v in values):
         return None
@@ -164,13 +169,10 @@ def _zone_minutes(raw: object) -> ZoneMinutes | None:
 
 
 def _zone_entry_minutes(entry: object) -> float | None:
-    """Minutes in one zone. Polar names the field ``in-zone``; accept both forms."""
+    """Minutes in one zone, from the vendor's hyphenated ``in-zone`` field."""
     if not isinstance(entry, dict):
         return None
-    raw = entry.get("in-zone")
-    if raw is None:
-        raw = entry.get("in_zone")
-    return _duration_minutes(raw)
+    return _duration_minutes(entry.get("in-zone"))
 
 
 def _duration_minutes(value: object) -> float | None:

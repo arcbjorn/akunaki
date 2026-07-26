@@ -19,17 +19,17 @@ T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
 
 _WORKOUT_PAGE = json.dumps(
     {
-        "data": [
+        "exercises": [
             {
                 "id": "ex-1",
-                "start_time": "2026-07-22T06:00:00+02:00",
+                "start-time": "2026-07-22T06:00:00+02:00",
                 "duration": "PT1H",
                 "heart_rate_zones": [
-                    {"index": 1, "in_zone": "PT10M"},
-                    {"index": 2, "in_zone": "PT20M"},
-                    {"index": 3, "in_zone": "PT30M"},
-                    {"index": 4, "in_zone": "PT5M"},
-                    {"index": 5, "in_zone": "PT2M"},
+                    {"index": 1, "in-zone": "PT10M"},
+                    {"index": 2, "in-zone": "PT20M"},
+                    {"index": 3, "in-zone": "PT30M"},
+                    {"index": 4, "in-zone": "PT5M"},
+                    {"index": 5, "in-zone": "PT2M"},
                 ],
             }
         ]
