@@ -252,7 +252,9 @@ def test_min_window_widens_a_too_narrow_resume(factory: sessionmaker[Session]) -
         connections=ConnectionRepository(factory),
         sealer=EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1"),
         new_id=lambda: next(ids),
-        config=SyncConfig(max_pages=5),
+        # Production wires both handlers from one `sync_config_for_provider`
+        # result, so the backfill carries the same floor as the incremental.
+        config=SyncConfig(max_pages=5, min_window=timedelta(days=14)),
         clock=lambda: T0,
     )
     handler = IncrementalSyncHandler(

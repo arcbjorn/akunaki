@@ -250,7 +250,14 @@ class InitialSyncHandler:
         The shared page loop for both initial backfill and incremental sync:
         only the caller's ``window_start`` differs. Raises on a fetch failure
         (mapped to the runtime's retry vocabulary).
+
+        A window narrower than the provider's minimum is widened backwards here
+        — the one place every sync path passes through — so neither a short
+        ``lookback_days`` nor a fresh cursor can produce a request the vendor
+        refuses outright. The re-read days dedupe on content hash downstream,
+        so widening costs vendor calls but never duplicate revisions.
         """
+        window_start = self._widen_to_min_window(window_start, window_end=window_end)
         access_token = self._open_access_token(connection_id)
         pages = 0
         new_revisions = 0
@@ -308,6 +315,17 @@ class InitialSyncHandler:
                 break
 
         return new_revisions
+
+    def _widen_to_min_window(self, window_start: datetime, *, window_end: datetime) -> datetime:
+        """Widen a too-narrow window backwards to the provider's floor.
+
+        Measured against ``window_end`` rather than the wall clock, so the
+        widened span is exactly the window the vendor is asked for.
+        """
+        min_window = self._config.min_window
+        if min_window <= timedelta(0):
+            return window_start
+        return min(window_start, window_end - min_window)
 
     def _open_access_token(self, connection_id: str) -> str:
         """Open the sealed tokens for a connection, or fail permanently."""
@@ -410,12 +428,16 @@ class IncrementalSyncHandler:
         )
 
     def _window_start(self, *, connection_id: str, now: datetime) -> datetime:
-        """Where to resume: the last cursor minus overlap, or a lookback."""
+        """Where to resume: the last cursor minus overlap, or a lookback.
+
+        The vendor's minimum-window floor is applied downstream in
+        ``sync_window``, so every path through this method is covered.
+        """
         cursor = self._cursors.get_cursor(connection_id=connection_id, stream=self._config.stream)
         lookback_start = now - timedelta(days=self._config.lookback_days) - self._config.overlap
         if cursor is None:
             # No prior sync for this stream: behave like an initial backfill.
-            return self._widen_to_min_window(lookback_start, now=now)
+            return lookback_start
         try:
             resumed = parse_utc_rfc3339(cursor) - self._config.overlap
         except ValueError:
@@ -425,22 +447,9 @@ class IncrementalSyncHandler:
                 "incremental sync ignoring malformed cursor",
                 extra={"connection_id": connection_id},
             )
-            return self._widen_to_min_window(lookback_start, now=now)
+            return lookback_start
         # Never resume before the lookback horizon (guards a stale cursor).
-        return self._widen_to_min_window(max(resumed, lookback_start), now=now)
-
-    def _widen_to_min_window(self, window_start: datetime, *, now: datetime) -> datetime:
-        """Widen a too-narrow window backwards to the provider's floor.
-
-        A fresh cursor makes the resumed window only hours wide, which a vendor
-        with a minimum range (Google Health: 14 days) rejects outright. Widening
-        backwards re-reads already-seen days; the ingestion layer dedupes them on
-        content hash, so this costs vendor calls but never duplicate revisions.
-        """
-        min_window = self._config.min_window
-        if min_window <= timedelta(0):
-            return window_start
-        return min(window_start, now - min_window)
+        return max(resumed, lookback_start)
 
 
 class ConnectionProviderSource(Protocol):

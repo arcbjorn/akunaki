@@ -12,6 +12,7 @@ import json
 from collections.abc import Callable, Generator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import httpx2
 import pytest
@@ -195,6 +196,34 @@ def test_sync_persists_transport_revision_and_cursor(
     assert len(revisions) == 1
     assert revisions[0].revision_n == 1
     assert cursor.stream == "sleep"
+
+
+def test_min_window_widens_a_short_initial_lookback(factory: sessionmaker[Session]) -> None:
+    """A backfill narrower than the vendor floor is widened, not sent as-is.
+
+    `lookback_days` is a public knob on `sync_config_for_provider`, so a caller
+    can ask for a 3-day backfill — under Google Health's 14-day minimum, which
+    the vendor rejects outright. The floor is enforced in the shared page loop
+    so the initial path is covered too, not only the incremental resume.
+    """
+    captured: list[str] = []
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        captured.append(str(request.url))
+        return httpx2.Response(200, text=PAGE_ONE, headers={"content-type": "application/json"})
+
+    _run_job(
+        factory,
+        _handler(
+            factory,
+            responder,
+            config=SyncConfig(max_pages=5, lookback_days=3, min_window=timedelta(days=14)),
+        ),
+    )
+
+    start_date = parse_qs(urlparse(captured[0]).query)["start_date"][0]
+    # 14 days back from `now`, not the 3-day lookback the caller asked for.
+    assert start_date == (T0 - timedelta(days=14)).date().isoformat()
 
 
 def test_empty_backfill_warns_about_scopes(
