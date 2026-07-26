@@ -74,22 +74,34 @@ def test_only_rhr_present_is_medium_quality() -> None:
     assert facts[0].quality == "medium"
 
 
-def test_flat_temperature_deviation_is_extracted() -> None:
-    facts = normalize_vitals_payload(_page(_record(temperature_deviation=-0.3)))
-    assert facts[0].temperature_deviation_c == pytest.approx(-0.3)
+def test_nested_readiness_temperature_is_extracted() -> None:
+    facts = normalize_vitals_payload(_page(_record(readiness={"temperature_deviation": 0.42})))
+    assert facts[0].temperature_deviation_c == pytest.approx(0.42)
     # HRV, RHR, and temp all present -> high quality.
     assert facts[0].quality == "high"
 
 
-def test_nested_readiness_temperature_is_extracted() -> None:
-    facts = normalize_vitals_payload(_page(_record(readiness={"temperature_deviation": 0.42})))
-    assert facts[0].temperature_deviation_c == pytest.approx(0.42)
+def test_flat_temperature_deviation_is_ignored() -> None:
+    """Oura's sleep model has no flat `temperature_deviation`.
+
+    It exists only under `readiness` (verified against the v2 OpenAPI spec and
+    real payloads), so a flat field is not a shape this normalizer invents
+    support for — reading it would mean trusting a key the vendor never sends.
+    """
+    facts = normalize_vitals_payload(_page(_record(temperature_deviation=-0.3)))
+    assert facts[0].temperature_deviation_c is None
 
 
 def test_temperature_only_record_is_kept() -> None:
     # No HRV/RHR but a temperature reading: still a valid vitals fact.
     facts = normalize_vitals_payload(
-        _page(_record(average_hrv=None, lowest_heart_rate=None, temperature_deviation=-0.5))
+        _page(
+            _record(
+                average_hrv=None,
+                lowest_heart_rate=None,
+                readiness={"temperature_deviation": -0.5},
+            )
+        )
     )
     assert len(facts) == 1
     assert facts[0].temperature_deviation_c == pytest.approx(-0.5)
@@ -98,7 +110,7 @@ def test_temperature_only_record_is_kept() -> None:
 
 
 def test_out_of_range_temperature_is_dropped() -> None:
-    facts = normalize_vitals_payload(_page(_record(temperature_deviation=99.0)))
+    facts = normalize_vitals_payload(_page(_record(readiness={"temperature_deviation": 99.0})))
     assert facts[0].temperature_deviation_c is None
     # HRV and RHR remain.
     assert facts[0].hrv_ms == 62.0

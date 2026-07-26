@@ -5,8 +5,8 @@ Pure: no I/O, no clock. Every timestamp comes from the payload, never
 
 Overnight HRV (RMSSD ms), resting heart rate (bpm), temperature deviation (°C),
 and respiration rate (breaths/min) ride along on Oura's main sleep record
-(``average_hrv``, ``lowest_heart_rate``, ``temperature_deviation`` /
-``readiness.temperature_deviation``, ``average_breath``). They are extracted
+(``average_hrv``, ``lowest_heart_rate``, ``readiness.temperature_deviation``,
+``average_breath``). They are extracted
 into their own canonical entity, keyed to the **wake date** exactly as the
 sleep session is, so a night's vitals and its sleep share a local health day.
 
@@ -198,14 +198,12 @@ def _normalize_record(record: dict[str, Any]) -> VitalsFact | None:
 
 
 def _temperature_deviation(record: dict[str, Any]) -> object:
-    """Read the temperature deviation from either the flat or nested field.
+    """Read the temperature deviation from the nested ``readiness`` object.
 
-    Oura reports it under ``readiness.temperature_deviation`` on the daily
-    readiness object, but a per-record slice may carry it flat.
+    Oura's sleep model carries no flat ``temperature_deviation``; it lives only
+    under ``readiness`` (confirmed against the v2 OpenAPI spec and real
+    payloads), so that is the single place it is read from.
     """
-    flat = record.get("temperature_deviation")
-    if flat is not None:
-        return flat
     readiness = record.get("readiness")
     if isinstance(readiness, dict):
         return readiness.get("temperature_deviation")
