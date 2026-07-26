@@ -17,22 +17,20 @@ from akunaki.ports.facts import RevisionBody
 
 T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
 
+# One `exerciseHashId` record, as `split_page` stores it per revision.
 _WORKOUT_PAGE = json.dumps(
     {
-        "exercises": [
-            {
-                "id": "ex-1",
-                "start-time": "2026-07-22T06:00:00+02:00",
-                "duration": "PT1H",
-                "heart_rate_zones": [
-                    {"index": 1, "in-zone": "PT10M"},
-                    {"index": 2, "in-zone": "PT20M"},
-                    {"index": 3, "in-zone": "PT30M"},
-                    {"index": 4, "in-zone": "PT5M"},
-                    {"index": 5, "in-zone": "PT2M"},
-                ],
-            }
-        ]
+        "id": "ex-1",
+        "start_time": "2026-07-22T06:00:00",
+        "start_time_utc_offset": 120,
+        "duration": "PT1H",
+        "heart_rate_zones": [
+            {"index": 1, "in-zone": "PT10M"},
+            {"index": 2, "in-zone": "PT20M"},
+            {"index": 3, "in-zone": "PT30M"},
+            {"index": 4, "in-zone": "PT5M"},
+            {"index": 5, "in-zone": "PT2M"},
+        ],
     }
 )
 
