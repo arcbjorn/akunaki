@@ -392,6 +392,13 @@ class IncrementalSyncHandler:
     On the **first** incremental run (no cursor yet) it degrades to the same
     lookback backfill as an initial sync, so a connection can be scheduled for
     incremental sync without a separate first-run path.
+
+    The computed window is a *request* to the connector, not a guarantee: a
+    provider whose resource takes no date filter (Polar's ``/v3/exercises``
+    returns its own 30-day retention set) validates the bounds but ignores
+    them, so every run re-reads the same records. That is safe rather than
+    wasteful-only-in-theory: content-hash dedupe makes the repeat a no-op, and
+    it is why a narrowing cursor can never cause such a provider to miss data.
     """
 
     def __init__(
