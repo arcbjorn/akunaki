@@ -91,6 +91,9 @@ ignore = [
 "tests/**" = ["S101", "S105", "S106"]
 "src/akunaki/api/__main__.py" = ["T20"]
 "src/akunaki/worker/__main__.py" = ["T20"]
+# Local dev utilities, not shipped in the package: printing to the terminal is
+# their whole interface, and they intentionally import inside functions.
+"scripts/**" = ["T20", "PLC0415"]
 # Migration scripts are generated-shaped and frozen once applied: they are
 # rewritten only by a new revision, never reformatted in place. E501 spares the
 # long generated CheckConstraint lines; S608 covers the interpolation of
