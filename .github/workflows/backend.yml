@@ -47,13 +47,13 @@ jobs:
         run: uv lock --check
 
       - name: Ruff lint
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts
 
       - name: Ruff format
-        run: uv run ruff format --check src tests
+        run: uv run ruff format --check src tests scripts
 
       - name: Type check
-        run: uv run mypy
+        run: uv run mypy && uv run mypy scripts
 
       - name: Architecture contracts
         run: uv run lint-imports
