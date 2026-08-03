@@ -180,7 +180,10 @@ class JobRepositoryPort(Protocol):
     ) -> bool:
         """Return True when job is leased, owner/fence match, and lease is unexpired.
 
-        Lease validity primitive only. Atomic domain side-effect fencing will be
-        integrated with the later application unit of work and is not yet claimed.
+        Lease validity primitive only: it answers "valid **now**", so a caller
+        that checks and then writes leaves a window in which the lease expires
+        and the write still lands. To fence a domain side effect, use
+        :class:`akunaki.ports.unit_of_work.FencedUnitOfWorkPort`, which performs
+        the same check *inside* the transaction carrying the writes.
         """
         ...
