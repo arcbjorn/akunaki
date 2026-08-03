@@ -106,6 +106,11 @@ class DerivationRepository:
                     created_at=now_s,
                 )
             )
+            # The run row must reach the DB before its inputs: there is no ORM
+            # relationship between them, so SQLAlchemy cannot infer the insert
+            # order and would otherwise batch the children first, failing the
+            # ``derivation_run_id`` foreign key.
+            session.flush()
             for spec in inputs:
                 session.add(
                     DerivationInput(
