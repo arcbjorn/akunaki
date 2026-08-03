@@ -142,9 +142,16 @@ class DerivationRepository:
             ).scalar_one_or_none()
             if run is None:
                 return None
+            # Distinct roles only. A run stores one input row per contributing
+            # fact, so a role backed by several facts would otherwise repeat —
+            # and since ids are deliberately withheld, that repetition would
+            # disclose how many facts a day held, which the roles-only contract
+            # exists to avoid.
             input_rows = (
                 session.execute(
-                    select(DerivationInput.role).where(DerivationInput.derivation_run_id == run.id)
+                    select(DerivationInput.role)
+                    .where(DerivationInput.derivation_run_id == run.id)
+                    .distinct()
                 )
                 .scalars()
                 .all()
