@@ -37,6 +37,7 @@ from akunaki.domain.retry import (
 )
 from akunaki.domain.schedule import ScheduleSpec, due_schedules
 from akunaki.ports.jobs import JobRepositoryPort
+from akunaki.ports.unit_of_work import LeaseLostError
 
 logger = logging.getLogger("akunaki.worker")
 
@@ -233,6 +234,20 @@ class JobWorker:
         heartbeat.start()
         try:
             handler(claim)
+        except LeaseLostError:
+            # The fenced unit of work rolled the side effect back because this
+            # worker no longer holds the lease. Another worker owns the job, so
+            # recording a failure here would burn *their* attempt budget under a
+            # fence we no longer hold. Report the loss and settle nothing — the
+            # rightful owner's execution is the one that counts.
+            heartbeat.stop()
+            self.stats.lease_lost += 1
+            JOBS_LEASE_LOST.inc()
+            logger.warning(
+                "lease lost during fenced side effect; not settling",
+                extra={"job_id": claim.job_id, "fence_token": claim.fence_token},
+            )
+            return
         except BaseException as exc:
             heartbeat.stop()
             kind = classify_exception(exc)

@@ -27,6 +27,7 @@ from akunaki.domain.jobs import (
 )
 from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.schedule import ScheduleSpec
+from akunaki.ports.unit_of_work import LeaseLostError
 
 NOW = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -318,6 +319,27 @@ def test_lease_lost_during_execution_skips_completion() -> None:
     assert worker.stats.lease_lost == 1
     assert worker.stats.succeeded == 0
     assert repo.completed == []
+
+
+def test_fenced_lease_loss_settles_nothing() -> None:
+    # A LeaseLostError means the fenced unit of work already rolled the side
+    # effect back and another worker owns the job. Recording a failure here
+    # would burn *their* attempt budget under a fence we no longer hold, so the
+    # runtime must settle nothing at all — neither completion nor failure.
+    repo = FakeRepository(claims=[make_claim("fenced")])
+    registry = HandlerRegistry(
+        {"fenced": _raise(LeaseLostError(job_id="job-1", fence_token=7))},
+    )
+    worker = make_worker(repo, registry=registry)
+
+    worker.run_once()
+
+    assert worker.stats.lease_lost == 1
+    assert worker.stats.succeeded == 0
+    assert worker.stats.retried == 0
+    assert worker.stats.dead_lettered == 0
+    assert repo.completed == []
+    assert repo.failures == []
 
 
 def test_fence_rejected_failure_records_lease_loss() -> None:
