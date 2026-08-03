@@ -19,16 +19,21 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.anomaly_repository import AnomalyRepository
 from akunaki.adapters.db.checkin_repository import CheckInRepository
+from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.api.app import get_session_factory
 from akunaki.api.security import CurrentSession
+from akunaki.application.anomalies_surface import AnomaliesSurfaceService
+from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.application.recovery_surface import RecoverySurfaceService, ServedRecoveryService
 from akunaki.application.sleep_surface import SleepSurfaceService
 from akunaki.application.today_surface import TodaySurfaceService
 from akunaki.application.tool_registry import ToolContext, ToolNotFoundError, ToolRegistry
+from akunaki.application.tools.connections import register_connection_tools
 from akunaki.application.tools.health import register_health_tools
+from akunaki.application.workouts_surface import WorkoutsSurfaceService
 
 router = APIRouter(prefix="/v1/tools", tags=["tools"])
 
@@ -75,6 +80,12 @@ def _registry(
         recovery=served,
         sleep=SleepSurfaceService(durations=facts),
         today=today,
+        anomalies=AnomaliesSurfaceService(anomalies=AnomalyRepository(session_factory)),
+        workouts=WorkoutsSurfaceService(workouts=facts),
+    )
+    register_connection_tools(
+        registry,
+        connections=ConnectionsSurfaceService(connections=ConnectionRepository(session_factory)),
     )
     return registry
 
@@ -128,4 +139,9 @@ def invoke_tool(
         raise HTTPException(
             status_code=422, detail={"code": "invalid_tool_input", "message": str(exc)}
         ) from exc
+    except LookupError as exc:
+        # The tool ran but its subject does not exist for this tenant. The
+        # message is generic on purpose: unknown and cross-tenant must be
+        # indistinguishable, so an id cannot be probed through a tool either.
+        raise HTTPException(status_code=404, detail={"code": "not_found"}) from exc
     return result.model_dump()

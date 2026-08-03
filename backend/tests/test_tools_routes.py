@@ -17,13 +17,17 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.db.anomaly_repository import AnomalyRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
+from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.models import FactRecord, SleepSession, Tenant, User
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
 from akunaki.config import Settings, clear_settings_cache
+from akunaki.domain.anomalies import AnomalySeverity
 from akunaki.domain.jobs import to_utc_rfc3339
+from akunaki.domain.workout_normalizer import WorkoutFact
 
 T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -215,3 +219,161 @@ def test_invoke_today_tool(client: TestClient, factory: sessionmaker[Session]) -
     # A sleep-only tenant: recovery insufficient -> training label insufficient.
     assert body["training_label"] == "insufficient"
     assert body["ruleset_version"] == "training_label_v0.1.0"
+
+
+# ---------------------------------------------------------------------------
+# Canonical registry: anomalies, workouts, connections
+# ---------------------------------------------------------------------------
+
+
+def _seed_workout(factory: sessionmaker[Session], *, workout_id: str, start_hour: int) -> None:
+    FactRepository(factory).write_workout_fact(
+        fact_record_id=workout_id,
+        tenant_id="tenant-1",
+        connection_id=None,
+        fact=WorkoutFact(
+            vendor_record_id=workout_id,
+            start_utc=f"{DAY}T{start_hour:02d}:00:00Z",
+            end_utc=f"{DAY}T{start_hour + 1:02d}:00:00Z",
+            local_health_day=DAY,
+            source_offset_minutes=0,
+            session_load=120.0,
+            zone1_min=10.0,
+            zone2_min=20.0,
+            zone3_min=15.0,
+            zone4_min=5.0,
+            zone5_min=0.0,
+            quality="high",
+            confidence=1.0,
+            content_hash=workout_id,
+        ),
+        raw_revision_id=None,
+        raw_payload_id=None,
+        schema_version="polar.v1",
+        now=T0,
+    )
+
+
+def test_lists_the_canonical_read_tools(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """The registry names the read tools the canonical catalog specifies."""
+    _login(client, factory)
+    names = {t["name"] for t in client.get("/v1/tools").json()["tools"]}
+
+    assert {
+        "health.find_anomalies",
+        "health.get_recent_workouts",
+        "health.get_workout",
+        "connections.list",
+    } <= names
+
+
+def test_connections_tool_is_not_scoped_as_health(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Connection metadata is not health data; the scope must not over-grant."""
+    _login(client, factory)
+    tools = client.get("/v1/tools").json()["tools"]
+    connections = next(t for t in tools if t["name"] == "connections.list")
+
+    assert connections["scopes"] == ["read:connections"]
+    assert connections["sensitivity"] == "low"
+    assert connections["side_effect"] == "none"
+
+
+def test_no_mutating_tool_is_registered(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """Only read tools ship: agent-mutation confirmation does not exist yet.
+
+    Registering ``connections.sync`` or ``privacy.delete`` before the one-time
+    expiring confirmation machinery exists would make a mutation invocable on
+    the honour system.
+    """
+    _login(client, factory)
+    tools = client.get("/v1/tools").json()["tools"]
+
+    assert all(t["side_effect"] == "none" for t in tools)
+    names = {t["name"] for t in tools}
+    assert "connections.sync" not in names
+    assert "privacy.delete" not in names
+
+
+def test_invoke_find_anomalies(client: TestClient, factory: sessionmaker[Session]) -> None:
+    AnomalyRepository(factory).open_interval(
+        anomaly_id="an-1",
+        tenant_id="tenant-1",
+        feature_code="low_hrv",
+        severity=AnomalySeverity.HIGH,
+        z_like=-3.0,
+        formula_version="general_recovery_v0.1.0",
+        local_health_day=DAY,
+        now=T0,
+    )
+    csrf = _login(client, factory)
+
+    body = client.post(
+        "/v1/tools/health.find_anomalies",
+        json={"input": {"day": DAY}},
+        headers={CSRF_HEADER_NAME: csrf},
+    ).json()
+
+    assert [a["feature_code"] for a in body["anomalies"]] == ["low_hrv"]
+    # The detector's internal z stays out of a model's context.
+    assert "z_like" not in body["anomalies"][0]
+
+
+def test_invoke_get_recent_workouts(client: TestClient, factory: sessionmaker[Session]) -> None:
+    _seed_workout(factory, workout_id="w1", start_hour=6)
+    _seed_workout(factory, workout_id="w2", start_hour=18)
+    csrf = _login(client, factory)
+
+    body = client.post(
+        "/v1/tools/health.get_recent_workouts",
+        json={"input": {"limit": 1}},
+        headers={CSRF_HEADER_NAME: csrf},
+    ).json()
+
+    assert [w["workout_id"] for w in body["workouts"]] == ["w2"]
+    assert body["next_cursor"] is not None
+    assert body["workouts"][0]["total_zone_min"] == 50.0
+
+
+def test_invoke_get_workout(client: TestClient, factory: sessionmaker[Session]) -> None:
+    _seed_workout(factory, workout_id="w1", start_hour=6)
+    csrf = _login(client, factory)
+
+    body = client.post(
+        "/v1/tools/health.get_workout",
+        json={"input": {"workout_id": "w1"}},
+        headers={CSRF_HEADER_NAME: csrf},
+    ).json()
+
+    assert body["workout_id"] == "w1"
+    assert body["session_load"] == 120.0
+
+
+def test_unknown_workout_through_a_tool_is_404(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A tool must not become a way to probe ids for existence."""
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/tools/health.get_workout",
+        json={"input": {"workout_id": "nope"}},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {"code": "not_found"}
+
+
+def test_invoke_connections_list(client: TestClient, factory: sessionmaker[Session]) -> None:
+    csrf = _login(client, factory)
+
+    body = client.post(
+        "/v1/tools/connections.list",
+        json={"input": {}},
+        headers={CSRF_HEADER_NAME: csrf},
+    ).json()
+
+    # No connector linked in this fixture: an empty list, not an error.
+    assert body == {"connections": []}
