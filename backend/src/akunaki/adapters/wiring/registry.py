@@ -34,6 +34,7 @@ from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.ingestion_repository import IngestionRepository, RevisionReader
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.score_repository import ScoreRepository
+from akunaki.adapters.db.unit_of_work import FencedUnitOfWork
 from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.recovery_inputs import RecoveryInputService
@@ -117,6 +118,7 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
         tracker=AnomalyTracker(store=AnomalyRepository(session_factory), new_id=_new_id),
         derivations=DerivationRepository(session_factory),
         generate_token=generate_provenance_token,
+        unit_of_work=FencedUnitOfWork(session_factory),
     )
     reconcile = ReconcileSweepHandler(
         connections=connections,

@@ -18,13 +18,14 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.application.recovery_surface import RecoverySurface, RecoverySurfaceService
 from akunaki.domain.jobs import SCORE_RECOMPUTE_JOB_TYPE, JobClaim
 from akunaki.domain.retry import PermanentJobError
+from akunaki.ports.unit_of_work import FencedUnitOfWorkPort
 
 logger = logging.getLogger("akunaki.score_handlers")
 
@@ -67,8 +68,15 @@ class ScoreWriterPort(Protocol):
         as_of_at: datetime | None,
         now: datetime,
         derivation_run_id: str | None = ...,
+        session: Any = ...,
     ) -> ScoreWriteOutcomeLike:
-        """Write the recovery score, superseding any differing current row."""
+        """Write the recovery score, superseding any differing current row.
+
+        ``session`` enlists the write in a caller's transaction. It is typed
+        loosely here on purpose: ``application`` must not import SQLAlchemy, so
+        the handler only ever forwards the opaque handle the unit of work
+        gave it.
+        """
         ...
 
 
@@ -125,6 +133,7 @@ class ScoreRecomputeHandler:
         tracker: AnomalyTracker | None = None,
         derivations: DerivationWriterPort | None = None,
         generate_token: Callable[[], str] | None = None,
+        unit_of_work: FencedUnitOfWorkPort | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._recovery = recovery
@@ -134,18 +143,24 @@ class ScoreRecomputeHandler:
         self._tracker = tracker
         self._derivations = derivations
         self._generate_token = generate_token
+        self._unit_of_work = unit_of_work
         self._clock = clock
 
-    def __call__(self, claim: JobClaim) -> None:
-        """Execute one recompute job."""
-        local_health_day = _parse_recompute_payload(claim.payload_json)
-        now = self._clock()
+    def _persist(
+        self,
+        *,
+        claim: JobClaim,
+        local_health_day: str,
+        surface: RecoverySurface,
+        now: datetime,
+        session: Any,
+    ) -> ScoreWriteOutcomeLike:
+        """Record the derivation run, write the score, and advance anomalies.
 
-        surface = self._recovery.recovery_for_day(
-            tenant_id=claim.tenant_id,
-            local_health_day=local_health_day,
-        )
-
+        Every write here belongs to the same unit of work: when ``session`` is
+        supplied they commit or roll back together with the lease check that
+        authorized them.
+        """
         # Record a derivation run for the score when the writer is wired, so the
         # served value can be traced through an opaque provenance token. Typed
         # fact-id inputs are not threaded yet (the input service exposes roles,
@@ -179,6 +194,7 @@ class ScoreRecomputeHandler:
             as_of_at=now,
             now=now,
             derivation_run_id=run_id,
+            session=session,
         )
 
         # Detect and track anomalies for the day when both collaborators are
@@ -192,6 +208,43 @@ class ScoreRecomputeHandler:
                 tenant_id=claim.tenant_id,
                 local_health_day=local_health_day,
                 signals=signals,
+            )
+
+        return outcome
+
+    def __call__(self, claim: JobClaim) -> None:
+        """Execute one recompute job."""
+        local_health_day = _parse_recompute_payload(claim.payload_json)
+        now = self._clock()
+
+        surface = self._recovery.recovery_for_day(
+            tenant_id=claim.tenant_id,
+            local_health_day=local_health_day,
+        )
+
+        # The persist step is the job's side effect. When a fenced unit of work
+        # is wired it runs inside the transaction that re-checks the job lease,
+        # so a worker whose lease expired mid-compute cannot supersede the row
+        # the rightful owner wrote. Without one, it runs exactly as before.
+        if self._unit_of_work is not None:
+            outcome = self._unit_of_work.run_fenced(
+                claim,
+                lambda session: self._persist(
+                    claim=claim,
+                    local_health_day=local_health_day,
+                    surface=surface,
+                    now=now,
+                    session=session,
+                ),
+                now=now,
+            )
+        else:
+            outcome = self._persist(
+                claim=claim,
+                local_health_day=local_health_day,
+                surface=surface,
+                now=now,
+                session=None,
             )
 
         logger.info(

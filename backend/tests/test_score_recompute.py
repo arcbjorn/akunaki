@@ -35,6 +35,7 @@ from akunaki.adapters.db.models import (
     Tenant,
 )
 from akunaki.adapters.db.score_repository import ScoreRepository
+from akunaki.adapters.db.unit_of_work import FencedUnitOfWork
 from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.recovery_inputs import RecoveryInputService
@@ -45,7 +46,8 @@ from akunaki.application.score_handlers import (
 )
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import Settings, clear_settings_cache
-from akunaki.domain.jobs import JobStatus, to_utc_rfc3339
+from akunaki.domain.jobs import JobRole, JobStatus, to_utc_rfc3339
+from akunaki.ports.unit_of_work import LeaseLostError
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -266,6 +268,63 @@ def test_full_history_persists_a_real_score(factory: sessionmaker[Session]) -> N
     assert row.status != "insufficient"
     assert row.score is not None
     assert row.is_current == 1
+
+
+def test_stale_lease_writes_no_score(factory: sessionmaker[Session]) -> None:
+    """A worker whose lease expired mid-compute must persist nothing.
+
+    Without the fenced unit of work the handler's write lands anyway — it is
+    only the *completion* that the fence rejects — so a stale recompute could
+    supersede the current score. Here the whole side effect rolls back.
+    """
+    _seed_full_history(factory)
+
+    facts = FactRepository(factory)
+    inputs = RecoveryInputService(features=facts)
+    handler = ScoreRecomputeHandler(
+        recovery=RecoverySurfaceService(inputs=inputs),
+        scores=ScoreRepository(factory),
+        new_id=lambda: f"id-{next(_IDS)}",
+        inputs=inputs,
+        tracker=AnomalyTracker(
+            store=AnomalyRepository(factory),
+            new_id=lambda: f"an-{next(_IDS)}",
+            clock=lambda: T0,
+        ),
+        derivations=DerivationRepository(factory),
+        generate_token=lambda: f"opaque_tok_{next(_IDS)}",
+        unit_of_work=FencedUnitOfWork(factory),
+        clock=lambda: T0,
+    )
+
+    jobs = JobRepository(factory)
+    jobs.enqueue_job(
+        job_id="rc-stale",
+        tenant_id="tenant-1",
+        job_type=SCORE_RECOMPUTE_JOB_TYPE,
+        payload_json=f'{{"local_health_day":"{DAY}"}}',
+        now=T0,
+    )
+    lease_ttl = timedelta(seconds=60)
+    claim = jobs.claim_next(role=JobRole.CORE, owner="worker-1", lease_ttl=lease_ttl, now=T0)
+    assert claim is not None
+
+    # The lease expires and another worker takes the job over.
+    after_expiry = T0 + lease_ttl + timedelta(seconds=1)
+    jobs.requeue_expired_leases(now=after_expiry)
+    stolen = jobs.claim_next(
+        role=JobRole.CORE, owner="worker-2", lease_ttl=lease_ttl, now=after_expiry
+    )
+    assert stolen is not None
+    assert stolen.fence_token > claim.fence_token
+
+    # The original worker finishes computing and tries to persist.
+    with pytest.raises(LeaseLostError):
+        handler(claim)
+
+    with factory() as session:
+        assert session.scalars(select(DailyHealthScore)).all() == []
+        assert session.scalars(select(ScoreFactor)).all() == []
 
 
 def test_recompute_creates_traceable_derivation_run(
