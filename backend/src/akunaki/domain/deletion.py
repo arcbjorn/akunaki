@@ -75,6 +75,14 @@ class ScrubCounts:
     sync_runs: int = 0
     sync_cursors: int = 0
     facts: int = 0
+    # Derived health data. These tables arrived after the original scrub list
+    # and are removed by cascade from the tenant row; counting them keeps the
+    # proof from under-reporting what a deletion actually erased.
+    scores: int = 0
+    anomalies: int = 0
+    check_ins: int = 0
+    derivation_runs: int = 0
+    source_selections: int = 0
     jobs_cancelled: int = 0
 
     def as_dict(self) -> dict[str, int]:
@@ -89,6 +97,11 @@ class ScrubCounts:
             "sync_runs": self.sync_runs,
             "sync_cursors": self.sync_cursors,
             "facts": self.facts,
+            "scores": self.scores,
+            "anomalies": self.anomalies,
+            "check_ins": self.check_ins,
+            "derivation_runs": self.derivation_runs,
+            "source_selections": self.source_selections,
             "jobs_cancelled": self.jobs_cancelled,
         }
 

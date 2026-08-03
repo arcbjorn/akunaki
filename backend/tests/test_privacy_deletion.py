@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.crypto.envelope import KEY_BYTES, EnvelopeSealer
@@ -24,15 +24,19 @@ from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import (
+    Anomaly,
     Connection,
     ConnectionSecret,
+    DailyHealthScore,
     DeletionCompletionProof,
     DeletionRequest,
     FactRecord,
     Job,
     SleepSession,
+    SubjectiveCheckIn,
     Tenant,
 )
+from akunaki.application.deletion_service import DeletionService
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.connections import Provider
 from akunaki.domain.deletion import (
@@ -47,6 +51,7 @@ from akunaki.domain.sleep_normalizer import normalize_sleep_payload
 
 T0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
+DAY = "2026-07-19"
 KEK = b"\x77" * KEY_BYTES
 
 SLEEP_RECORD = json.dumps(
@@ -392,3 +397,157 @@ def test_failure_retains_the_stage_reached(factory: sessionmaker[Session]) -> No
 def test_unknown_request_is_rejected(factory: sessionmaker[Session]) -> None:
     with pytest.raises(ValueError, match="not found"):
         DeletionRepository(factory).cancel_jobs(request_id="nope", now=T0)
+
+
+def _add_health_rows(factory: sessionmaker[Session], tenant_id: str) -> None:
+    """Health data in tables the scrub does not name explicitly.
+
+    These arrived with later migrations (vitals, workouts, activity, scores,
+    anomalies, check-ins, derivations, selections). Each is tenant-scoped, so a
+    deletion must remove every one of them.
+    """
+    with factory() as session, session.begin():
+        session.add(
+            SubjectiveCheckIn(
+                id=f"ci-{tenant_id}",
+                tenant_id=tenant_id,
+                local_health_day=DAY,
+                energy_n=0.5,
+                stress_n=0.5,
+                symptom_burden_n=0.1,
+                completed_at=NOW_S,
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                created_at=NOW_S,
+            )
+        )
+        session.add(
+            DailyHealthScore(
+                id=f"score-{tenant_id}",
+                tenant_id=tenant_id,
+                local_health_day=DAY,
+                score_code="recovery",
+                status="ok",
+                score=70,
+                available_weight=1.0,
+                confidence=0.9,
+                formula_version="general_recovery_v0.1.0",
+                dependency_hash="hash",
+                freshness_at=NOW_S,
+                as_of_at=None,
+                derivation_run_id=None,
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                created_at=NOW_S,
+            )
+        )
+        session.add(
+            Anomaly(
+                id=f"an-{tenant_id}",
+                tenant_id=tenant_id,
+                feature_code="hrv",
+                started_on=DAY,
+                ended_on=None,
+                severity="high",
+                z_like=-3.0,
+                formula_version="general_recovery_v0.1.0",
+                is_active=1,
+                consecutive_clear_days=0,
+                created_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+
+
+def test_scrub_removes_every_tenant_scoped_health_table(
+    factory: sessionmaker[Session],
+) -> None:
+    """No tenant-scoped health row may survive a privacy deletion.
+
+    The scrub names a fixed model list, but health tables kept arriving with
+    later migrations. Any tenant-scoped table not removed — by name or by
+    cascade from the tenant row — leaves health data behind after the user
+    asked for erasure.
+    """
+    _populate(factory, "tenant-1")
+    _add_health_rows(factory, "tenant-1")
+
+    _run_pipeline(DeletionRepository(factory))
+
+    with factory() as session:
+        rows = (
+            session.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'alembic%'"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        survivors: dict[str, int] = {}
+        for table in rows:
+            columns = {r[1] for r in session.execute(text(f"PRAGMA table_info('{table}')")).all()}
+            if "tenant_id" not in columns:
+                continue
+            # The request and its proof deliberately outlive the tenant: they
+            # are the audit record that the deletion happened.
+            if table in {"deletion_requests", "deletion_completion_proofs"}:
+                continue
+            left = session.execute(
+                text(f"SELECT COUNT(*) FROM {table} WHERE tenant_id = 'tenant-1'")  # noqa: S608
+            ).scalar_one()
+            if left:
+                survivors[table] = int(left)
+
+    assert survivors == {}, f"health data survived deletion in: {survivors}"
+
+
+class _FailingPipeline:
+    """A pipeline whose scrub stage raises, to exercise failure handling."""
+
+    def __init__(self) -> None:
+        self.failed_as: str | None = None
+        self.completed = False
+
+    def request(self, *, request_id: str, tenant_id: str, now: datetime) -> str:
+        return request_id
+
+    def cancel_jobs(self, *, request_id: str, now: datetime) -> int:
+        return 0
+
+    def scrub_rows(self, *, request_id: str, now: datetime, jobs_cancelled: int) -> ScrubCounts:
+        msg = "disk exploded"
+        raise RuntimeError(msg)
+
+    def schedule_backup_expiry(self, *, request_id: str, now: datetime) -> None:
+        raise AssertionError("must not run after a failed scrub")
+
+    def complete(self, **kwargs: object) -> None:
+        self.completed = True
+
+    def fail(self, *, request_id: str, failure_class: str, now: datetime) -> None:
+        self.failed_as = failure_class
+
+    def status_of(self, *, request_id: str) -> DeletionStatus | None:
+        return None
+
+
+def test_a_failed_stage_is_recorded_and_never_reads_as_complete() -> None:
+    """A half-run deletion must not be reported as done.
+
+    The user asked for erasure; silently completing a pipeline that failed
+    mid-scrub would claim data was removed when some of it remains.
+    """
+    pipeline = _FailingPipeline()
+    service = DeletionService(pipeline=pipeline, new_id=lambda: "req-1")
+
+    with pytest.raises(RuntimeError, match="disk exploded"):
+        service.delete_tenant(tenant_id="tenant-1", now=T0)
+
+    assert pipeline.failed_as == "RuntimeError"
+    assert pipeline.completed is False

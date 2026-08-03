@@ -21,21 +21,32 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.job_repository import affected_rows
 from akunaki.adapters.db.models import (
+    Anomaly,
     Connection,
     ConnectionHealth,
     ConnectionSecret,
+    DailyActivity,
+    DailyHealthScore,
     DeletionCompletionProof,
     DeletionRequest,
+    DerivationInput,
+    DerivationRun,
     FactRecord,
     Job,
     OAuthState,
+    OvernightVitals,
     RawObject,
     RawPayload,
     RawRevision,
+    ScoreFactor,
     SleepSession,
+    SourceSelection,
+    SourceSelectionCandidate,
+    SubjectiveCheckIn,
     SyncCursor,
     SyncRun,
     Tenant,
+    WorkoutSession,
 )
 from akunaki.domain.deletion import (
     DeletionStatus,
@@ -117,12 +128,34 @@ class DeletionRepository:
                 sync_runs=self._count(session, SyncRun, tenant_id),
                 sync_cursors=self._count(session, SyncCursor, tenant_id),
                 facts=self._count(session, FactRecord, tenant_id),
+                scores=self._count(session, DailyHealthScore, tenant_id),
+                anomalies=self._count(session, Anomaly, tenant_id),
+                check_ins=self._count(session, SubjectiveCheckIn, tenant_id),
+                derivation_runs=self._count(session, DerivationRun, tenant_id),
+                source_selections=self._count(session, SourceSelection, tenant_id),
                 jobs_cancelled=jobs_cancelled,
             )
 
             # Child-first: FK RESTRICT on raw_revisions -> raw_payload means
             # payloads cannot go before the revisions pointing at them.
+            #
+            # Derived health tables are listed explicitly rather than left to
+            # cascade from the tenant row. Every one of them would also go by
+            # cascade, but naming them makes erasure a property of this list —
+            # which is auditable — instead of an emergent consequence of FK
+            # declarations spread across a dozen migrations.
             models: tuple[Any, ...] = (
+                ScoreFactor,
+                DailyHealthScore,
+                DerivationInput,
+                DerivationRun,
+                Anomaly,
+                SubjectiveCheckIn,
+                SourceSelectionCandidate,
+                SourceSelection,
+                WorkoutSession,
+                DailyActivity,
+                OvernightVitals,
                 SleepSession,
                 FactRecord,
                 RawRevision,
