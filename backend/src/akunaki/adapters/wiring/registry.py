@@ -34,6 +34,7 @@ from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.ingestion_repository import IngestionRepository, RevisionReader
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.score_repository import ScoreRepository
+from akunaki.adapters.db.source_selection_repository import SourceSelectionRepository
 from akunaki.adapters.db.unit_of_work import FencedUnitOfWork
 from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.handlers import HandlerRegistry
@@ -105,6 +106,8 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
         facts=facts,
         jobs=jobs,
         new_id=_new_id,
+        sleep_providers=facts,
+        selections=SourceSelectionRepository(session_factory),
     )
     recompute = ScoreRecomputeHandler(
         recovery=RecoverySurfaceService(

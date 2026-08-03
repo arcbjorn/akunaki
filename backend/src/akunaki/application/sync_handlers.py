@@ -43,10 +43,17 @@ from akunaki.domain.record_split import split_page
 from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.secrets import SecretDecryptionError
 from akunaki.domain.sleep_normalizer import NormalizationError, normalize_sleep_payload
+from akunaki.domain.source_policy import SOURCE_POLICY_VERSION, decide_sleep_selection
 from akunaki.domain.vitals_normalizer import normalize_vitals_payload
 from akunaki.domain.workout_normalizer import normalize_workout_payload
 from akunaki.ports.connections import ConnectionRepositoryPort
-from akunaki.ports.facts import FactWriterPort, RevisionBody, RevisionReaderPort
+from akunaki.ports.facts import (
+    FactWriterPort,
+    RevisionBody,
+    RevisionReaderPort,
+    SleepProviderFactsPort,
+    SourceSelectionWriterPort,
+)
 from akunaki.ports.fetch import ConnectorFetchPort, IngestionRepositoryPort
 from akunaki.ports.jobs import JobRepositoryPort
 from akunaki.ports.secrets import SecretSealerPort
@@ -607,13 +614,51 @@ class NormalizeHandler:
         facts: FactWriterPort,
         jobs: JobRepositoryPort,
         new_id: Callable[[], str],
+        sleep_providers: SleepProviderFactsPort | None = None,
+        selections: SourceSelectionWriterPort | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._revisions = revisions
         self._facts = facts
         self._jobs = jobs
         self._new_id = new_id
+        self._sleep_providers = sleep_providers
+        self._selections = selections
         self._clock = clock
+
+    def _record_sleep_selection(self, *, tenant_id: str, day: str, now: datetime) -> None:
+        """Persist which provider is authoritative for the day's sleep.
+
+        Recorded here because this is where the day's provider set changes: a
+        second connector landing facts for a night already covered is exactly
+        when the precedence resolves a conflict worth auditing.
+
+        The decision is derived from stored facts (not from the payload just
+        normalized), so it reflects every provider covering the day, whichever
+        order their revisions arrived in. Writing is idempotent by content, so
+        re-normalizing a revision re-derives the same decision and writes no new
+        version.
+        """
+        if self._sleep_providers is None or self._selections is None:
+            return
+        by_provider = self._sleep_providers.sleep_facts_by_provider(
+            tenant_id=tenant_id,
+            local_health_day=day,
+        )
+        if not by_provider:
+            # No sleep facts at all for the day: nothing to decide between. The
+            # absence is already visible as an unknown day downstream, so a
+            # ``missing_authoritative`` row here would add no information.
+            return
+        decision = decide_sleep_selection(by_provider)
+        self._selections.record_daily_selection(
+            selection_id=self._new_id(),
+            tenant_id=tenant_id,
+            policy_version=SOURCE_POLICY_VERSION,
+            spec=decision.to_spec(local_health_day=day),
+            new_candidate_id=self._new_id,
+            now=now,
+        )
 
     def __call__(self, claim: JobClaim) -> None:
         """Execute one normalization job."""
@@ -644,6 +689,9 @@ class NormalizeHandler:
         # nothing and write nothing.
         written = 0
         affected_days: set[str] = set()
+        # Only a revision that can write sleep facts changes the day's sleep
+        # provider set, and so the source-selection decision.
+        sleep_bearing = False
         try:
             if revision.schema_version.startswith("polar."):
                 affected_days = self._normalize_workouts(claim, revision, now)
@@ -651,7 +699,9 @@ class NormalizeHandler:
                 written, affected_days = self._normalize_activity(claim, revision, now)
             elif revision.schema_version.startswith("google_health."):
                 written, affected_days = self._normalize_google_sleep(claim, revision, now)
+                sleep_bearing = True
             else:
+                sleep_bearing = True
                 sleep_facts = normalize_sleep_payload(revision.payload_text)
                 # Overnight vitals ride along on the same sleep payload; one page
                 # yields both the sleep and the HRV/RHR facts, with shared lineage.
@@ -697,6 +747,18 @@ class NormalizeHandler:
         # fresh recompute. Enqueued regardless of ``written``: a re-normalization
         # that produced no new fact version still safely dedupes at the score
         # layer, and enqueuing is cheap and idempotent.
+        # Record the day's authoritative sleep source before recomputing, so the
+        # score is derived against a decision that is already auditable. Only
+        # sleep-bearing revisions can change the sleep provider set; a workout
+        # or activity page leaves it untouched.
+        if sleep_bearing:
+            for day in sorted(affected_days):
+                self._record_sleep_selection(
+                    tenant_id=claim.tenant_id,
+                    day=day,
+                    now=now,
+                )
+
         for day in sorted(affected_days):
             self._jobs.enqueue_job(
                 job_id=self._new_id(),

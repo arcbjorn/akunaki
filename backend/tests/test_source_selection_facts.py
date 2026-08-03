@@ -8,6 +8,7 @@ against a migrated database.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,13 +16,28 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
-from akunaki.adapters.db.models import FactRecord, SleepSession, Tenant
+from akunaki.adapters.db.models import (
+    Connection,
+    FactRecord,
+    RawObject,
+    RawPayload,
+    RawRevision,
+    SleepSession,
+    SourceSelection,
+    SourceSelectionCandidate,
+    Tenant,
+)
+from akunaki.adapters.db.source_selection_repository import SourceSelectionRepository
+from akunaki.application.sync_handlers import NORMALIZE_JOB_TYPE, NormalizeHandler
 from akunaki.config import Settings, clear_settings_cache
-from akunaki.domain.jobs import to_utc_rfc3339
+from akunaki.domain.jobs import JobClaim, JobRole, to_utc_rfc3339
+from akunaki.domain.source_policy import SOURCE_POLICY_VERSION
+from akunaki.ports.facts import RevisionBody
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -275,3 +291,237 @@ def test_fact_ids_for_day_empty_when_nothing_recorded(
 ) -> None:
     repo = FactRepository(factory)
     assert repo.fact_ids_for_day(tenant_id="tenant-1", local_health_day=DAY) == {}
+
+
+# ---------------------------------------------------------------------------
+# Recording the decision (the "Why"), not just applying it
+# ---------------------------------------------------------------------------
+
+_OURA_PAGE = json.dumps(
+    {
+        "data": [
+            {
+                "id": "oura-sleep-1",
+                "type": "long_sleep",
+                "bedtime_start": "2026-07-19T23:00:00+00:00",
+                "bedtime_end": "2026-07-20T07:00:00+00:00",
+                "total_sleep_duration": 25200,
+                "time_in_bed": 28800,
+                "average_hrv": 60,
+                "lowest_heart_rate": 50,
+            }
+        ]
+    }
+)
+
+
+class _StubRevisions:
+    """Serves one immutable Oura sleep revision."""
+
+    def get_revision(self, *, revision_id: str) -> RevisionBody:
+        return RevisionBody(
+            revision_id=revision_id,
+            connection_id="conn-1",
+            raw_payload_id="pay-1",
+            schema_version="oura.v2",
+            payload_text=_OURA_PAGE,
+            is_tombstone=False,
+        )
+
+
+class _StubJobs:
+    def __init__(self) -> None:
+        self.enqueued: list[str] = []
+
+    def enqueue_job(self, *, payload_json: str, **kwargs: object) -> object:
+        self.enqueued.append(payload_json)
+        return object()
+
+
+def _claim() -> JobClaim:
+    return JobClaim(
+        job_id="norm-1",
+        tenant_id="tenant-1",
+        role=JobRole.CORE,
+        job_type=NORMALIZE_JOB_TYPE,
+        owner="worker-1",
+        fence_token=1,
+        leased_until=NOW_S,
+        attempts=1,
+        max_attempts=5,
+        payload_json=json.dumps({"raw_revision_id": "rev-1"}),
+    )
+
+
+def _seed_raw_lineage(factory: sessionmaker[Session]) -> None:
+    """The connection, payload, object, and revision a normalized fact points at."""
+    with factory() as session, session.begin():
+        session.add(
+            Connection(
+                id="conn-1",
+                tenant_id="tenant-1",
+                provider="oura",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+        session.add(
+            RawPayload(
+                id="pay-1",
+                tenant_id="tenant-1",
+                connection_id="conn-1",
+                sync_run_id=None,
+                transport_kind="sync_fetch",
+                provider="oura",
+                stream="sleep",
+                page_token=None,
+                fetched_at=NOW_S,
+                received_at=NOW_S,
+                http_status=200,
+                content_type="application/json",
+                content_hash="page-hash",
+                payload_json=_OURA_PAGE,
+                payload_blob=None,
+                request_meta_json=json.dumps({"url_template": "v2/sleep"}),
+            )
+        )
+        session.add(
+            RawObject(
+                id="obj-1",
+                tenant_id="tenant-1",
+                connection_id="conn-1",
+                provider="oura",
+                stream="sleep",
+                vendor_record_id="oura-sleep-1",
+                current_revision_id=None,
+                created_at=NOW_S,
+            )
+        )
+        session.add(
+            RawRevision(
+                id="rev-1",
+                tenant_id="tenant-1",
+                raw_object_id="obj-1",
+                raw_payload_id="pay-1",
+                sync_run_id=None,
+                revision_n=1,
+                vendor_record_id="oura-sleep-1",
+                observed_at=NOW_S,
+                effective_at=NOW_S,
+                received_at=NOW_S,
+                content_hash="rev-hash",
+                schema_version="oura.v2",
+                deletion_state="active",
+                is_tombstone=0,
+                tombstone_reason=None,
+            )
+        )
+
+
+def _handler(
+    factory: sessionmaker[Session], selections: SourceSelectionRepository
+) -> NormalizeHandler:
+    facts = FactRepository(factory)
+    ids = iter(f"id-{n}" for n in range(1, 500))
+    return NormalizeHandler(
+        revisions=_StubRevisions(),
+        facts=facts,
+        jobs=_StubJobs(),
+        new_id=lambda: next(ids),
+        sleep_providers=facts,
+        selections=selections,
+        clock=lambda: T0,
+    )
+
+
+def test_sleep_facts_by_provider_keeps_the_losers(
+    factory: sessionmaker[Session],
+) -> None:
+    """Recording a decision needs the alternatives, not only the winner."""
+    _seed_sleep(factory, provider="oura", fact_id="o", duration_min=420.0, time_in_bed_min=460.0)
+    _seed_sleep(
+        factory, provider="google_health", fact_id="g", duration_min=400.0, time_in_bed_min=440.0
+    )
+
+    by_provider = FactRepository(factory).sleep_facts_by_provider(
+        tenant_id="tenant-1", local_health_day=DAY
+    )
+
+    # Unlike the feature queries, the losing provider survives here.
+    assert by_provider == {"oura": ["o"], "google_health": ["g"]}
+
+
+def test_normalize_records_the_sleep_selection(factory: sessionmaker[Session]) -> None:
+    """Normalizing a night persists which provider is authoritative for it.
+
+    A Google Health session already covers the day; the Oura revision arriving
+    now wins on precedence, and the decision records the loser as a candidate.
+    """
+    _seed_sleep(
+        factory, provider="google_health", fact_id="g", duration_min=400.0, time_in_bed_min=440.0
+    )
+    _seed_raw_lineage(factory)
+    selections = SourceSelectionRepository(factory)
+
+    _handler(factory, selections)(_claim())
+
+    current = selections.current_selection(
+        tenant_id="tenant-1", metric_family="sleep_session", local_health_day=DAY
+    )
+    assert current is not None
+    assert current.selection_reason == "policy_match"
+    assert current.missing_reason is None
+    assert current.source_policy_version_id == SOURCE_POLICY_VERSION
+    assert current.is_current == 1
+
+    with factory() as session:
+        selected_provider = session.execute(
+            select(FactRecord.provider).where(FactRecord.id == current.selected_fact_record_id)
+        ).scalar_one()
+        candidates = session.execute(
+            select(SourceSelectionCandidate.fact_record_id, SourceSelectionCandidate.rank)
+            .where(SourceSelectionCandidate.source_selection_id == current.id)
+            .order_by(SourceSelectionCandidate.rank)
+        ).all()
+
+    # The freshly normalized Oura fact wins over the pre-existing Google one.
+    assert selected_provider == "oura"
+    # Both providers are retained; the loser is an alternative, not a fallback.
+    assert [fact_id for fact_id, _rank in candidates][-1] == "g"
+    assert len(candidates) == 2
+
+
+def test_renormalizing_does_not_stack_selection_versions(
+    factory: sessionmaker[Session],
+) -> None:
+    """A normalize retry re-derives the same decision, so it dedupes."""
+    _seed_raw_lineage(factory)
+    selections = SourceSelectionRepository(factory)
+    _handler(factory, selections)(_claim())
+    _handler(factory, selections)(_claim())
+
+    with factory() as session:
+        versions = (
+            session.execute(
+                select(SourceSelection.version_n).where(SourceSelection.grain_key == DAY)
+            )
+            .scalars()
+            .all()
+        )
+    assert versions == [1]
+
+
+def test_single_provider_records_only_source(factory: sessionmaker[Session]) -> None:
+    """Nothing competed, so the reason distinguishes it from a resolved conflict."""
+    _seed_raw_lineage(factory)
+    selections = SourceSelectionRepository(factory)
+    _handler(factory, selections)(_claim())
+
+    current = selections.current_selection(
+        tenant_id="tenant-1", metric_family="sleep_session", local_health_day=DAY
+    )
+    assert current is not None
+    assert current.selection_reason == "only_source"
