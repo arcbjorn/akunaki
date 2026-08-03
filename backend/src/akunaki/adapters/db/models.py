@@ -1445,3 +1445,61 @@ class SourceSelectionCandidate(Base):
         ),
         UniqueConstraint("source_selection_id", "fact_record_id", name="uq_source_candidate_fact"),
     )
+
+
+class ToolConfirmation(Base):
+    """A one-time, expiring authorization for one mutating tool invocation.
+
+    Authorizes a **specific call**, not a tool in general: the binding fields
+    below (tenant, user, run, tool name, canonical args hash, idempotency key)
+    are all reauthorized at execution, so a confirmation obtained for one set of
+    arguments can never execute another.
+
+    Only the SHA-256 of the issued token is stored, like sessions and
+    provenance handles, so a database dump yields no usable confirmation.
+
+    ``run_id`` is nullable because it names an agent conversation run and no
+    agent ships yet. Null is part of the binding, not a wildcard.
+    """
+
+    __tablename__ = "tool_confirmations"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    args_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[str] = mapped_column(Text, nullable=False)
+    consumed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'consumed', 'cancelled')",
+            name="tool_confirmation_status",
+        ),
+        CheckConstraint(
+            "(status = 'consumed' AND consumed_at IS NOT NULL) "
+            "OR (status != 'consumed' AND consumed_at IS NULL)",
+            name="tool_confirmation_consumed_consistency",
+        ),
+        CheckConstraint("length(token_hash) = 64", name="tool_confirmation_token_hash_len"),
+        CheckConstraint("length(args_hash) = 64", name="tool_confirmation_args_hash_len"),
+        UniqueConstraint("token_hash", name="uq_tool_confirmation_token"),
+        Index(
+            "ux_tool_confirmations_pending",
+            "tenant_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index("ix_tool_confirmations_expiry", "status", "expires_at"),
+    )
