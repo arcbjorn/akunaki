@@ -15,17 +15,29 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
+import akunaki.api.routes.tools as tools_module
+from akunaki.adapters.crypto.sessions import generate_confirmation_token
 from akunaki.adapters.db.anomaly_repository import AnomalyRepository
+from akunaki.adapters.db.confirmation_repository import ConfirmationRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.models import FactRecord, SleepSession, Tenant, User
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
+from akunaki.application.tool_registry import (
+    Sensitivity,
+    SideEffect,
+    Tool,
+    ToolContext,
+    ToolRegistry,
+)
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.anomalies import AnomalySeverity
+from akunaki.domain.confirmations import ConfirmationBinding, canonical_args_hash
 from akunaki.domain.jobs import to_utc_rfc3339
 from akunaki.domain.workout_normalizer import WorkoutFact
 
@@ -377,3 +389,221 @@ def test_invoke_connections_list(client: TestClient, factory: sessionmaker[Sessi
 
     # No connector linked in this fixture: an empty list, not an error.
     assert body == {"connections": []}
+
+
+# ---------------------------------------------------------------------------
+# Confirmation enforcement for mutating tools
+# ---------------------------------------------------------------------------
+
+
+class _EchoInput(BaseModel):
+    target: str = "a"
+
+
+class _EchoOutput(BaseModel):
+    target: str
+
+
+def _mutating_tool(calls: list[str]) -> Tool[_EchoInput, _EchoOutput]:
+    """A stand-in mutating tool that records whether it actually ran."""
+
+    def handler(inputs: _EchoInput, context: ToolContext) -> _EchoOutput:
+        calls.append(inputs.target)
+        return _EchoOutput(target=inputs.target)
+
+    return Tool(
+        name="test.mutate",
+        input_model=_EchoInput,
+        output_model=_EchoOutput,
+        handler=handler,
+        side_effect=SideEffect.ENQUEUE_JOB,
+        sensitivity=Sensitivity.DESTRUCTIVE,
+        model_exposure=False,
+        requires_confirmation=True,
+        audit="test.mutate",
+    )
+
+
+@pytest.fixture
+def mutating_client(
+    route_db: str, factory: sessionmaker[Session]
+) -> Iterator[tuple[TestClient, list[str]]]:
+    """A client whose registry also carries one mutating tool."""
+    calls: list[str] = []
+    app = create_app(Settings(database_url=route_db))
+
+    def _registry_with_mutation() -> ToolRegistry:
+        registry = tools_module._registry(
+            create_session_factory(create_db_engine(Settings(database_url=route_db)))
+        )
+        registry.register(_mutating_tool(calls))
+        return registry
+
+    app.dependency_overrides[tools_module._registry] = _registry_with_mutation
+    yield TestClient(app), calls
+    app.dependency_overrides.clear()
+
+
+def _issue_confirmation(
+    factory: sessionmaker[Session],
+    *,
+    args: dict[str, object],
+    tool_name: str = "test.mutate",
+    idempotency_key: str = "idem-1",
+    user_id: str = "user-1",
+) -> str:
+    token = generate_confirmation_token()
+    ConfirmationRepository(factory).issue(
+        confirmation_id=f"conf-{idempotency_key}",
+        token=token,
+        binding=ConfirmationBinding(
+            tenant_id="tenant-1",
+            user_id=user_id,
+            run_id=None,
+            tool_name=tool_name,
+            args_hash=canonical_args_hash(args),
+            idempotency_key=idempotency_key,
+        ),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        now=datetime.now(UTC),
+    )
+    return token
+
+
+def test_mutating_tool_without_confirmation_is_refused(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    """Fail closed: no token means the handler never runs."""
+    client, calls = mutating_client
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/tools/test.mutate",
+        json={"input": {"target": "a"}},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "confirmation_required"
+    assert calls == []
+
+
+def test_mutating_tool_runs_with_a_matching_confirmation(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    client, calls = mutating_client
+    csrf = _login(client, factory)
+    token = _issue_confirmation(factory, args={"target": "a"})
+
+    response = client.post(
+        "/v1/tools/test.mutate",
+        json={
+            "input": {"target": "a"},
+            "confirmation_token": token,
+            "idempotency_key": "idem-1",
+        },
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 200
+    assert calls == ["a"]
+
+
+def test_substituted_arguments_do_not_execute(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    """The user approved ``a``; a model swapping in ``b`` must not run.
+
+    This is the attack the args-hash binding exists to stop.
+    """
+    client, calls = mutating_client
+    csrf = _login(client, factory)
+    token = _issue_confirmation(factory, args={"target": "a"})
+
+    response = client.post(
+        "/v1/tools/test.mutate",
+        json={
+            "input": {"target": "b"},
+            "confirmation_token": token,
+            "idempotency_key": "idem-1",
+        },
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "confirmation_invalid"
+    assert calls == []
+
+
+def test_replayed_confirmation_does_not_execute_twice(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    """Rule 4 end to end: the side effect happens exactly once."""
+    client, calls = mutating_client
+    csrf = _login(client, factory)
+    token = _issue_confirmation(factory, args={"target": "a"})
+    payload = {
+        "input": {"target": "a"},
+        "confirmation_token": token,
+        "idempotency_key": "idem-1",
+    }
+
+    first = client.post("/v1/tools/test.mutate", json=payload, headers={CSRF_HEADER_NAME: csrf})
+    second = client.post("/v1/tools/test.mutate", json=payload, headers={CSRF_HEADER_NAME: csrf})
+
+    assert first.status_code == 200
+    assert second.status_code == 403
+    assert calls == ["a"]
+
+
+def test_confirmation_for_another_tool_does_not_execute(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    client, calls = mutating_client
+    csrf = _login(client, factory)
+    token = _issue_confirmation(factory, args={"target": "a"}, tool_name="privacy.delete")
+
+    response = client.post(
+        "/v1/tools/test.mutate",
+        json={
+            "input": {"target": "a"},
+            "confirmation_token": token,
+            "idempotency_key": "idem-1",
+        },
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+def test_rejection_reasons_are_indistinguishable(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    """A caller must not learn *why* a confirmation failed.
+
+    Distinguishing "wrong tool" from "expired" would let someone probe for
+    valid tool names or live tokens.
+    """
+    client, _calls = mutating_client
+    csrf = _login(client, factory)
+    wrong_tool = _issue_confirmation(
+        factory, args={"target": "a"}, tool_name="other.tool", idempotency_key="idem-a"
+    )
+    wrong_args = _issue_confirmation(factory, args={"target": "zzz"}, idempotency_key="idem-b")
+
+    responses = [
+        client.post(
+            "/v1/tools/test.mutate",
+            json={
+                "input": {"target": "a"},
+                "confirmation_token": tok,
+                "idempotency_key": key,
+            },
+            headers={CSRF_HEADER_NAME: csrf},
+        )
+        for tok, key in ((wrong_tool, "idem-a"), (wrong_args, "idem-b"), ("confirm_nope", "idem-c"))
+    ]
+
+    assert {r.status_code for r in responses} == {403}
+    assert len({r.json()["detail"]["code"] for r in responses}) == 1

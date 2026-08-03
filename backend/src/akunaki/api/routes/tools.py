@@ -11,6 +11,8 @@ would additionally require the confirmation flow before it could execute.
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -19,6 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.anomaly_repository import AnomalyRepository
 from akunaki.adapters.db.checkin_repository import CheckInRepository
+from akunaki.adapters.db.confirmation_repository import ConfirmationRepository
 from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.score_repository import ScoreRepository
@@ -30,10 +33,19 @@ from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.application.recovery_surface import RecoverySurfaceService, ServedRecoveryService
 from akunaki.application.sleep_surface import SleepSurfaceService
 from akunaki.application.today_surface import TodaySurfaceService
-from akunaki.application.tool_registry import ToolContext, ToolNotFoundError, ToolRegistry
+from akunaki.application.tool_registry import (
+    Tool,
+    ToolContext,
+    ToolNotFoundError,
+    ToolRegistry,
+)
 from akunaki.application.tools.connections import register_connection_tools
 from akunaki.application.tools.health import register_health_tools
 from akunaki.application.workouts_surface import WorkoutsSurfaceService
+from akunaki.domain.confirmations import ConfirmationBinding, canonical_args_hash
+from akunaki.domain.sessions import AuthenticatedSession
+
+logger = logging.getLogger("akunaki.tools")
 
 router = APIRouter(prefix="/v1/tools", tags=["tools"])
 
@@ -60,6 +72,24 @@ class ToolInvokeRequest(BaseModel):
     """A request to run a tool by name with typed arguments."""
 
     input: dict[str, Any] = Field(default_factory=dict, description="Tool input arguments.")
+    confirmation_token: str | None = Field(
+        default=None,
+        description="Confirmation authorizing this call; required for mutating tools.",
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        description="Part of the confirmation binding; required for mutating tools.",
+    )
+    run_id: str | None = Field(
+        default=None,
+        description="Agent conversation run this call belongs to, when any.",
+    )
+
+
+def _confirmations(
+    session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
+) -> ConfirmationRepository:
+    return ConfirmationRepository(session_factory)
 
 
 def _registry(
@@ -114,6 +144,53 @@ def list_tools(
     return ToolListResponse(tools=tools)
 
 
+def _require_confirmation(
+    *,
+    tool: Tool[Any, Any],
+    body: ToolInvokeRequest,
+    session: AuthenticatedSession,
+    confirmations: ConfirmationRepository,
+) -> None:
+    """Redeem the confirmation authorizing this exact call, or refuse it.
+
+    **Fails closed.** A tool declaring ``requires_confirmation`` executes only
+    with a confirmation that matches the full binding; a missing token is a
+    refusal, not a bypass.
+
+    Every rejection is the same generic 403. Distinguishing "expired" from
+    "wrong tool" would let a caller probe for valid tool names, run ids, or
+    live tokens.
+    """
+    if not body.confirmation_token or not body.idempotency_key:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "confirmation_required", "tool": tool.name},
+        )
+
+    requested = ConfirmationBinding(
+        tenant_id=session.tenant_id,
+        user_id=session.user_id,
+        run_id=body.run_id,
+        tool_name=tool.name,
+        args_hash=canonical_args_hash(body.input),
+        idempotency_key=body.idempotency_key,
+    )
+    rejection = confirmations.consume(
+        token=body.confirmation_token,
+        requested=requested,
+        now=datetime.now(UTC),
+    )
+    if rejection is not None:
+        logger.warning(
+            "tool confirmation rejected",
+            extra={"tool": tool.name, "reason": rejection.value},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "confirmation_invalid", "tool": tool.name},
+        )
+
+
 @router.post("/{tool_name}")
 def invoke_tool(
     tool_name: str,
@@ -121,6 +198,7 @@ def invoke_tool(
     session: CurrentSession,
     registry: RegistryDep,
     body: ToolInvokeRequest,
+    confirmations: Annotated[ConfirmationRepository, Depends(_confirmations)],
 ) -> dict[str, Any]:
     """Invoke a read tool by name under the caller's session context."""
     response.headers["Cache-Control"] = "private, no-store"
@@ -130,6 +208,14 @@ def invoke_tool(
         raise HTTPException(
             status_code=404, detail={"code": "tool_not_found", "name": tool_name}
         ) from exc
+
+    if tool.requires_confirmation:
+        _require_confirmation(
+            tool=tool,
+            body=body,
+            session=session,
+            confirmations=confirmations,
+        )
 
     context = ToolContext(tenant_id=session.tenant_id, user_id=session.user_id)
     try:
