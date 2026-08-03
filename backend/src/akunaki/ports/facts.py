@@ -6,12 +6,14 @@ SQLAlchemy, so the application layer stays persistence-free.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
 from akunaki.domain.activity_normalizer import ActivityFact
 from akunaki.domain.sleep_normalizer import SleepFact
+from akunaki.domain.source_policy import DailySelectionSpec
 from akunaki.domain.vitals_normalizer import VitalsFact
 from akunaki.domain.workout_normalizer import WorkoutFact
 
@@ -33,6 +35,37 @@ class RevisionReaderPort(Protocol):
 
     def get_revision(self, *, revision_id: str) -> RevisionBody | None:
         """Return the revision and its body, or None when unknown."""
+        ...
+
+
+class SleepProviderFactsPort(Protocol):
+    """Read the competing sleep facts for a day, grouped by provider."""
+
+    def sleep_facts_by_provider(
+        self, *, tenant_id: str, local_health_day: str
+    ) -> dict[str, list[str]]:
+        """Current sleep fact ids on the day, keyed by the provider that supplied them."""
+        ...
+
+
+class SourceSelectionWriterPort(Protocol):
+    """Persist the day's authoritative-source decision and its alternatives."""
+
+    def record_daily_selection(
+        self,
+        *,
+        selection_id: str,
+        tenant_id: str,
+        policy_version: str,
+        spec: DailySelectionSpec,
+        new_candidate_id: Callable[[], str],
+        now: datetime,
+    ) -> object:
+        """Record a daily-metric decision, superseding any differing current row.
+
+        Idempotent by the decision's content: recording the same winner, reason,
+        and candidate set writes no new version.
+        """
         ...
 
 

@@ -22,30 +22,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.models import SourceSelection, SourceSelectionCandidate
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
+from akunaki.domain.source_policy import DailySelectionSpec, SelectionCandidate
 
 GRANULARITY_DAILY = "daily_metric"
 
 
-@dataclass(frozen=True, slots=True)
-class CandidateSpec:
-    """One competing provider fact for a selection decision."""
-
-    fact_record_id: str
-    rank: int
-    eligibility: str  # 'eligible' | 'ineligible'
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class SelectionSpec:
-    """A per-day source-selection decision to persist."""
-
-    metric_family: str
-    local_health_day: str
-    selected_fact_record_id: str | None
-    selection_reason: str
-    missing_reason: str | None
-    candidates: tuple[CandidateSpec, ...]
+# The decision shape lives in the domain (pure data), so the application can
+# build one without importing this adapter. Re-exported under the historical
+# names for callers already using them.
+CandidateSpec = SelectionCandidate
+SelectionSpec = DailySelectionSpec
 
 
 @dataclass(frozen=True, slots=True)
