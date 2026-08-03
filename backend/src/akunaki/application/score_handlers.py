@@ -23,7 +23,9 @@ from typing import Any, Protocol
 from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.application.recovery_surface import RecoverySurface, RecoverySurfaceService
+from akunaki.domain.derivation_roles import entity_type_for_component
 from akunaki.domain.jobs import SCORE_RECOMPUTE_JOB_TYPE, JobClaim
+from akunaki.domain.recovery import ComponentCode
 from akunaki.domain.retry import PermanentJobError
 from akunaki.ports.unit_of_work import FencedUnitOfWorkPort
 
@@ -146,6 +148,55 @@ class ScoreRecomputeHandler:
         self._unit_of_work = unit_of_work
         self._clock = clock
 
+    def _derivation_inputs(
+        self,
+        *,
+        tenant_id: str,
+        local_health_day: str,
+        surface: RecoverySurface,
+    ) -> list[DerivationInputSpec]:
+        """Name the facts this score was derived from, one row per fact.
+
+        Only **present** components contribute: a component that was omitted
+        (absent value, immature baseline) read no fact, so recording one would
+        assert an input the formula never used. The ``role`` is the component
+        code, matching the factor rows the score already discloses.
+
+        Returns an empty list when the input service is not wired — the run is
+        still recorded, just without per-input rows, exactly as before.
+        """
+        if self._inputs is None:
+            return []
+
+        present_codes = {factor.factor_code for factor in surface.factors if factor.present}
+        if not present_codes:
+            return []
+
+        facts_by_entity = self._inputs.fact_ids_for_day(
+            tenant_id=tenant_id,
+            local_health_day=local_health_day,
+        )
+
+        specs: list[DerivationInputSpec] = []
+        seen: set[tuple[str, str]] = set()
+        for code in sorted(present_codes):
+            try:
+                component = ComponentCode(code)
+            except ValueError:
+                # A factor code outside the component vocabulary is not
+                # fact-sourced; skip rather than guess at a table.
+                continue
+            entity_type = entity_type_for_component(component)
+            if entity_type is None:
+                continue
+            for fact_id in facts_by_entity.get(entity_type, []):
+                key = (code, fact_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                specs.append(DerivationInputSpec(role=code, fact_record_id=fact_id))
+        return specs
+
     def _persist(
         self,
         *,
@@ -162,10 +213,8 @@ class ScoreRecomputeHandler:
         authorized them.
         """
         # Record a derivation run for the score when the writer is wired, so the
-        # served value can be traced through an opaque provenance token. Typed
-        # fact-id inputs are not threaded yet (the input service exposes roles,
-        # not fact ids), so the run carries its versions/status/coverage as the
-        # traceable artifact and no per-input rows for now.
+        # served value can be traced through an opaque provenance token, and
+        # name the facts it was derived from as typed inputs.
         run_id: str | None = None
         if self._derivations is not None and self._generate_token is not None:
             created = self._derivations.create_run(
@@ -179,7 +228,11 @@ class ScoreRecomputeHandler:
                 freshness_at=surface.freshness_at,
                 as_of_at=None,
                 status=surface.status.value,
-                inputs=[],
+                inputs=self._derivation_inputs(
+                    tenant_id=claim.tenant_id,
+                    local_health_day=local_health_day,
+                    surface=surface,
+                ),
                 generate_token=self._generate_token,
                 new_input_id=self._new_id,
                 now=now,

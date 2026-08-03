@@ -116,6 +116,10 @@ class FeatureSource(Protocol):
         """Daily step count per day where known; omit days with no steps."""
         ...
 
+    def fact_ids_for_day(self, *, tenant_id: str, local_health_day: str) -> dict[str, list[str]]:
+        """Current fact-record ids on the day, grouped by entity type."""
+        ...
+
 
 class SubjectiveSource(Protocol):
     """Port: the current completed check-in's normalized inputs for a day."""
@@ -283,6 +287,18 @@ class RecoveryInputService:
         return (
             [loads.get(day) for day in acute_window],
             [loads.get(day) for day in chronic_window],
+        )
+
+    def fact_ids_for_day(self, *, tenant_id: str, local_health_day: str) -> dict[str, list[str]]:
+        """Current fact-record ids on the day, grouped by entity type.
+
+        Provenance uses this to name the facts a score was derived from. It
+        reads through the same feature port the components read, so the ids
+        disclosed are the rows the score actually consumed.
+        """
+        return self._features.fact_ids_for_day(
+            tenant_id=tenant_id,
+            local_health_day=local_health_day,
         )
 
     def acwr_for_day(self, *, tenant_id: str, local_health_day: str) -> float | None:

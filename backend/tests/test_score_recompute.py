@@ -27,6 +27,7 @@ from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import (
     DailyHealthScore,
+    DerivationInput,
     DerivationRun,
     FactRecord,
     OvernightVitals,
@@ -349,6 +350,57 @@ def test_recompute_creates_traceable_derivation_run(
     assert resolved.artifact_kind == "score"
     assert resolved.local_health_day == DAY
     assert resolved.status == score.status
+
+
+def test_recompute_records_the_facts_it_derived_from(
+    factory: sessionmaker[Session],
+) -> None:
+    """The run names the day's facts as typed inputs, not just roles.
+
+    This is the last hop of "traceable back to the raw payload": the input rows
+    carry real ``fact_record_id`` FKs, so a score resolves to the exact fact
+    versions it read.
+    """
+    _seed_full_history(factory)
+    _run(factory)
+
+    with factory() as session:
+        run = session.scalars(select(DerivationRun)).one()
+        rows = session.execute(
+            select(DerivationInput.role, DerivationInput.fact_record_id).where(
+                DerivationInput.derivation_run_id == run.id
+            )
+        ).all()
+
+    by_role = dict(rows)
+    # HRV and resting HR both read the day's overnight-vitals fact...
+    assert by_role["hrv"] == "tv"
+    assert by_role["resting_hr"] == "tv"
+    # ...and sleep adherence reads the day's sleep fact.
+    assert by_role["sleep_adherence"] == "ts"
+    # Every input points at a real fact this tenant owns.
+    assert all(fact_id in {"tv", "ts"} for _role, fact_id in rows)
+
+
+def test_omitted_components_record_no_input(factory: sessionmaker[Session]) -> None:
+    """A component with no mature baseline read no fact, so it names none.
+
+    A sleep-only day is `insufficient`: HRV/RHR were never computed, so
+    claiming a vitals input would assert lineage the score does not have.
+    """
+    _seed_sleep(factory, day=DAY, fact_id="ts")
+    _run(factory)
+
+    with factory() as session:
+        run = session.scalars(select(DerivationRun)).one()
+        roles = set(
+            session.scalars(
+                select(DerivationInput.role).where(DerivationInput.derivation_run_id == run.id)
+            ).all()
+        )
+
+    assert "hrv" not in roles
+    assert "resting_hr" not in roles
 
 
 def test_persisted_score_has_signed_factors(factory: sessionmaker[Session]) -> None:
