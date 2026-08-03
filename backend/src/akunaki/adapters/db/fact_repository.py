@@ -8,10 +8,11 @@ makes re-normalization safely repeatable.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import InstrumentedAttribute, Session, sessionmaker
 
 from akunaki.adapters.db.models import (
@@ -21,6 +22,7 @@ from akunaki.adapters.db.models import (
     SleepSession,
     WorkoutSession,
 )
+from akunaki.application.workouts_surface import WorkoutSummary
 from akunaki.domain.activity_normalizer import (
     ENTITY_TYPE as ACTIVITY_ENTITY_TYPE,
 )
@@ -772,6 +774,87 @@ class FactRepository:
             column=OvernightVitals.respiratory_rate_bpm,
         )
 
+    def list_workouts(
+        self,
+        *,
+        tenant_id: str,
+        limit: int,
+        cursor: str | None = None,
+    ) -> tuple[list[WorkoutSummary], str | None]:
+        """One page of a tenant's workouts, newest first, plus the next cursor.
+
+        Keyset pagination on ``(start_utc, fact_record_id)`` rather than an
+        offset: workouts arrive continuously, and an offset would skip or repeat
+        rows once a new sync lands between pages. The id breaks ties so two
+        sessions starting in the same second still order deterministically.
+
+        Excludes ``exclude_from_load = 1`` rows. That flag marks a *duplicate*
+        of the same real session from a second provider, so including it here
+        would show the user one workout twice.
+        """
+        conditions = [
+            FactRecord.tenant_id == tenant_id,
+            FactRecord.entity_type == WORKOUT_ENTITY_TYPE,
+            FactRecord.is_current == 1,
+            FactRecord.deletion_state == "active",
+            FactRecord.exclude_from_load == 0,
+        ]
+        if cursor is not None:
+            decoded = _decode_workout_cursor(cursor)
+            if decoded is None:
+                # A malformed cursor is a client error, not a silent full scan.
+                msg = "cursor is not a valid workout cursor"
+                raise ValueError(msg)
+            last_start, last_id = decoded
+            # Strictly "older than" the last row of the previous page.
+            conditions.append(
+                or_(
+                    FactRecord.start_utc < last_start,
+                    and_(FactRecord.start_utc == last_start, FactRecord.id < last_id),
+                )
+            )
+
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(FactRecord, WorkoutSession)
+                .join(WorkoutSession, WorkoutSession.fact_record_id == FactRecord.id)
+                .where(*conditions)
+                .order_by(FactRecord.start_utc.desc(), FactRecord.id.desc())
+                # One extra row reveals whether another page exists without a
+                # second count query.
+                .limit(limit + 1)
+            ).all()
+
+        has_more = len(rows) > limit
+        page = [_workout_summary(fact, detail) for fact, detail in rows[:limit]]
+        next_cursor = None
+        if has_more and page:
+            last = rows[limit - 1][0]
+            next_cursor = _encode_workout_cursor(last.start_utc, last.id)
+        return page, next_cursor
+
+    def get_workout(self, *, tenant_id: str, workout_id: str) -> WorkoutSummary | None:
+        """One workout the tenant owns, or None when unknown or not theirs.
+
+        Tenant-scoped in the query itself, so another tenant's id resolves to
+        None exactly like a nonexistent one.
+        """
+        with self._session_factory() as session:
+            row = session.execute(
+                select(FactRecord, WorkoutSession)
+                .join(WorkoutSession, WorkoutSession.fact_record_id == FactRecord.id)
+                .where(
+                    FactRecord.id == workout_id,
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.entity_type == WORKOUT_ENTITY_TYPE,
+                    FactRecord.is_current == 1,
+                    FactRecord.deletion_state == "active",
+                )
+            ).first()
+        if row is None:
+            return None
+        return _workout_summary(row[0], row[1])
+
     def daily_strain_load(
         self,
         *,
@@ -913,6 +996,46 @@ class FactRepository:
             if provider is not None:
                 by_provider.setdefault(provider, []).append(fact_id)
         return by_provider
+
+
+def _workout_summary(fact: FactRecord, detail: WorkoutSession) -> WorkoutSummary:
+    """Project a fact + its workout detail into the disclosed summary."""
+    return WorkoutSummary(
+        workout_id=fact.id,
+        provider=fact.provider or "",
+        local_health_day=fact.local_health_day or "",
+        start_utc=fact.start_utc or "",
+        end_utc=fact.end_utc or "",
+        session_load=float(detail.session_load),
+        zone1_min=float(detail.zone1_min),
+        zone2_min=float(detail.zone2_min),
+        zone3_min=float(detail.zone3_min),
+        zone4_min=float(detail.zone4_min),
+        zone5_min=float(detail.zone5_min),
+    )
+
+
+def _encode_workout_cursor(start_utc: str, fact_id: str) -> str:
+    """Opaque cursor for the last row of a page.
+
+    Base64 of ``start_utc|id``. Opaque so clients treat it as a handle rather
+    than a queryable filter, and so the keyset columns can change without
+    breaking a client that stored one.
+    """
+    raw = f"{start_utc}|{fact_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode()
+
+
+def _decode_workout_cursor(cursor: str) -> tuple[str, str] | None:
+    """Decode a cursor to ``(start_utc, fact_id)``, or None when malformed."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    start_utc, separator, fact_id = raw.partition("|")
+    if not separator or not start_utc or not fact_id:
+        return None
+    return start_utc, fact_id
 
 
 def _authoritative_per_day(by_day: dict[str, dict[str, float]]) -> dict[str, float]:
