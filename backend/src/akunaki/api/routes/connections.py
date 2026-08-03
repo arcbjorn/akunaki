@@ -34,6 +34,7 @@ from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
 from akunaki.api.app import get_session_factory
 from akunaki.api.security import CurrentSession
+from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.oauth_linking import LinkRejection, OAuthLinkingService
 from akunaki.config import ConnectorOAuthConfig, Settings
 
@@ -53,6 +54,27 @@ class LinkedResponse(BaseModel):
     connection_id: str
     provider: str
     status: str
+
+
+class ConnectionStatusResponse(BaseModel):
+    """One linked connection's status and ingest progress."""
+
+    connection_id: str
+    provider: str
+    status: str = Field(description="pending, active, needs_reauth, revoked, or error.")
+    last_success_at: str | None = Field(description="Last successful sync, UTC RFC3339.")
+    last_error_class: str | None = Field(
+        description="Error class only; never a vendor body or message.",
+    )
+    consecutive_failures: int
+    transport_pages: int = Field(description="Raw vendor responses retained.")
+    raw_revisions: int = Field(description="Logical records ingested for this connection.")
+
+
+class ConnectionsResponse(BaseModel):
+    """The caller's connections. Empty when nothing is linked."""
+
+    connections: list[ConnectionStatusResponse]
 
 
 def _settings(request: Request) -> Settings:
@@ -89,6 +111,37 @@ def _linking_service(
         generate_code_verifier=generate_code_verifier,
         code_challenge=code_challenge_s256,
         new_id=lambda: str(uuid.uuid4()),
+    )
+
+
+@router.get("", response_model=ConnectionsResponse)
+def list_connections(
+    response: Response,
+    session: CurrentSession,
+    session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
+) -> ConnectionsResponse:
+    """List the caller's connections with their sync status.
+
+    Tenant-scoped from the session: a caller sees only their own connections,
+    and cannot ask for another tenant's by parameter. Carries no health values
+    — statuses, timestamps, and ingest counts only.
+    """
+    response.headers["Cache-Control"] = "private, no-store"
+    service = ConnectionsSurfaceService(connections=ConnectionRepository(session_factory))
+    return ConnectionsResponse(
+        connections=[
+            ConnectionStatusResponse(
+                connection_id=summary.connection_id,
+                provider=summary.provider,
+                status=summary.status,
+                last_success_at=summary.last_success_at,
+                last_error_class=summary.last_error_class,
+                consecutive_failures=summary.consecutive_failures,
+                transport_pages=summary.transport_pages,
+                raw_revisions=summary.raw_revisions,
+            )
+            for summary in service.connections_for_tenant(tenant_id=session.tenant_id)
+        ]
     )
 
 

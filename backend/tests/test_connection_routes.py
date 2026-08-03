@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import akunaki.api.routes.connections as connections_mod
 from akunaki.adapters.connectors.polar import PolarOAuthClient
-from akunaki.adapters.db.models import Tenant, User
+from akunaki.adapters.db.models import Connection, Tenant, User
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import SESSION_COOKIE_NAME
@@ -179,3 +179,92 @@ def test_authorize_requires_a_session(client: TestClient) -> None:
     client.cookies.clear()
     resp = client.get("/v1/connections/polar/authorize")
     assert resp.status_code == 401
+
+
+def test_list_requires_a_session(client: TestClient) -> None:
+    """The surface this replaces was unauthenticated; this one is not."""
+    client.cookies.clear()
+    resp = client.get("/v1/connections")
+    assert resp.status_code == 401
+
+
+def test_list_is_empty_before_linking(client: TestClient, factory: sessionmaker[Session]) -> None:
+    # A user who has linked nothing has no connections: a real answer, not a 404.
+    _login(client, factory)
+    resp = client.get("/v1/connections")
+    assert resp.status_code == 200
+    assert resp.json() == {"connections": []}
+
+
+def test_list_shows_a_linked_connection(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """A freshly linked provider is reported active with its sync status."""
+    _login(client, factory)
+    authorize = client.get("/v1/connections/polar/authorize").json()
+    state = parse_qs(urlparse(authorize["authorize_url"]).query)["state"][0]
+    linked = client.get(
+        "/v1/connections/polar/callback",
+        params={"state": state, "code": "auth-code-1"},
+    ).json()
+
+    resp = client.get("/v1/connections")
+    assert resp.status_code == 200
+    connections = resp.json()["connections"]
+    assert len(connections) == 1
+    row = connections[0]
+    assert row["connection_id"] == linked["connection_id"]
+    assert row["provider"] == "polar"
+    assert row["status"] == "active"
+    # Linking resets the failure streak and records a first success.
+    assert row["consecutive_failures"] == 0
+    assert row["last_error_class"] is None
+    assert row["last_success_at"] is not None
+    # Nothing has been fetched yet, so both ingest counts are honestly zero.
+    assert row["transport_pages"] == 0
+    assert row["raw_revisions"] == 0
+
+
+def test_list_never_serves_another_tenant(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Tenant comes from the session, so another tenant's rows stay invisible.
+
+    The replaced debug route took ``tenant_id`` as a query parameter; supplying
+    one here must change nothing.
+    """
+    _login(client, factory)
+    authorize = client.get("/v1/connections/polar/authorize").json()
+    state = parse_qs(urlparse(authorize["authorize_url"]).query)["state"][0]
+    client.get(
+        "/v1/connections/polar/callback",
+        params={"state": state, "code": "auth-code-1"},
+    )
+
+    # A second tenant owning its own connection.
+    with factory() as session, session.begin():
+        session.add(
+            Tenant(
+                id="tenant-2",
+                created_at=to_utc_rfc3339(datetime.now(UTC)),
+                status="active",
+                primary_timezone="UTC",
+                display_name="Other",
+            )
+        )
+        session.add(
+            Connection(
+                id="conn-other",
+                tenant_id="tenant-2",
+                provider="oura",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=to_utc_rfc3339(datetime.now(UTC)),
+                updated_at=to_utc_rfc3339(datetime.now(UTC)),
+            )
+        )
+
+    # Even asking for the other tenant by parameter yields only the caller's own.
+    resp = client.get("/v1/connections", params={"tenant_id": "tenant-2"})
+    assert resp.status_code == 200
+    providers = [c["provider"] for c in resp.json()["connections"]]
+    assert providers == ["polar"]
