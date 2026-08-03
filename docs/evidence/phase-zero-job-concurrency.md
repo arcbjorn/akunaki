@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-18
 
-**Status:** Partial — the **local** file-backed libSQL repository implements the atomic durable execution lifecycle and leader fencing, and the **worker runtime** (claim → execute → heartbeat → settle, retry classification and capped backoff, leader-gated reaping) is implemented and proven under concurrent runtimes; **product job handlers**, **atomic domain side-effect fencing (UoW)**, sustained multi-**process** fleet load, and **Turso Cloud** are **not** implemented
+**Status:** Partial — the **local** file-backed libSQL repository implements the atomic durable execution lifecycle and leader fencing, the **worker runtime** (claim → execute → heartbeat → settle, retry classification and capped backoff, leader-gated reaping) is implemented and proven under concurrent runtimes, and **atomic domain side-effect fencing (UoW)** now ships; sustained multi-**process** fleet load and **Turso Cloud** are **not** implemented
 
 **Authoritative context:** [repository-and-services.md](../architecture/repository-and-services.md) job protocol, [testing.md](../testing.md) integration expectations, [ADR 0003](../adr/0003-libsql-operational-store.md)
 
@@ -20,7 +20,8 @@ Atomic claim uses **candidate discovery + conditional compare-and-swap**, never 
 6. **Requeue expired** (per-row fenced CAS): for each candidate, conditional `UPDATE` rechecks `status=leased`, expected fence, `attempts < max_attempts`, a matching expired lease, and its matching `running` attempt; on one-row win increment the job fence, set the job `ready`, mark the attempt `lease_expired` with `error_class=worker_lease_expired` and `finished_at`, then delete that exact lease. Return **actual wins**, not discovery count.
 7. **Dead-letter expired** (same fenced CAS shape): a leased job at max attempts with the matching expired lease and `running` attempt becomes `dead_letter`; the attempt becomes `dead_letter` with `error_class=worker_lease_expired`, the job fence increments once, the exact lease is deleted, and one `job_dead_letters` row is written.
 8. **Leader lease**: named row in `leader_leases`; CAS acquire when free/expired (null owner/expiry or `leased_until <= now`); fence increments on takeover; heartbeat and validity checks require owner + fence + unexpired. Schema requires nonempty `lease_name` and owner/expiry both null or both non-null.
-9. **`has_valid_job_lease`**: validity primitive (job status leased + owner + fence + unexpired matching lease). **Not** atomic domain side-effect fencing; that integrates with a later application unit of work.
+9. **`has_valid_job_lease`**: validity primitive (job status leased + owner + fence + unexpired matching lease). It answers "valid **now**", so checking and then writing leaves a window in which the lease expires and the write still lands. Fencing a domain side effect is `FencedUnitOfWork` (item 10), which runs the same check inside the write transaction.
+10. **`FencedUnitOfWork`**: runs a job's side effect in one transaction that also carries the lease check, verified before **and** after the work. The post-check is load-bearing — it spans the seconds the work actually takes — and shares the transaction with the writes, so a lost lease rolls the side effect back instead of leaving it durable behind the worker that took the job over. On loss it raises `LeaseLostError`; the runtime then settles **nothing**, since recording a failure would burn the new owner's attempt budget under a dead fence.
 
 Failure inputs reject naive time, empty identifiers or `error_class`, negative retry delay, and redacted messages over 500 characters. Retry scheduling is a durable repository primitive using the caller-provided delay; no runtime retry classification or backoff policy is claimed.
 
@@ -151,8 +152,9 @@ Concurrency tests do **not** use always-true branches, fairness assumptions, or 
 |----------|----------------------------|
 | Local file-backed `sqlite+libsql` (QueuePool) + in-memory StaticPool | Turso Cloud / remote auth |
 | Jobs, leases, attempts, and dead letters (migrations through `20260713_0003`) | Sustained multi-**process** fleet under production load |
-| `JobRepository` CAS claim, idempotent enqueue, and atomic execution-lifecycle transitions | Atomic domain side-effect fencing / application UoW |
-| Worker runtime claim/heartbeat/settle loop + leader-gated reaper tick | Product job handlers and operator dead-letter UI |
+| `JobRepository` CAS claim, idempotent enqueue, and atomic execution-lifecycle transitions | Operator dead-letter UI / drain tooling |
+| `FencedUnitOfWork` domain side-effect fencing (lease check inside the write transaction) | Turso Cloud / remote multi-client fencing |
+| Worker runtime claim/heartbeat/settle loop + leader-gated reaper tick | Multi-worker **fairness** |
 | Runtime retry classification and capped backoff policy | Turso Cloud multi-client execution |
 | Pure domain lifecycle/failure types + ports Protocol | Production multi-region leadership |
 | Durable attempt history and one-to-one dead-letter records | Encryption / backup spikes |
@@ -220,9 +222,8 @@ The migration test exercises head → `20260713_0002` → head, preserves a lega
 
 - Sustained multi-**process** fleet under production load (concurrency is proven with in-process threads on independent engines, not a long-running or cross-host soak)
 - Dead-letter operator UI or drain tooling
-- Atomic domain side-effect fencing tied to application unit of work (`has_valid_job_lease` is validity-only)
 - Turso Cloud connectivity or multi-region leader election
-- Full product job types / handlers (only `system.noop` ships)
+- Fenced side effects **beyond the score recompute path**: `FencedUnitOfWork` ships and `ScoreRecomputeHandler` persists through it; the sync/normalize handlers still write outside a fence. Facts are versioned by the same supersede-never-rewrite rule as scores, so the machinery would apply — but the exposure differs in kind: `raw.normalize` is keyed by an **immutable** `raw_revision_id`, so a stale worker and the new owner normalize byte-identical input, produce the same `content_hash`, and the second write dedupes to a no-op. `score.recompute` reads a **moving** window of facts, so two workers running at different times legitimately compute different results and the stale one supersedes. Fencing normalize is therefore defence in depth, not an open corruption path
 - Encryption-at-rest, volume spikes, vectors
 - Multi-worker **fairness** (both workers always win claims)
 
