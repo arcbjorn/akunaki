@@ -15,6 +15,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.models import Anomaly as AnomalyRow
+from akunaki.application.anomalies_surface import AnomalyInterval
 from akunaki.domain.anomalies import AnomalySeverity, AnomalyState
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
 
@@ -126,6 +127,46 @@ class AnomalyRepository:
                     updated_at=now_s,
                 )
             )
+
+    def recent_intervals(
+        self, *, tenant_id: str, since_day: str, limit: int = 50
+    ) -> list[AnomalyInterval]:
+        """Active anomalies plus those that closed on or after ``since_day``.
+
+        "Recent" includes closed intervals on purpose: an anomaly that opened
+        Tuesday and cleared Thursday is the part of the story that explains why
+        a past day read the way it did. Dropping it the moment it closes would
+        leave the user with an unexplained gap.
+
+        Active intervals come first (they are what the user acts on), then the
+        most recently ended, then feature code for a stable order.
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(AnomalyRow)
+                .where(
+                    AnomalyRow.tenant_id == tenant_id,
+                    (AnomalyRow.is_active == 1) | (AnomalyRow.ended_on >= since_day),
+                )
+                .order_by(
+                    AnomalyRow.is_active.desc(),
+                    AnomalyRow.ended_on.desc(),
+                    AnomalyRow.feature_code,
+                )
+                .limit(limit)
+            ).scalars()
+
+            return [
+                AnomalyInterval(
+                    feature_code=row.feature_code,
+                    severity=AnomalySeverity(row.severity),
+                    started_on=row.started_on,
+                    ended_on=row.ended_on,
+                    is_active=bool(row.is_active),
+                    formula_version=row.formula_version,
+                )
+                for row in rows
+            ]
 
     def has_active_high_severity(self, *, tenant_id: str) -> bool:
         """Whether any active anomaly is high severity (for the label downshift)."""

@@ -189,3 +189,67 @@ def test_has_active_high_severity(factory: sessionmaker[Session]) -> None:
         now=T0,
     )
     assert repo.has_active_high_severity(tenant_id="tenant-1") is True
+
+
+def _open(
+    repo: AnomalyRepository,
+    *,
+    anomaly_id: str,
+    feature_code: str,
+    day: str = DAY,
+    severity: AnomalySeverity = AnomalySeverity.MODERATE,
+) -> None:
+    repo.open_interval(
+        anomaly_id=anomaly_id,
+        tenant_id="tenant-1",
+        feature_code=feature_code,
+        severity=severity,
+        z_like=-2.7,
+        formula_version="anomaly_v0.1.0",
+        local_health_day=day,
+        now=T0,
+    )
+
+
+def test_recent_intervals_reads_what_the_tracker_wrote(
+    factory: sessionmaker[Session],
+) -> None:
+    """The read query must see the interval the write path opened."""
+    repo = AnomalyRepository(factory)
+    _open(repo, anomaly_id="a1", feature_code="low_hrv", severity=AnomalySeverity.HIGH)
+
+    [interval] = repo.recent_intervals(tenant_id="tenant-1", since_day="2026-07-01")
+
+    assert interval.feature_code == "low_hrv"
+    assert interval.severity is AnomalySeverity.HIGH
+    assert interval.started_on == DAY
+    assert interval.ended_on is None
+    assert interval.is_active is True
+    assert interval.formula_version == "anomaly_v0.1.0"
+
+
+def test_recent_intervals_keeps_an_active_one_older_than_the_window(
+    factory: sessionmaker[Session],
+) -> None:
+    """An interval open since long ago is still what the user is living with.
+
+    The window bounds how long a *cleared* anomaly stays visible; it must never
+    hide one that is still open.
+    """
+    repo = AnomalyRepository(factory)
+    _open(repo, anomaly_id="a1", feature_code="low_hrv", day="2020-01-01")
+
+    intervals = repo.recent_intervals(tenant_id="tenant-1", since_day="2026-07-01")
+
+    assert [i.feature_code for i in intervals] == ["low_hrv"]
+
+
+def test_recent_intervals_respects_the_limit(factory: sessionmaker[Session]) -> None:
+    """A bounded read: a pathological history cannot return unbounded rows."""
+    repo = AnomalyRepository(factory)
+    for n, code in enumerate(
+        ("low_hrv", "elevated_rhr", "deviant_temperature", "short_sleep"), start=1
+    ):
+        _open(repo, anomaly_id=f"a{n}", feature_code=code)
+
+    assert len(repo.recent_intervals(tenant_id="tenant-1", since_day="2026-07-01", limit=2)) == 2
