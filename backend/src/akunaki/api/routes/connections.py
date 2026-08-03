@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -31,11 +31,13 @@ from akunaki.adapters.crypto.oauth import (
     generate_state,
 )
 from akunaki.adapters.db.connection_repository import ConnectionRepository
+from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
 from akunaki.api.app import get_session_factory
 from akunaki.api.security import CurrentSession
 from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.oauth_linking import LinkRejection, OAuthLinkingService
+from akunaki.application.sync_request import SyncRequestRejection, SyncRequestService
 from akunaki.config import ConnectorOAuthConfig, Settings
 
 router = APIRouter(prefix="/v1/connections", tags=["connections"])
@@ -69,6 +71,15 @@ class ConnectionStatusResponse(BaseModel):
     consecutive_failures: int
     transport_pages: int = Field(description="Raw vendor responses retained.")
     raw_revisions: int = Field(description="Logical records ingested for this connection.")
+
+
+class SyncRequestedResponse(BaseModel):
+    """A queued manual sync."""
+
+    job_id: str
+    created: bool = Field(
+        description="False when an identical sync was already in flight (deduped).",
+    )
 
 
 class ConnectionsResponse(BaseModel):
@@ -143,6 +154,51 @@ def list_connections(
             for summary in service.connections_for_tenant(tenant_id=session.tenant_id)
         ]
     )
+
+
+@router.post("/{connection_id}/sync", response_model=SyncRequestedResponse)
+def request_sync(
+    connection_id: str,
+    response: Response,
+    session: CurrentSession,
+    session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
+    idempotency_key: Annotated[
+        str,
+        Header(
+            alias="Idempotency-Key",
+            min_length=1,
+            max_length=128,
+            description="Collapses a retried sync request into one queued job.",
+        ),
+    ],
+) -> SyncRequestedResponse:
+    """Enqueue an immediate incremental sync for one of the caller's connections.
+
+    CSRF-enforced (a state-changing method) and tenant-scoped from the session.
+    Queues the same job the webhook and reconcile paths use, so a manual sync
+    has no separate semantics — it resumes from the stored cursor and dedupes
+    on content hash like any other.
+    """
+    response.headers["Cache-Control"] = "private, no-store"
+    service = SyncRequestService(
+        connections=ConnectionRepository(session_factory),
+        jobs=JobRepository(session_factory),
+        new_id=lambda: str(uuid.uuid4()),
+    )
+    outcome = service.request_sync(
+        tenant_id=session.tenant_id,
+        connection_id=connection_id,
+        idempotency_key=idempotency_key,
+        now=datetime.now(UTC),
+    )
+    if outcome is SyncRequestRejection.NOT_FOUND:
+        # Unknown and cross-tenant are the same 404: ids cannot be probed.
+        raise HTTPException(status_code=404, detail={"code": "not_found"})
+    if outcome is SyncRequestRejection.NOT_SYNCABLE:
+        # 409, not 404: the connection exists but needs re-consent first, and
+        # the caller can act on that.
+        raise HTTPException(status_code=409, detail={"code": "connection_not_syncable"})
+    return SyncRequestedResponse(job_id=outcome.job_id, created=outcome.created)
 
 
 @router.get("/{provider}/authorize", response_model=AuthorizeResponse)

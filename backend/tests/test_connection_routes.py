@@ -19,14 +19,15 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 import akunaki.api.routes.connections as connections_mod
 from akunaki.adapters.connectors.polar import PolarOAuthClient
-from akunaki.adapters.db.models import Connection, Tenant, User
+from akunaki.adapters.db.models import Connection, Job, Tenant, User
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
-from akunaki.api.security import SESSION_COOKIE_NAME
+from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
 from akunaki.config import ConnectorOAuthConfig, Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
 
@@ -121,7 +122,8 @@ def client(route_db: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClien
     yield TestClient(create_app(_settings(route_db)))
 
 
-def _login(client: TestClient, factory: sessionmaker[Session]) -> None:
+def _login(client: TestClient, factory: sessionmaker[Session]) -> str:
+    """Attach a session cookie and return its CSRF secret."""
     issued = SessionRepository(factory).issue(
         session_id="sess-user-1",
         user_id="user-1",
@@ -130,6 +132,7 @@ def _login(client: TestClient, factory: sessionmaker[Session]) -> None:
     )
     client.cookies.clear()
     client.cookies.set(SESSION_COOKIE_NAME, issued.token)
+    return str(issued.csrf_secret)
 
 
 def test_authorize_returns_a_provider_url(
@@ -268,3 +271,172 @@ def test_list_never_serves_another_tenant(
     assert resp.status_code == 200
     providers = [c["provider"] for c in resp.json()["connections"]]
     assert providers == ["polar"]
+
+
+# ---------------------------------------------------------------------------
+# Manual sync
+# ---------------------------------------------------------------------------
+
+
+def _link_polar(client: TestClient) -> str:
+    """Walk the real OAuth legs and return the linked connection id."""
+    authorize = client.get("/v1/connections/polar/authorize").json()
+    state = parse_qs(urlparse(authorize["authorize_url"]).query)["state"][0]
+    return str(
+        client.get(
+            "/v1/connections/polar/callback",
+            params={"state": state, "code": "auth-code-1"},
+        ).json()["connection_id"]
+    )
+
+
+def test_sync_requires_a_session(client: TestClient) -> None:
+    client.cookies.clear()
+    response = client.post("/v1/connections/conn-1/sync", headers={"Idempotency-Key": "k1"})
+    assert response.status_code == 401
+
+
+def test_sync_requires_csrf(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """Enqueuing work is state-changing, so a bare cookie is not enough."""
+    _login(client, factory)
+    connection_id = _link_polar(client)
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync", headers={"Idempotency-Key": "k1"}
+    )
+
+    assert response.status_code == 403
+
+
+def test_sync_requires_an_idempotency_key(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Without a key a retried click would queue a second job."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync", headers={CSRF_HEADER_NAME: csrf}
+    )
+
+    assert response.status_code == 422
+
+
+def test_sync_enqueues_an_incremental_sync(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The queued job is the same one webhooks and the sweep use."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+
+    body = client.post(
+        f"/v1/connections/{connection_id}/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    ).json()
+
+    assert body["created"] is True
+    with factory() as session:
+        job = session.scalars(
+            select(Job).where(Job.job_type == "connection.incremental_sync")
+        ).one()
+    assert job.tenant_id == "tenant-1"
+    assert connection_id in job.payload_json
+
+
+def test_repeated_sync_request_is_deduped(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A double-clicked button queues one job, not two."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    headers = {CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"}
+
+    first = client.post(f"/v1/connections/{connection_id}/sync", headers=headers).json()
+    second = client.post(f"/v1/connections/{connection_id}/sync", headers=headers).json()
+
+    assert first["created"] is True
+    assert second["created"] is False
+    assert second["job_id"] == first["job_id"]
+    with factory() as session:
+        jobs = session.scalars(
+            select(Job).where(Job.job_type == "connection.incremental_sync")
+        ).all()
+    assert len(jobs) == 1
+
+
+def test_sync_on_an_unknown_connection_is_404(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/connections/nope/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_sync_on_another_tenants_connection_is_the_same_404(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Cross-tenant and unknown must be indistinguishable, and queue nothing."""
+    csrf = _login(client, factory)
+    with factory() as session, session.begin():
+        session.add(
+            Tenant(
+                id="tenant-2",
+                created_at=to_utc_rfc3339(datetime.now(UTC)),
+                status="active",
+                primary_timezone="UTC",
+                display_name="Other",
+            )
+        )
+        session.add(
+            Connection(
+                id="conn-theirs",
+                tenant_id="tenant-2",
+                provider="oura",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=to_utc_rfc3339(datetime.now(UTC)),
+                updated_at=to_utc_rfc3339(datetime.now(UTC)),
+            )
+        )
+
+    theirs = client.post(
+        "/v1/connections/conn-theirs/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+    unknown = client.post(
+        "/v1/connections/nope/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k2"},
+    )
+
+    assert theirs.status_code == unknown.status_code == 404
+    assert theirs.json() == unknown.json()
+    with factory() as session:
+        assert session.scalars(select(Job)).all() == []
+
+
+def test_sync_on_a_reauth_needing_connection_is_409(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A connection that cannot sync says so, rather than queuing a doomed job."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    with factory() as session, session.begin():
+        session.execute(
+            update(Connection).where(Connection.id == connection_id).values(status="needs_reauth")
+        )
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "connection_not_syncable"
+    with factory() as session:
+        assert session.scalars(select(Job)).all() == []
