@@ -16,16 +16,18 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.derivation_repository import DerivationRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
-from akunaki.adapters.db.models import Tenant
+from akunaki.adapters.db.models import DerivationInput, FactRecord, Tenant
 from akunaki.application.score_handlers import DerivationInputSpec
 from akunaki.config import Settings, clear_settings_cache
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 DAY = "2026-07-20"
+T0_S = "2026-07-20T12:00:00Z"
 
 _IDS = itertools.count(1)
 
@@ -130,12 +132,102 @@ def test_token_is_tenant_scoped(factory: sessionmaker[Session]) -> None:
 def test_run_without_inputs_resolves_with_no_roles(
     factory: sessionmaker[Session],
 ) -> None:
-    # v0.1.0 records score runs without typed fact-id inputs (roles are not
-    # threaded yet): a resolved lineage still carries its versions and status,
-    # with an empty input list rather than a fabricated one.
+    # A run may legitimately carry no typed inputs (an insufficient day whose
+    # components were all omitted): the lineage still carries its versions and
+    # status, with an empty input list rather than a fabricated one.
     repo = DerivationRepository(factory)
     token = _create(repo, token="opaque_tok_noinputs", inputs=[])
 
     lineage = repo.resolve_token(tenant_id="tenant-1", token=token)
     assert lineage is not None
     assert lineage.inputs == ()
+
+
+def _seed_fact(factory: sessionmaker[Session], *, fact_id: str) -> None:
+    """A minimal current fact row, so a typed input FK resolves."""
+    with factory() as session, session.begin():
+        session.add(
+            FactRecord(
+                id=fact_id,
+                tenant_id="tenant-1",
+                connection_id=None,
+                provider="oura",
+                entity_type="overnight_vitals",
+                vendor_record_id=fact_id,
+                origin=None,
+                method="wearable",
+                utc_instant=T0_S,
+                start_utc=T0_S,
+                end_utc=T0_S,
+                source_offset_minutes=0,
+                iana_timezone="UTC",
+                local_health_day=DAY,
+                unit=None,
+                quality="high",
+                confidence=1.0,
+                freshness_at=T0_S,
+                raw_revision_id=None,
+                raw_payload_id=None,
+                schema_version="v1",
+                normalizer_version="oura_vitals_v0.1.0",
+                content_hash=fact_id,
+                fact_key=f"overnight_vitals:{fact_id}",
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                deletion_state="active",
+                exclude_from_load=0,
+                created_at=T0_S,
+            )
+        )
+
+
+def test_typed_fact_inputs_are_persisted_and_disclosed(
+    factory: sessionmaker[Session],
+) -> None:
+    """A run records the facts it was derived from, disclosed as roles."""
+    _seed_fact(factory, fact_id="fact-hrv")
+    repo = DerivationRepository(factory)
+    token = _create(
+        repo,
+        token="opaque_tok_typed",
+        inputs=[DerivationInputSpec(role="hrv", fact_record_id="fact-hrv")],
+    )
+
+    # The row is durable with its typed FK — the run is traceable to the fact.
+    with factory() as session:
+        rows = session.execute(select(DerivationInput.role, DerivationInput.fact_record_id)).all()
+    assert rows == [("hrv", "fact-hrv")]
+
+    lineage = repo.resolve_token(tenant_id="tenant-1", token=token)
+    assert lineage is not None
+    assert [i.role for i in lineage.inputs] == ["hrv"]
+
+
+def test_repeated_role_discloses_one_entry(factory: sessionmaker[Session]) -> None:
+    """Several facts behind one role must not repeat it on the public lineage.
+
+    Ids are deliberately withheld, so a repeated role would leak how many facts
+    backed the day — exactly the disclosure the roles-only contract avoids.
+    """
+    _seed_fact(factory, fact_id="fact-a")
+    _seed_fact(factory, fact_id="fact-b")
+    repo = DerivationRepository(factory)
+    token = _create(
+        repo,
+        token="opaque_tok_dupe",
+        inputs=[
+            DerivationInputSpec(role="hrv", fact_record_id="fact-a"),
+            DerivationInputSpec(role="hrv", fact_record_id="fact-b"),
+        ],
+    )
+
+    # Both rows are stored for internal lineage...
+    with factory() as session:
+        assert session.execute(select(func.count()).select_from(DerivationInput)).scalar_one() == 2
+
+    # ...but the disclosed lineage names the role exactly once.
+    lineage = repo.resolve_token(tenant_id="tenant-1", token=token)
+    assert lineage is not None
+    assert [i.role for i in lineage.inputs] == ["hrv"]
