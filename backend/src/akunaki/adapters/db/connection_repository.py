@@ -10,11 +10,19 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.job_repository import affected_rows
-from akunaki.adapters.db.models import Connection, ConnectionHealth, ConnectionSecret
+from akunaki.adapters.db.models import (
+    Connection,
+    ConnectionHealth,
+    ConnectionSecret,
+    RawObject,
+    RawPayload,
+    RawRevision,
+)
+from akunaki.application.connections_surface import ConnectionSummary
 from akunaki.domain.connections import ConnectionStatus, LinkedConnection, Provider
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
 from akunaki.domain.secrets import SealedSecret
@@ -216,6 +224,73 @@ class ConnectionRepository:
                 .limit(limit)
             ).all()
         return [(cid, tid) for cid, tid in rows]
+
+    def connection_statuses(self, *, tenant_id: str) -> list[ConnectionSummary]:
+        """Per-connection status and ingest counts for one tenant.
+
+        Backs the authenticated ``/v1/connections`` surface. Every count is
+        scoped to **its own connection** — a tenant with two providers sees
+        each one's real ingest volume, not the tenant-wide total.
+
+        Counts are computed as correlated scalar subqueries in the same
+        statement, so the number of round trips does not grow with the number
+        of linked connections.
+        """
+        pages = (
+            select(func.count())
+            .select_from(RawPayload)
+            .where(RawPayload.connection_id == Connection.id)
+            .scalar_subquery()
+        )
+        # ``raw_revisions`` has no direct connection FK; it reaches one through
+        # the raw object whose logical record it versions.
+        revisions = (
+            select(func.count())
+            .select_from(RawRevision)
+            .join(RawObject, RawObject.id == RawRevision.raw_object_id)
+            .where(RawObject.connection_id == Connection.id)
+            .scalar_subquery()
+        )
+
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(
+                    Connection.id,
+                    Connection.provider,
+                    Connection.status,
+                    ConnectionHealth.last_success_at,
+                    ConnectionHealth.last_error_class,
+                    ConnectionHealth.consecutive_failures,
+                    pages,
+                    revisions,
+                )
+                .outerjoin(ConnectionHealth, ConnectionHealth.connection_id == Connection.id)
+                .where(Connection.tenant_id == tenant_id)
+                .order_by(Connection.provider, Connection.id)
+            ).all()
+
+        return [
+            ConnectionSummary(
+                connection_id=connection_id,
+                provider=provider,
+                status=status,
+                last_success_at=last_success_at,
+                last_error_class=last_error_class,
+                consecutive_failures=failures or 0,
+                transport_pages=int(transport_pages or 0),
+                raw_revisions=int(raw_revisions or 0),
+            )
+            for (
+                connection_id,
+                provider,
+                status,
+                last_success_at,
+                last_error_class,
+                failures,
+                transport_pages,
+                raw_revisions,
+            ) in rows
+        ]
 
     def get_sealed_secret(self, *, connection_id: str) -> SealedSecret | None:
         """Return the stored sealed tokens for a connection, if any."""
