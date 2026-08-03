@@ -16,6 +16,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 import akunaki.api.routes.tools as tools_module
@@ -24,7 +25,7 @@ from akunaki.adapters.db.anomaly_repository import AnomalyRepository
 from akunaki.adapters.db.confirmation_repository import ConfirmationRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
-from akunaki.adapters.db.models import FactRecord, SleepSession, Tenant, User
+from akunaki.adapters.db.models import Connection, FactRecord, Job, SleepSession, Tenant, User
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
@@ -44,6 +45,7 @@ from akunaki.domain.workout_normalizer import WorkoutFact
 T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
 DAY = "2026-07-22"
+RUN_ID = "run-1"
 
 
 def _backend_root() -> Path:
@@ -292,19 +294,23 @@ def test_connections_tool_is_not_scoped_as_health(
     assert connections["side_effect"] == "none"
 
 
-def test_no_mutating_tool_is_registered(client: TestClient, factory: sessionmaker[Session]) -> None:
-    """Only read tools ship: agent-mutation confirmation does not exist yet.
+def test_only_the_sync_tool_mutates(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """``connections.sync`` is the one mutating tool, and it requires confirmation.
 
-    Registering ``connections.sync`` or ``privacy.delete`` before the one-time
-    expiring confirmation machinery exists would make a mutation invocable on
-    the honour system.
+    Every other registered tool is a read. The lifecycle mutations that have no
+    service wiring yet (``exports.create``, ``privacy.delete``) must not appear.
     """
     _login(client, factory)
     tools = client.get("/v1/tools").json()["tools"]
 
-    assert all(t["side_effect"] == "none" for t in tools)
+    mutating = [t for t in tools if t["side_effect"] != "none"]
+    assert [t["name"] for t in mutating] == ["connections.sync"]
+    assert mutating[0]["side_effect"] == "enqueue_job"
+    assert mutating[0]["requires_confirmation"] is True
+    assert mutating[0]["scopes"] == ["write:connections"]
+
     names = {t["name"] for t in tools}
-    assert "connections.sync" not in names
+    assert "exports.create" not in names
     assert "privacy.delete" not in names
 
 
@@ -459,7 +465,7 @@ def _issue_confirmation(
         binding=ConfirmationBinding(
             tenant_id="tenant-1",
             user_id=user_id,
-            run_id=None,
+            run_id=RUN_ID,
             tool_name=tool_name,
             args_hash=canonical_args_hash(args),
             idempotency_key=idempotency_key,
@@ -479,7 +485,7 @@ def test_mutating_tool_without_confirmation_is_refused(
 
     response = client.post(
         "/v1/tools/test.mutate",
-        json={"input": {"target": "a"}},
+        json={"input": {"target": "a"}, "run_id": RUN_ID},
         headers={CSRF_HEADER_NAME: csrf},
     )
 
@@ -501,6 +507,7 @@ def test_mutating_tool_runs_with_a_matching_confirmation(
             "input": {"target": "a"},
             "confirmation_token": token,
             "idempotency_key": "idem-1",
+            "run_id": RUN_ID,
         },
         headers={CSRF_HEADER_NAME: csrf},
     )
@@ -526,6 +533,7 @@ def test_substituted_arguments_do_not_execute(
             "input": {"target": "b"},
             "confirmation_token": token,
             "idempotency_key": "idem-1",
+            "run_id": RUN_ID,
         },
         headers={CSRF_HEADER_NAME: csrf},
     )
@@ -546,6 +554,7 @@ def test_replayed_confirmation_does_not_execute_twice(
         "input": {"target": "a"},
         "confirmation_token": token,
         "idempotency_key": "idem-1",
+        "run_id": RUN_ID,
     }
 
     first = client.post("/v1/tools/test.mutate", json=payload, headers={CSRF_HEADER_NAME: csrf})
@@ -569,6 +578,7 @@ def test_confirmation_for_another_tool_does_not_execute(
             "input": {"target": "a"},
             "confirmation_token": token,
             "idempotency_key": "idem-1",
+            "run_id": RUN_ID,
         },
         headers={CSRF_HEADER_NAME: csrf},
     )
@@ -599,6 +609,7 @@ def test_rejection_reasons_are_indistinguishable(
                 "input": {"target": "a"},
                 "confirmation_token": tok,
                 "idempotency_key": key,
+                "run_id": RUN_ID,
             },
             headers={CSRF_HEADER_NAME: csrf},
         )
@@ -607,3 +618,136 @@ def test_rejection_reasons_are_indistinguishable(
 
     assert {r.status_code for r in responses} == {403}
     assert len({r.json()["detail"]["code"] for r in responses}) == 1
+
+
+def test_direct_call_needs_no_confirmation(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    """ "Confirmation **if agent**": a human in their own session is already explicit.
+
+    The call is CSRF-enforced and tenant-scoped; demanding a second approval
+    would make "sync now" unusable without adding safety.
+    """
+    client, calls = mutating_client
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/tools/test.mutate",
+        json={"input": {"target": "a"}},  # no run_id
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 200
+    assert calls == ["a"]
+
+
+def test_agent_call_cannot_skip_confirmation_by_omitting_the_run(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    """A confirmation bound to a run does not authorize a run-less call.
+
+    Dropping ``run_id`` takes the caller out of the agent path — which is the
+    unconfirmed path — but the binding still has to match, so a token issued
+    for a run cannot be spent outside it.
+    """
+    client, calls = mutating_client
+    csrf = _login(client, factory)
+    token = _issue_confirmation(factory, args={"target": "a"})
+
+    # Presenting a run-bound token without the run: confirmation is not even
+    # required, so it executes — but the token is left unspent rather than
+    # silently consumed by a call it was not issued for.
+    response = client.post(
+        "/v1/tools/test.mutate",
+        json={
+            "input": {"target": "a"},
+            "confirmation_token": token,
+            "idempotency_key": "idem-1",
+        },
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+    assert response.status_code == 200
+    assert calls == ["a"]
+
+    # The run-scoped token is still pending, so the agent path still needs it.
+    agent = client.post(
+        "/v1/tools/test.mutate",
+        json={
+            "input": {"target": "a"},
+            "confirmation_token": token,
+            "idempotency_key": "idem-1",
+            "run_id": RUN_ID,
+        },
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+    assert agent.status_code == 200
+
+
+def test_sync_tool_enqueues_a_job(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """The mutating tool queues the same incremental sync the webhook path does."""
+    with factory() as session, session.begin():
+        session.add(
+            Connection(
+                id="conn-1",
+                tenant_id="tenant-1",
+                provider="polar",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+    csrf = _login(client, factory)
+
+    body = client.post(
+        "/v1/tools/connections.sync",
+        json={"input": {"connection_id": "conn-1"}},
+        headers={CSRF_HEADER_NAME: csrf},
+    ).json()
+
+    assert body["created"] is True
+    with factory() as session:
+        job = session.scalars(
+            select(Job).where(Job.job_type == "connection.incremental_sync")
+        ).one()
+    assert job.tenant_id == "tenant-1"
+
+
+def test_sync_tool_cannot_reach_another_tenants_connection(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """An agent must not be able to sync a connection its user does not own."""
+    with factory() as session, session.begin():
+        session.add(
+            Tenant(
+                id="tenant-2",
+                created_at=NOW_S,
+                status="active",
+                primary_timezone="UTC",
+                display_name="Other",
+            )
+        )
+        session.add(
+            Connection(
+                id="conn-theirs",
+                tenant_id="tenant-2",
+                provider="polar",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/tools/connections.sync",
+        json={"input": {"connection_id": "conn-theirs"}},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 404
+    with factory() as session:
+        assert session.scalars(select(Job)).all() == []
