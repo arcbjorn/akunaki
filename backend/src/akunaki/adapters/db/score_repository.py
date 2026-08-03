@@ -56,101 +56,143 @@ class ScoreRepository:
         as_of_at: datetime | None,
         now: datetime,
         derivation_run_id: str | None = None,
+        session: Session | None = None,
     ) -> ScoreWriteOutcome:
         """Persist a recovery surface, superseding any differing current row.
 
         An identical recompute (same dependency hash) is a no-op. A changed
         result retires the current row and appends a new version with fresh
         factor rows.
+
+        Pass ``session`` to enlist in a caller's transaction — the fenced unit
+        of work does this so the write commits (or rolls back) together with
+        the job-lease check that authorized it. Without it the repository opens
+        and commits its own transaction as before.
         """
         if not score_id or not tenant_id:
             msg = "score_id and tenant_id must be non-empty"
             raise ValueError(msg)
 
+        if session is not None:
+            return self._write_recovery_score(
+                session,
+                score_id=score_id,
+                tenant_id=tenant_id,
+                surface=surface,
+                new_factor_id=new_factor_id,
+                as_of_at=as_of_at,
+                now=now,
+                derivation_run_id=derivation_run_id,
+            )
+
+        with self._session_factory() as owned, owned.begin():
+            return self._write_recovery_score(
+                owned,
+                score_id=score_id,
+                tenant_id=tenant_id,
+                surface=surface,
+                new_factor_id=new_factor_id,
+                as_of_at=as_of_at,
+                now=now,
+                derivation_run_id=derivation_run_id,
+            )
+
+    def _write_recovery_score(
+        self,
+        session: Session,
+        *,
+        score_id: str,
+        tenant_id: str,
+        surface: RecoverySurface,
+        new_factor_id: Callable[[], str],
+        as_of_at: datetime | None,
+        now: datetime,
+        derivation_run_id: str | None,
+    ) -> ScoreWriteOutcome:
+        """Write the score through ``session``, which owns the transaction."""
         now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
         as_of_s = (
             to_utc_rfc3339(require_aware(as_of_at, field_name="as_of_at")) if as_of_at else None
         )
         dependency_hash = _dependency_hash(surface)
 
-        with self._session_factory() as session, session.begin():
-            current = session.execute(
-                select(DailyHealthScore).where(
-                    DailyHealthScore.tenant_id == tenant_id,
-                    DailyHealthScore.local_health_day == surface.local_health_day,
-                    DailyHealthScore.score_code == surface.score_code,
-                    DailyHealthScore.is_current == 1,
-                )
-            ).scalar_one_or_none()
-
-            if current is not None and current.dependency_hash == dependency_hash:
-                # Identical disclosed result: recompute is a no-op.
-                return ScoreWriteOutcome(
-                    daily_health_score_id=current.id,
-                    version_n=current.version_n,
-                    is_new_version=False,
-                )
-
-            next_version = 1
-            superseded_id: str | None = None
-            if current is not None:
-                next_version = current.version_n + 1
-                superseded_id = current.id
-                # Retire the old version before inserting the new one: the
-                # partial unique index permits only one current row per key.
-                session.execute(
-                    update(DailyHealthScore)
-                    .where(DailyHealthScore.id == current.id)
-                    .values(
-                        is_current=0,
-                        superseded_by=score_id,
-                        superseded_at=now_s,
-                    )
-                )
-                session.flush()
-
-            session.add(
-                DailyHealthScore(
-                    id=score_id,
-                    tenant_id=tenant_id,
-                    local_health_day=surface.local_health_day,
-                    score_code=surface.score_code,
-                    status=surface.status.value,
-                    score=surface.score,
-                    available_weight=surface.available_weight,
-                    confidence=surface.confidence,
-                    formula_version=surface.formula_version,
-                    dependency_hash=dependency_hash,
-                    freshness_at=now_s,
-                    as_of_at=as_of_s,
-                    derivation_run_id=derivation_run_id,
-                    version_n=next_version,
-                    is_current=1,
-                    superseded_by=None,
-                    superseded_at=None,
-                    created_at=now_s,
-                )
+        current = session.execute(
+            select(DailyHealthScore).where(
+                DailyHealthScore.tenant_id == tenant_id,
+                DailyHealthScore.local_health_day == surface.local_health_day,
+                DailyHealthScore.score_code == surface.score_code,
+                DailyHealthScore.is_current == 1,
             )
-            for factor in surface.factors:
-                session.add(
-                    ScoreFactor(
-                        id=new_factor_id(),
-                        daily_health_score_id=score_id,
-                        tenant_id=tenant_id,
-                        factor_code=factor.factor_code,
-                        sign=_factor_sign(factor.magnitude, present=factor.present),
-                        magnitude=factor.magnitude,
-                        weight=factor.weight,
-                        present=1 if factor.present else 0,
-                    )
-                )
+        ).scalar_one_or_none()
 
+        if current is not None and current.dependency_hash == dependency_hash:
+            # Identical disclosed result: recompute is a no-op.
             return ScoreWriteOutcome(
-                daily_health_score_id=score_id,
-                version_n=next_version,
-                is_new_version=True,
-                superseded_id=superseded_id,
+                daily_health_score_id=current.id,
+                version_n=current.version_n,
+                is_new_version=False,
             )
+
+        next_version = 1
+        superseded_id: str | None = None
+        if current is not None:
+            next_version = current.version_n + 1
+            superseded_id = current.id
+            # Retire the old version before inserting the new one: the
+            # partial unique index permits only one current row per key.
+            session.execute(
+                update(DailyHealthScore)
+                .where(DailyHealthScore.id == current.id)
+                .values(
+                    is_current=0,
+                    superseded_by=score_id,
+                    superseded_at=now_s,
+                )
+            )
+            session.flush()
+
+        session.add(
+            DailyHealthScore(
+                id=score_id,
+                tenant_id=tenant_id,
+                local_health_day=surface.local_health_day,
+                score_code=surface.score_code,
+                status=surface.status.value,
+                score=surface.score,
+                available_weight=surface.available_weight,
+                confidence=surface.confidence,
+                formula_version=surface.formula_version,
+                dependency_hash=dependency_hash,
+                freshness_at=now_s,
+                as_of_at=as_of_s,
+                derivation_run_id=derivation_run_id,
+                version_n=next_version,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                created_at=now_s,
+            )
+        )
+        for factor in surface.factors:
+            session.add(
+                ScoreFactor(
+                    id=new_factor_id(),
+                    daily_health_score_id=score_id,
+                    tenant_id=tenant_id,
+                    factor_code=factor.factor_code,
+                    sign=_factor_sign(factor.magnitude, present=factor.present),
+                    magnitude=factor.magnitude,
+                    weight=factor.weight,
+                    present=1 if factor.present else 0,
+                )
+            )
+
+        return ScoreWriteOutcome(
+            daily_health_score_id=score_id,
+            version_n=next_version,
+            is_new_version=True,
+            superseded_id=superseded_id,
+        )
 
     def current_recovery_score(
         self, *, tenant_id: str, local_health_day: str
