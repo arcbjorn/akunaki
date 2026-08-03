@@ -75,12 +75,13 @@ def _seed_sleep(
     time_in_bed_min: float | None,
     start_utc: str = NOW_S,
     day: str = DAY,
+    tenant_id: str = "tenant-1",
 ) -> None:
     with factory() as session, session.begin():
         session.add(
             FactRecord(
                 id=fact_id,
-                tenant_id="tenant-1",
+                tenant_id=tenant_id,
                 connection_id=None,
                 provider=provider,
                 entity_type="sleep_session",
@@ -115,7 +116,7 @@ def _seed_sleep(
         session.add(
             SleepSession(
                 fact_record_id=fact_id,
-                tenant_id="tenant-1",
+                tenant_id=tenant_id,
                 is_nap=0,
                 duration_min=duration_min,
                 time_in_bed_min=time_in_bed_min,
@@ -210,3 +211,67 @@ def test_midpoint_uses_only_the_authoritative_provider(
     # the [0, 1440) circle. Google's 20:00 onset would give a different midpoint;
     # it must not be chosen.
     assert mids[DAY] == pytest.approx((1380.0 + 210.0) % 1440.0)
+
+
+def test_fact_ids_for_day_pick_the_authoritative_provider(
+    factory: sessionmaker[Session],
+) -> None:
+    """Provenance names only the facts the score actually read.
+
+    A day covered by two sleep providers has one authoritative source; the
+    losing candidate's fact must not read as a derivation input, or the lineage
+    would claim a value the score never used.
+    """
+    _seed_sleep(factory, provider="oura", fact_id="o", duration_min=420.0, time_in_bed_min=460.0)
+    _seed_sleep(
+        factory, provider="google_health", fact_id="g", duration_min=400.0, time_in_bed_min=440.0
+    )
+
+    ids = FactRepository(factory).fact_ids_for_day(tenant_id="tenant-1", local_health_day=DAY)
+
+    # Oura wins the day, exactly as the duration/efficiency queries select.
+    assert ids == {"sleep_session": ["o"]}
+
+
+def test_fact_ids_for_day_are_tenant_and_day_scoped(
+    factory: sessionmaker[Session],
+) -> None:
+    """One tenant's facts never read as another's inputs, nor another day's."""
+    _seed_sleep(factory, provider="oura", fact_id="o", duration_min=420.0, time_in_bed_min=460.0)
+    # A second tenant that genuinely owns a fact on the same day.
+    with factory() as session, session.begin():
+        session.add(
+            Tenant(
+                id="tenant-2",
+                created_at=NOW_S,
+                status="active",
+                primary_timezone="UTC",
+                display_name="Other",
+            )
+        )
+    _seed_sleep(
+        factory,
+        provider="oura",
+        fact_id="other-tenant-fact",
+        duration_min=400.0,
+        time_in_bed_min=430.0,
+        tenant_id="tenant-2",
+    )
+
+    repo = FactRepository(factory)
+    # Each tenant sees only its own fact, never the other's.
+    assert repo.fact_ids_for_day(tenant_id="tenant-1", local_health_day=DAY) == {
+        "sleep_session": ["o"]
+    }
+    assert repo.fact_ids_for_day(tenant_id="tenant-2", local_health_day=DAY) == {
+        "sleep_session": ["other-tenant-fact"]
+    }
+    # A different day carries none of them.
+    assert repo.fact_ids_for_day(tenant_id="tenant-1", local_health_day="2026-07-19") == {}
+
+
+def test_fact_ids_for_day_empty_when_nothing_recorded(
+    factory: sessionmaker[Session],
+) -> None:
+    repo = FactRepository(factory)
+    assert repo.fact_ids_for_day(tenant_id="tenant-1", local_health_day=DAY) == {}

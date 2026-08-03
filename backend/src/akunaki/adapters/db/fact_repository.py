@@ -838,6 +838,52 @@ class FactRepository:
             ).all()
         return {day: float(value) for day, value in rows if day is not None and value is not None}
 
+    def fact_ids_for_day(self, *, tenant_id: str, local_health_day: str) -> dict[str, list[str]]:
+        """Current fact-record ids on one local day, grouped by entity type.
+
+        Provenance needs to name the facts a score was derived *from*, not just
+        the roles it used. Only the target day is returned: it is the day the
+        score is attributed to, and the 42-day baseline window behind it is
+        context that the formula version plus these facts already determine.
+
+        The filters mirror the feature queries exactly (current version, active,
+        load-eligible), so a fact recorded as an input is the same row the
+        component actually read. Sleep collapses to the **authoritative
+        provider** for the day, matching how the sleep features select — a
+        candidate that lost source selection never reads as an input.
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(
+                    FactRecord.id,
+                    FactRecord.entity_type,
+                    FactRecord.provider,
+                )
+                .where(
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.local_health_day == local_health_day,
+                    FactRecord.is_current == 1,
+                    FactRecord.deletion_state == "active",
+                    FactRecord.exclude_from_load == 0,
+                )
+                .order_by(FactRecord.id)
+            ).all()
+
+        by_entity: dict[str, list[str]] = {}
+        sleep_by_provider: dict[str, list[str]] = {}
+        for fact_id, entity_type, provider in rows:
+            if entity_type == ENTITY_TYPE:
+                # Defer: only the authoritative provider's sessions are inputs.
+                if provider is not None:
+                    sleep_by_provider.setdefault(provider, []).append(fact_id)
+                continue
+            by_entity.setdefault(entity_type, []).append(fact_id)
+
+        chosen = authoritative_sleep_provider(sleep_by_provider.keys())
+        if chosen is not None:
+            by_entity[ENTITY_TYPE] = sleep_by_provider[chosen]
+        return by_entity
+
 
 def _authoritative_per_day(by_day: dict[str, dict[str, float]]) -> dict[str, float]:
     """Collapse per-provider day values to the one authoritative provider's.
