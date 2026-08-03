@@ -60,3 +60,13 @@ def token_matches(token: str, token_hash: str) -> bool:
     if not token or not token_hash:
         return False
     return hmac.compare_digest(hash_token(token), token_hash)
+
+
+def generate_confirmation_token() -> str:
+    """Return a fresh token authorizing one mutating tool invocation.
+
+    Like the session and provenance tokens, only its hash is stored. It is a
+    bearer handle to an authorization the user granted out-of-band, so it needs
+    the same unguessable entropy.
+    """
+    return "confirm_" + _b64url(secrets.token_bytes(_TOKEN_ENTROPY_BYTES))
