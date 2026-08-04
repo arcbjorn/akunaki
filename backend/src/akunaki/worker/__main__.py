@@ -22,6 +22,7 @@ from akunaki.adapters.db.engine import (
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.wiring.registry import build_registry
 from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE
+from akunaki.application.retention_handlers import RETENTION_SWEEP_JOB_TYPE
 from akunaki.application.sync_handlers import RECONCILE_SWEEP_JOB_TYPE
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import get_settings
@@ -34,6 +35,10 @@ _RECONCILE_INTERVAL = timedelta(minutes=30)
 # Hourly is enough for a control that detects *past* tampering: the evidence
 # does not decay, and a tighter loop would rescan the whole chain for no gain.
 _AUDIT_VERIFY_INTERVAL = timedelta(hours=1)
+# Expired credential material is already unusable, so this is data minimization
+# rather than correctness; hourly keeps the tables from growing without bound
+# without hammering four DELETEs on a tight loop.
+_RETENTION_INTERVAL = timedelta(hours=1)
 
 logger = logging.getLogger("akunaki.worker")
 
@@ -104,6 +109,15 @@ def run_worker(*, stop_event: threading.Event | None = None) -> int:
                 interval=_AUDIT_VERIFY_INTERVAL,
                 tenant_id=SYSTEM_TENANT_ID,
                 idempotency_key="audit_verify_chain",
+            ),
+            # Deletes expired sessions, OAuth/login states, and confirmations.
+            # Each row is already unusable past its expiry; sweeping stops the
+            # stored secrets outliving the window they were issued for.
+            ScheduleSpec(
+                job_type=RETENTION_SWEEP_JOB_TYPE,
+                interval=_RETENTION_INTERVAL,
+                tenant_id=SYSTEM_TENANT_ID,
+                idempotency_key="retention_sweep",
             ),
         ]
         worker = JobWorker(
