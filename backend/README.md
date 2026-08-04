@@ -412,16 +412,44 @@ Registered today:
 | `health.get_recent_workouts` / `get_workout` | none | `read:health` |
 | `connections.list` | none | `read:connections` |
 | `connections.sync` | `enqueue_job` | `write:connections` |
+| `privacy.delete` | `destroy_data` | `delete:privacy` |
 
 `connections.list` is scoped `read:connections`, **not** `read:health`: connection metadata is not health data, and folding it in would over-grant a caller that only needs a day view.
 
 #### Confirmation for mutating tools
 
-`connections.sync` is the one mutating tool. It declares `requires_confirmation`, enforced for calls carrying a `run_id` — the canonical registry's **"yes if agent"**. A person pressing "sync now" in their own session is already an explicit, CSRF-enforced act; a call claiming to originate in an agent run must redeem a confirmation bound to that exact call.
+Each tool declares a **`ConfirmationPolicy`**, and the invoke route asks the tool rather than applying one global rule — the canonical registry states three different answers:
+
+| Policy | Tools | Meaning |
+|--------|-------|---------|
+| `never` | all reads | The session's own authorization is the whole check |
+| `if_agent` | `connections.sync` | A direct session call is already an explicit, CSRF-enforced human act; a call carrying a `run_id` must redeem a confirmation |
+| `always` | `privacy.delete` | Confirmed for **every** caller. A CSRF token proves the request came from our page, not that the human meant to erase everything |
+
+`privacy.delete` is additionally `model_exposure=False`: a model may be told the capability exists, but must never be the thing that invokes irreversible erasure.
 
 A confirmation authorizes **one specific call**, bound to `tenant_id` + `user_id` + `run_id` + `tool_name` + **canonical args hash** + **idempotency key**. It is one-time and expiring, stored as a SHA-256 hash only (`tool_confirmations`, migration `0025`). Consumption is a conditional CAS inside the same transaction as the binding check. The practical effect: a model that swaps an argument between the user's approval and execution **does not execute**, and a replay runs the side effect exactly once. Every rejection is the same generic 403, so a caller cannot probe for valid tool names or live tokens.
 
-`exports.create` and `privacy.delete` are **not** registered — they need their own service wiring.
+`exports.create` is **not** registered — it needs its own service wiring.
+
+#### Obtaining a confirmation
+
+The user approves **out-of-band via API, not the model**:
+
+```bash
+# 1. approve the exact call; the token is shown once (only its hash is stored)
+curl -X POST --cookie akunaki_session=<token> -H 'X-Akunaki-CSRF: <secret>' \
+  -H 'content-type: application/json' \
+  -d '{"tool_name":"privacy.delete","input":{},"idempotency_key":"del-1"}' \
+  localhost:8000/v1/confirmations
+# 2. present it at invoke, with the same arguments and key
+curl -X POST --cookie akunaki_session=<token> -H 'X-Akunaki-CSRF: <secret>' \
+  -H 'content-type: application/json' \
+  -d '{"input":{},"confirmation_token":"confirm_...","idempotency_key":"del-1"}' \
+  localhost:8000/v1/tools/privacy.delete
+```
+
+Confirmations expire in 5 minutes and are single-use. Requesting one for a tool that needs none is a **409** — handing out tokens nothing checks would make the confirmation step a rubber stamp.
 
 ### `/v1/provenance/{token}` — opaque derivation lineage
 
