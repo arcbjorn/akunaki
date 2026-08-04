@@ -295,6 +295,14 @@ Wired today:
 
 Neither path copies tool arguments or token material into the trail — the confirmation binding's args hash is the non-health handle to a mutation's exact inputs. `export` is in the vocabulary but unemitted (no export service).
 
+### Retention sweep (expired credential material)
+
+Sessions, OAuth/PKCE states, login states, and tool confirmations all carry an `expires_at` and all stop being usable the moment it passes. A leader-gated `retention.sweep_expired` job (hourly, system tenant) deletes them, so their stored secrets — hashed session tokens and CSRF secrets, sealed PKCE verifiers, confirmation token hashes — do not outlive the window they were issued for. Each of these tables already carried an `expires_at` index for exactly this sweep.
+
+Deletion is on **expiry alone**, never on status, so the job is safe to run unattended: an expired row cannot authenticate, cannot complete an OAuth exchange, and cannot authorize a mutation, so nothing still in use can be swept away. A **consumed** confirmation is kept until it expires — its job is to make a replay fail, and past expiry it fails on expiry alone.
+
+One store failing does not abort the sweep; the rest still run and the job raises at the end so the worker's retry policy sees it.
+
 ### Security headers and CORS
 
 Every response — including errors — carries a strict set of headers, applied by middleware so no route can forget them: a `default-src 'none'` CSP (this is a JSON API that renders no document), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and same-origin COOP/CORP.
@@ -633,7 +641,7 @@ if result.ok:
     verifier = sealer.open(result.sealed_verifier, aad=b"s1").decode()
 ```
 
-The raw `state` is **never stored** — only its SHA-256 hash — and the PKCE verifier is stored sealed. `consume` enforces single use (atomic `UPDATE ... WHERE consumed_at IS NULL`), expiry, and an **exact** redirect-URI match, returning a typed `rejection` instead of raising so callers can surface one generic error without revealing which check failed. A failed attempt does not burn the state. Call `purge_expired` periodically to drop spent rows and their sealed verifiers.
+The raw `state` is **never stored** — only its SHA-256 hash — and the PKCE verifier is stored sealed. `consume` enforces single use (atomic `UPDATE ... WHERE consumed_at IS NULL`), expiry, and an **exact** redirect-URI match, returning a typed `rejection` instead of raising so callers can surface one generic error without revealing which check failed. A failed attempt does not burn the state. Spent rows and their sealed verifiers are dropped by the scheduled retention sweep (below).
 
 PKCE is **S256** only; `plain` is deliberately unsupported.
 
