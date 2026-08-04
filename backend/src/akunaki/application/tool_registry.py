@@ -38,6 +38,43 @@ class SideEffect(StrEnum):
     MUTATE_PREFS = "mutate_prefs"
     EXTERNAL_CALL = "external_call"
 
+    DESTROY_DATA = "destroy_data"
+    """Irreversibly removes stored data before returning.
+
+    Distinct from ``enqueue_job``: a caller told "queued" may reasonably expect
+    a window to cancel, and there is none. The canonical registry lists
+    ``privacy.delete`` as ``enqueue_job`` on the assumption of an async
+    pipeline; ours completes inline, so saying ``enqueue_job`` would misreport
+    what already happened.
+    """
+
+
+class ConfirmationPolicy(StrEnum):
+    """When a tool needs an out-of-band confirmation before it may execute.
+
+    The canonical registry states three distinct answers, so this is an enum
+    rather than a bool: collapsing them would make "yes always" unexpressible
+    and silently downgrade a destructive tool to the agent-only rule.
+    """
+
+    NEVER = "never"
+    """Reads. The session's own authorization is the whole check."""
+
+    IF_AGENT = "if_agent"
+    """Mutations a person may perform directly.
+
+    A direct session call is already an explicit, CSRF-enforced human act; a
+    call carrying a ``run_id`` originates in an agent run and must prove the
+    user authorized *that* call.
+    """
+
+    ALWAYS = "always"
+    """Destructive or irreversible actions.
+
+    Confirmed even for a direct session call: a CSRF token proves the request
+    came from our page, not that the human meant to erase everything.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class ToolContext:
@@ -69,8 +106,38 @@ class Tool[In: BaseModel, Out: BaseModel]:
     sensitivity: Sensitivity = Sensitivity.LOW
     side_effect: SideEffect = SideEffect.NONE
     model_exposure: bool = False
-    requires_confirmation: bool = False
+    """Whether a model may invoke this tool.
+
+    **Declared, not yet enforced.** No agent caller exists — `/v1/tools` is
+    reached by a session-authenticated human — so there is nothing to enforce it
+    against today. The agent adapter must consult this before dispatching, and
+    `confirmation` is what actually guards a mutation in the meantime.
+    """
+
+    confirmation: ConfirmationPolicy = ConfirmationPolicy.NEVER
     audit: str | None = None
+
+    @property
+    def requires_confirmation(self) -> bool:
+        """Whether this tool ever needs a confirmation.
+
+        Kept for the listing surface, which reports *that* a tool is gated.
+        Deciding whether a **particular** call needs one is
+        :meth:`needs_confirmation`, because the answer depends on the caller.
+        """
+        return self.confirmation is not ConfirmationPolicy.NEVER
+
+    def needs_confirmation(self, *, in_agent_run: bool) -> bool:
+        """Whether *this call* must redeem a confirmation before executing.
+
+        Fails closed by construction: every policy except ``NEVER`` requires one
+        for an agent call, and ``ALWAYS`` requires one regardless of caller.
+        """
+        if self.confirmation is ConfirmationPolicy.NEVER:
+            return False
+        if self.confirmation is ConfirmationPolicy.ALWAYS:
+            return True
+        return in_agent_run
 
     def invoke(self, raw_input: dict[str, object], context: ToolContext) -> Out:
         """Validate the raw input against the model and run the handler.

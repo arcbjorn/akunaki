@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.sync_request import SyncRequestRejection, SyncRequestService
 from akunaki.application.tool_registry import (
+    ConfirmationPolicy,
     Sensitivity,
     SideEffect,
     Tool,
@@ -168,7 +169,7 @@ def sync_connection_tool(service: SyncRequestService) -> Tool[SyncInput, SyncOut
         # A model may ask for a sync, but only against a confirmation the user
         # granted out-of-band for that exact call.
         model_exposure=True,
-        requires_confirmation=True,
+        confirmation=ConfirmationPolicy.IF_AGENT,
         audit="connections.sync",
     )
 

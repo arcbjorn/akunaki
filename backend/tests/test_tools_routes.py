@@ -25,11 +25,20 @@ from akunaki.adapters.db.anomaly_repository import AnomalyRepository
 from akunaki.adapters.db.confirmation_repository import ConfirmationRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
-from akunaki.adapters.db.models import Connection, FactRecord, Job, SleepSession, Tenant, User
+from akunaki.adapters.db.models import (
+    Connection,
+    FactRecord,
+    Job,
+    SleepSession,
+    Tenant,
+    ToolConfirmation,
+    User,
+)
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
 from akunaki.application.tool_registry import (
+    ConfirmationPolicy,
     Sensitivity,
     SideEffect,
     Tool,
@@ -294,24 +303,27 @@ def test_connections_tool_is_not_scoped_as_health(
     assert connections["side_effect"] == "none"
 
 
-def test_only_the_sync_tool_mutates(client: TestClient, factory: sessionmaker[Session]) -> None:
-    """``connections.sync`` is the one mutating tool, and it requires confirmation.
+def test_every_mutating_tool_is_gated(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """No mutation is reachable without a confirmation policy behind it.
 
-    Every other registered tool is a read. The lifecycle mutations that have no
-    service wiring yet (``exports.create``, ``privacy.delete``) must not appear.
+    A tool that mutates and declares no confirmation would be invocable on the
+    honour system, so this pins the whole mutating set rather than one tool.
     """
     _login(client, factory)
     tools = client.get("/v1/tools").json()["tools"]
 
-    mutating = [t for t in tools if t["side_effect"] != "none"]
-    assert [t["name"] for t in mutating] == ["connections.sync"]
-    assert mutating[0]["side_effect"] == "enqueue_job"
-    assert mutating[0]["requires_confirmation"] is True
-    assert mutating[0]["scopes"] == ["write:connections"]
+    mutating = {t["name"]: t for t in tools if t["side_effect"] != "none"}
+    assert set(mutating) == {"connections.sync", "privacy.delete"}
 
-    names = {t["name"] for t in tools}
-    assert "exports.create" not in names
-    assert "privacy.delete" not in names
+    # Every mutation is gated; the *policy* differs by how destructive it is.
+    assert all(t["requires_confirmation"] for t in mutating.values())
+    assert mutating["connections.sync"]["side_effect"] == "enqueue_job"
+    assert mutating["connections.sync"]["scopes"] == ["write:connections"]
+    assert mutating["privacy.delete"]["side_effect"] == "destroy_data"
+    assert mutating["privacy.delete"]["scopes"] == ["delete:privacy"]
+
+    # Not built: no service wiring yet.
+    assert "exports.create" not in {t["name"] for t in tools}
 
 
 def test_invoke_find_anomalies(client: TestClient, factory: sessionmaker[Session]) -> None:
@@ -425,7 +437,7 @@ def _mutating_tool(calls: list[str]) -> Tool[_EchoInput, _EchoOutput]:
         side_effect=SideEffect.ENQUEUE_JOB,
         sensitivity=Sensitivity.DESTRUCTIVE,
         model_exposure=False,
-        requires_confirmation=True,
+        confirmation=ConfirmationPolicy.IF_AGENT,
         audit="test.mutate",
     )
 
@@ -751,3 +763,128 @@ def test_sync_tool_cannot_reach_another_tenants_connection(
     assert response.status_code == 404
     with factory() as session:
         assert session.scalars(select(Job)).all() == []
+
+
+# ---------------------------------------------------------------------------
+# Confirmation policy: never / if_agent / always
+# ---------------------------------------------------------------------------
+
+
+def test_privacy_delete_is_confirmed_always(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The one destructive tool: model-invisible, confirmed for every caller."""
+    _login(client, factory)
+    tools = client.get("/v1/tools").json()["tools"]
+    delete = next(t for t in tools if t["name"] == "privacy.delete")
+
+    assert delete["sensitivity"] == "destructive"
+    assert delete["side_effect"] == "destroy_data"
+    assert delete["requires_confirmation"] is True
+    # A model must not be the thing that invokes irreversible erasure.
+    assert delete["model_exposure"] is False
+
+
+def test_direct_delete_without_confirmation_is_refused(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """ "Always" means always: a session call is refused too.
+
+    A CSRF token proves the request came from our page, not that the human
+    meant to erase everything they have.
+    """
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/tools/privacy.delete",
+        json={"input": {}},  # no run_id: still refused
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "confirmation_required"
+    with factory() as session:
+        assert session.get(Tenant, "tenant-1") is not None
+
+
+def test_confirm_then_delete_erases_the_tenant(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The full out-of-band flow: approve the exact call, then execute it."""
+    csrf = _login(client, factory)
+
+    issued = client.post(
+        "/v1/confirmations",
+        json={"tool_name": "privacy.delete", "input": {}, "idempotency_key": "del-1"},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+    assert issued.status_code == 201
+    token = issued.json()["confirmation_token"]
+
+    response = client.post(
+        "/v1/tools/privacy.delete",
+        json={"input": {}, "confirmation_token": token, "idempotency_key": "del-1"},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    with factory() as session:
+        assert session.get(Tenant, "tenant-1") is None
+
+
+def test_confirmation_is_refused_for_a_read_tool(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Handing out tokens nothing checks would make confirmation a rubber stamp."""
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/confirmations",
+        json={"tool_name": "health.get_sleep", "input": {}, "idempotency_key": "k"},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "confirmation_not_required"
+
+
+def test_confirmation_for_an_unknown_tool_is_404(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    csrf = _login(client, factory)
+    response = client.post(
+        "/v1/confirmations",
+        json={"tool_name": "nope.nope", "input": {}, "idempotency_key": "k"},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+    assert response.status_code == 404
+
+
+def test_confirmation_requires_a_session_and_csrf(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Issuing an authorization is itself a state-changing act."""
+    client.cookies.clear()
+    body = {"tool_name": "privacy.delete", "input": {}, "idempotency_key": "k"}
+    assert client.post("/v1/confirmations", json=body).status_code == 401
+
+    _login(client, factory)  # cookie only, no CSRF header
+    assert client.post("/v1/confirmations", json=body).status_code == 403
+
+
+def test_confirmation_token_is_stored_hashed_only(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A database dump must not yield a usable authorization."""
+    csrf = _login(client, factory)
+    token = client.post(
+        "/v1/confirmations",
+        json={"tool_name": "privacy.delete", "input": {}, "idempotency_key": "k"},
+        headers={CSRF_HEADER_NAME: csrf},
+    ).json()["confirmation_token"]
+
+    with factory() as session:
+        row = session.scalars(select(ToolConfirmation)).one()
+    assert row.token_hash != token
+    assert token not in row.token_hash

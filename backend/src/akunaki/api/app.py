@@ -86,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # valid session cookie, so mounting them exposes nothing on its own.
     from akunaki.api.routes.anomalies import router as anomalies_router
     from akunaki.api.routes.checkin import router as checkin_router
+    from akunaki.api.routes.confirmations import router as confirmations_router
     from akunaki.api.routes.connections import router as connections_router
     from akunaki.api.routes.privacy import router as privacy_router
     from akunaki.api.routes.provenance import router as provenance_router
@@ -108,6 +109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(privacy_router)
     app.include_router(anomalies_router)
     app.include_router(workouts_router)
+    app.include_router(confirmations_router)
     app.include_router(webhooks_router)
 
     # Login routes only when OIDC is configured. An unconfigured deployment
