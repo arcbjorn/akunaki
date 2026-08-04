@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.job_repository import affected_rows
@@ -304,3 +304,39 @@ class ConnectionRepository:
                 return None
             ciphertext, key_version = row
             return SealedSecret(ciphertext=ciphertext, key_version=key_version)
+
+    def revoke(self, *, tenant_id: str, connection_id: str, now: datetime) -> bool:
+        """Disconnect: drop the stored secret and mark the connection revoked.
+
+        Both in **one** transaction. A crash between them would otherwise leave
+        a connection the user believes is disconnected still holding usable
+        vendor tokens, or a revoked row whose secret outlives it.
+
+        Historical facts are deliberately untouched — disconnecting revokes
+        credentials, it never destroys history (roadmap decision 2026-07-19).
+        Only an explicit privacy delete removes facts.
+
+        Tenant-scoped, so one tenant cannot revoke another's connection; False
+        when the connection is unknown **or** not theirs.
+        """
+        if not connection_id:
+            msg = "connection_id must be non-empty"
+            raise ValueError(msg)
+        now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
+
+        with self._session_factory() as session, session.begin():
+            result = session.execute(
+                update(Connection)
+                .where(
+                    Connection.id == connection_id,
+                    Connection.tenant_id == tenant_id,
+                )
+                .values(status=ConnectionStatus.REVOKED.value, updated_at=now_s)
+            )
+            if affected_rows(result) != 1:
+                return False
+            # Same transaction: a revoked connection never keeps its tokens.
+            session.execute(
+                delete(ConnectionSecret).where(ConnectionSecret.connection_id == connection_id)
+            )
+            return True
