@@ -177,3 +177,37 @@ def test_metrics_endpoint_serves_prometheus_text_when_enabled() -> None:
     # The declared families are present even before anything has happened.
     assert "# TYPE akunaki_jobs_dead_letters_total counter" in response.text
     assert "# TYPE akunaki_worker_liveness gauge" in response.text
+
+
+def test_unset_gauge_emits_no_sample() -> None:
+    """A gauge's zero is a real reading — often the alarming one.
+
+    A process that never measures a signal must not publish a value for it: an
+    API process rendering ``audit_chain_intact 0`` would read as "tampering
+    detected" rather than "not measured here", giving an operator a permanent
+    false alarm.
+    """
+    registry = MetricsRegistry()
+    registry.gauge("thing_state", "Some state.")
+
+    text = registry.render()
+
+    assert "# TYPE thing_state gauge" in text
+    assert "thing_state 0" not in text
+
+
+def test_unset_counter_still_emits_zero() -> None:
+    """ "No failures yet" and "this build cannot fail" must not look alike."""
+    registry = MetricsRegistry()
+    registry.counter("thing_total", "Some count.")
+
+    assert "thing_total 0" in registry.render()
+
+
+def test_a_set_gauge_emits_its_value_including_zero() -> None:
+    """Absence means unmeasured; an explicit zero is still a real reading."""
+    registry = MetricsRegistry()
+    gauge = registry.gauge("thing_state", "Some state.")
+    gauge.set(0.0)
+
+    assert "thing_state 0" in registry.render()

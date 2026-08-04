@@ -195,8 +195,12 @@ class MetricsRegistry:
 
         A family with no recorded samples still emits its HELP/TYPE header, so
         a scraper sees a declared-but-idle metric rather than nothing at all.
-        Unlabelled families emit an explicit zero for the same reason: "no
-        failures yet" and "this build cannot fail" must not look alike.
+
+        An unlabelled **counter** with no samples emits an explicit zero: "no
+        failures yet" and "this build cannot fail" must not look alike. An
+        unset **gauge** emits no sample, because a gauge's zero is a real
+        reading — often the alarming one — and a process that never measures a
+        signal must not publish a value for it.
         """
         lines: list[str] = []
         with self._lock:
@@ -205,7 +209,18 @@ class MetricsRegistry:
                 lines.append(f"# HELP {name} {series.help_text}")
                 lines.append(f"# TYPE {name} {series.metric_type}")
                 if not series.samples and not series.label_names:
-                    lines.append(f"{name} 0")
+                    # Counters emit an explicit zero: "no failures yet" and
+                    # "this build cannot fail" must not look alike.
+                    #
+                    # Gauges do **not**. A gauge's zero is a real reading, and
+                    # for a health signal it is usually the *bad* one — a
+                    # process that never runs the audit verifier would publish
+                    # `audit_chain_intact 0`, which reads as "tampering
+                    # detected" rather than "not measured here". An unset gauge
+                    # is absent, so an alert on it fires only where the value
+                    # is actually produced.
+                    if series.metric_type == "counter":
+                        lines.append(f"{name} 0")
                     continue
                 for key in sorted(series.samples):
                     labels = _render_labels(series.label_names, key)
