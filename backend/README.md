@@ -275,7 +275,15 @@ Two properties are enforced:
 | `akunaki_audit_chain_intact` | 1 when the last pass found no tampering, 0 when it did |
 | `akunaki_audit_chain_verified_timestamp_seconds` | When that pass ran — a **stale** value is itself an alert that the verifier stopped |
 
-It runs on the worker rather than behind an endpoint: verification is O(chain), so a route would hand any caller an unbounded scan. Those gauges live in the **worker's** registry — each process serves its own — so the API's `/metrics` does not carry them. `/readyz` is the reachable channel: it reports the trail's `events` and `last_event_at` as an O(1) tail read, and a **stale** `last_event_at` while audited actions continue means the trail stopped being written. Detected tampering does **not** fail the job — tampering is not transient, so a retry would dead-letter and turn a standing alert into a one-off error. The gauge stays at 0 until a pass succeeds.
+It runs on the worker rather than behind an endpoint: verification is O(chain), so a route would hand any caller an unbounded scan. Those gauges live in the **worker's** registry — each process serves its own, and the worker serves no scrape endpoint — so the verdict is also **persisted** to `system_checks` and surfaced on `/readyz`:
+
+| `/readyz` field | Meaning |
+|-----------------|---------|
+| `audit.events` / `audit.last_event_at` | O(1) tail read; a **stale** timestamp while audited actions continue means the trail stopped being written |
+| `audit.chain_intact` | Stored verdict of the last verification. **Null** when it has never run — unknown and tampered must not read alike |
+| `audit.chain_checked_at` | When that verification ran |
+
+All four are reported, never gating: a tampered trail does not make the service unable to serve traffic. Detected tampering does **not** fail the job — tampering is not transient, so a retry would dead-letter and turn a standing alert into a one-off error. The gauge stays at 0 until a pass succeeds.
 
 `verify()` walks in bounded batches; the table only grows, so materializing it would fail first on the deployment with the most history to protect.
 
