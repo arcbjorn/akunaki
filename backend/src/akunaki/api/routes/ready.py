@@ -24,9 +24,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.status_repository import (
     OperationalStatusRepository,
+    SystemCheckRepository,
     migration_status,
 )
 from akunaki.api.app import get_engine, get_session_factory
+from akunaki.domain.audit import AUDIT_CHAIN_CHECK
 from akunaki.migrations import script_location
 
 # The reaper/scheduler leader lease name; a held lease means a worker leads.
@@ -59,14 +61,27 @@ class AuditBlock(BaseModel):
     ``last_event_at`` going stale while audited actions are still occurring —
     that means the trail stopped being written, which no counter would show.
 
-    Deliberately **not** a verification verdict: verifying is O(chain), so a
-    probe must never trigger it. The scheduled ``audit.verify_chain`` job owns
-    that and publishes its result as a worker-process gauge.
+    ``chain_intact`` is the **stored** verdict of the scheduled
+    ``audit.verify_chain`` job, not a verification run here: verifying is
+    O(chain), so a probe must never trigger it. The worker computes it and
+    persists it, because its metrics registry is process-local and the worker
+    serves no scrape endpoint — a gauge alone would reach nobody.
     """
 
     events: int = Field(description="Total events recorded (the chain's length).")
     last_event_at: str | None = Field(
         default=None, description="UTC RFC3339 of the newest event; null when empty."
+    )
+    chain_intact: bool | None = Field(
+        default=None,
+        description=(
+            "Verdict of the last scheduled chain verification; null when it has "
+            "never run. Null is not a failure — unknown and tampered must differ."
+        ),
+    )
+    chain_checked_at: str | None = Field(
+        default=None,
+        description="When that verification ran; a stale value means it stopped.",
     )
 
 
@@ -134,9 +149,12 @@ def readyz(
             # have `audit_events` yet, and a probe whose job is to *report*
             # that must not itself fail on the missing table.
             tail = AuditRepository(session_factory).tail()
+            check = SystemCheckRepository(session_factory).latest(name=AUDIT_CHAIN_CHECK)
             audit = AuditBlock(
                 events=tail[0] if tail is not None else 0,
                 last_event_at=tail[1] if tail is not None else None,
+                chain_intact=check.ok if check is not None else None,
+                chain_checked_at=check.checked_at if check is not None else None,
             )
 
     ready = database_ready and at_head

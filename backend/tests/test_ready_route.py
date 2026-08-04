@@ -21,13 +21,40 @@ from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import Tenant
+from akunaki.adapters.db.status_repository import SystemCheckRepository
 from akunaki.api.app import create_app
+from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE, AuditVerifyHandler
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.audit import ActorType, AuditAction
-from akunaki.domain.jobs import to_utc_rfc3339
+from akunaki.domain.jobs import JobClaim, JobRole, to_utc_rfc3339
 
 T0 = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
+
+
+class _StubChain:
+    """A chain verifier with a fixed verdict."""
+
+    def __init__(self, *, verdict: int | None) -> None:
+        self._verdict = verdict
+
+    def verify(self) -> int | None:
+        return self._verdict
+
+
+def _audit_claim() -> JobClaim:
+    return JobClaim(
+        job_id="audit-1",
+        tenant_id="system",
+        role=JobRole.CORE,
+        job_type=AUDIT_VERIFY_JOB_TYPE,
+        owner="worker-1",
+        fence_token=1,
+        leased_until=NOW_S,
+        attempts=1,
+        max_attempts=5,
+        payload_json="{}",
+    )
 
 
 def _backend_root() -> Path:
@@ -179,10 +206,19 @@ def test_migrations_are_packaged_not_path_derived() -> None:
 def test_audit_block_is_empty_on_a_fresh_deployment(
     client: TestClient, factory: sessionmaker[Session]
 ) -> None:
-    """An empty trail is normal, not a fault — so it is reported, not gating."""
+    """An empty trail is normal, not a fault — so it is reported, not gating.
+
+    ``chain_intact`` is **null**, not false: a verification that has never run
+    is unknown, and an operator must not read that as tampering.
+    """
     body = client.get("/readyz").json()
 
-    assert body["audit"] == {"events": 0, "last_event_at": None}
+    assert body["audit"] == {
+        "events": 0,
+        "last_event_at": None,
+        "chain_intact": None,
+        "chain_checked_at": None,
+    }
     assert body["ready"] is True
 
 
@@ -212,3 +248,62 @@ def test_audit_block_reports_the_chain_tail(
     assert body["audit"]["last_event_at"] == to_utc_rfc3339(T0)
     # Reported, never gating: a quiet trail does not make the service unready.
     assert body["ready"] is True
+
+
+def test_readyz_reports_a_stored_verification_verdict(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The whole point: a worker-computed verdict readable from the API.
+
+    The gauge the verifier sets lives in the *worker's* registry and the worker
+    serves no scrape endpoint, so persisting is what makes the verdict reach
+    anyone at all.
+    """
+    AuditVerifyHandler(
+        audit=_StubChain(verdict=None),
+        checks=SystemCheckRepository(factory),
+        clock=lambda: T0,
+    )(_audit_claim())
+
+    body = client.get("/readyz").json()["audit"]
+
+    assert body["chain_intact"] is True
+    assert body["chain_checked_at"] == to_utc_rfc3339(T0)
+
+
+def test_readyz_reports_detected_tampering(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A break must be visible to an operator, not just a worker log line."""
+    AuditVerifyHandler(
+        audit=_StubChain(verdict=42),
+        checks=SystemCheckRepository(factory),
+        clock=lambda: T0,
+    )(_audit_claim())
+
+    body = client.get("/readyz").json()
+
+    assert body["audit"]["chain_intact"] is False
+    # Reported, not gating: readiness is about serving traffic, and a tampered
+    # trail does not make the service unable to serve.
+    assert body["ready"] is True
+
+
+def test_a_later_verification_overwrites_the_verdict(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Latest-known-state, not history: the newest verdict is what is reported."""
+    later = T0 + timedelta(hours=1)
+    AuditVerifyHandler(
+        audit=_StubChain(verdict=7), checks=SystemCheckRepository(factory), clock=lambda: T0
+    )(_audit_claim())
+    AuditVerifyHandler(
+        audit=_StubChain(verdict=None),
+        checks=SystemCheckRepository(factory),
+        clock=lambda: later,
+    )(_audit_claim())
+
+    body = client.get("/readyz").json()["audit"]
+
+    assert body["chain_intact"] is True
+    assert body["chain_checked_at"] == to_utc_rfc3339(later)
