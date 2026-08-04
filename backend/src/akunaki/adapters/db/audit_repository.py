@@ -135,6 +135,20 @@ class AuditRepository:
                 expected_previous = row.event_hash
             after_seq = rows[-1].seq
 
+    def tail(self) -> tuple[int, str] | None:
+        """Return ``(seq, created_at)`` of the newest event, or None when empty.
+
+        O(1) on the ``seq`` primary key, so an operational probe can report how
+        current the trail is without the O(chain) walk verification needs.
+        """
+        with self._session_factory() as session:
+            row = session.execute(
+                select(AuditEventRow.seq, AuditEventRow.created_at)
+                .order_by(AuditEventRow.seq.desc())
+                .limit(1)
+            ).first()
+        return (row[0], row[1]) if row is not None else None
+
 
 def _to_event(row: AuditEventRow) -> AuditEvent:
     """Rehydrate a stored row into the domain event the verifier checks."""

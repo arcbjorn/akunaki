@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.status_repository import (
     OperationalStatusRepository,
     migration_status,
@@ -50,6 +51,25 @@ class MigrationBlock(BaseModel):
     code_head: str | None
 
 
+class AuditBlock(BaseModel):
+    """How current the audit trail is.
+
+    Reported, never gating: an empty trail is normal on a fresh deployment, and
+    a quiet one only means no audited action happened. The value is
+    ``last_event_at`` going stale while audited actions are still occurring —
+    that means the trail stopped being written, which no counter would show.
+
+    Deliberately **not** a verification verdict: verifying is O(chain), so a
+    probe must never trigger it. The scheduled ``audit.verify_chain`` job owns
+    that and publishes its result as a worker-process gauge.
+    """
+
+    events: int = Field(description="Total events recorded (the chain's length).")
+    last_event_at: str | None = Field(
+        default=None, description="UTC RFC3339 of the newest event; null when empty."
+    )
+
+
 class ReadyzResponse(BaseModel):
     """Readiness detail. ``ready`` gates on DB reachable + at migration head."""
 
@@ -57,6 +77,7 @@ class ReadyzResponse(BaseModel):
     database_ready: bool
     migration: MigrationBlock
     queue: QueueBlock
+    audit: AuditBlock
     leader_held: bool = Field(
         description="Whether a worker currently holds the reaper/scheduler lease."
     )
@@ -94,6 +115,7 @@ def readyz(
     db_revision: str | None = None
     code_head: str | None = None
     queue = QueueBlock(ready=0, leased=0, dead_letter=0)
+    audit = AuditBlock(events=0, last_event_at=None)
     leader_held = False
 
     if database_ready:
@@ -107,6 +129,15 @@ def readyz(
             ready=snapshot.ready, leased=snapshot.leased, dead_letter=snapshot.dead_letter
         )
         leader_held = status.leader_held(lease_name=_REAPER_LEASE_NAME)
+        if at_head:
+            # Only once the schema matches the code: a DB behind head may not
+            # have `audit_events` yet, and a probe whose job is to *report*
+            # that must not itself fail on the missing table.
+            tail = AuditRepository(session_factory).tail()
+            audit = AuditBlock(
+                events=tail[0] if tail is not None else 0,
+                last_event_at=tail[1] if tail is not None else None,
+            )
 
     ready = database_ready and at_head
     if not ready:
@@ -117,6 +148,7 @@ def readyz(
         database_ready=database_ready,
         migration=MigrationBlock(at_head=at_head, db_revision=db_revision, code_head=code_head),
         queue=queue,
+        audit=audit,
         leader_held=leader_held,
     )
 

@@ -17,11 +17,13 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import Tenant
 from akunaki.api.app import create_app
 from akunaki.config import Settings, clear_settings_cache
+from akunaki.domain.audit import ActorType, AuditAction
 from akunaki.domain.jobs import to_utc_rfc3339
 
 T0 = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
@@ -172,3 +174,41 @@ def test_migrations_are_packaged_not_path_derived() -> None:
     cfg = _alembic_config()
     assert cfg.config_file_name is None
     assert ScriptDirectory.from_config(cfg).get_current_head() is not None
+
+
+def test_audit_block_is_empty_on_a_fresh_deployment(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """An empty trail is normal, not a fault — so it is reported, not gating."""
+    body = client.get("/readyz").json()
+
+    assert body["audit"] == {"events": 0, "last_event_at": None}
+    assert body["ready"] is True
+
+
+def test_audit_block_reports_the_chain_tail(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """``last_event_at`` going stale is the signal no counter would show.
+
+    It means the trail stopped being written while audited actions continue.
+    """
+    repo = AuditRepository(factory)
+    repo.record(
+        event_id="e1",
+        tenant_id=None,
+        actor_type=ActorType.SYSTEM,
+        actor_id=None,
+        action=AuditAction.DELETE,
+        resource_type="tenant",
+        resource_id="req-1",
+        metadata={"outcome": "completed"},
+        now=T0,
+    )
+
+    body = client.get("/readyz").json()
+
+    assert body["audit"]["events"] == 1
+    assert body["audit"]["last_event_at"] == to_utc_rfc3339(T0)
+    # Reported, never gating: a quiet trail does not make the service unready.
+    assert body["ready"] is True
