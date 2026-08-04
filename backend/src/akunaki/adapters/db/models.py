@@ -1503,3 +1503,41 @@ class ToolConfirmation(Base):
         ),
         Index("ix_tool_confirmations_expiry", "status", "expires_at"),
     )
+
+
+class AuditEventRow(Base):
+    """One recorded action: what happened, to what, by whom — never a value.
+
+    Carries no FK to ``tenants`` on purpose. The record must **outlive** the
+    tenant it describes, or a privacy deletion would erase the proof that the
+    deletion happened — the same reasoning as ``deletion_requests``.
+
+    ``event_hash`` covers the content plus ``previous_hash``, so the rows form
+    a chain: an edited or removed event breaks every link after it.
+    """
+
+    __tablename__ = "audit_events"
+
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor_type: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_type: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    previous_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    event_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("actor_type IN ('user', 'system', 'worker')", name="audit_actor_type"),
+        CheckConstraint("json_valid(metadata_json)", name="audit_metadata_json_valid"),
+        CheckConstraint("length(event_hash) = 64", name="audit_event_hash_len"),
+        CheckConstraint("length(previous_hash) = 64", name="audit_previous_hash_len"),
+        UniqueConstraint("id", name="uq_audit_events_id"),
+        UniqueConstraint("event_hash", name="uq_audit_events_hash"),
+        Index("ix_audit_events_tenant_seq", "tenant_id", "seq"),
+        Index("ix_audit_events_action", "action", "created_at"),
+    )
