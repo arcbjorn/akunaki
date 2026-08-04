@@ -270,7 +270,19 @@ Two properties are enforced:
 
 **Honest limit:** a hash chain detects row-level tampering by someone editing the database. It does **not** defend against an attacker who can rewrite the whole chain — that needs signed batches or an external anchor, which is not built.
 
-Wired today for `privacy.delete` (on success *and* failure — a half-run erasure is the case most worth recording). `connection.create` and `tool.invoke` are in the action vocabulary but not yet emitted.
+Wired today:
+
+| Action | When |
+|--------|------|
+| `delete` | Every `privacy.delete`, on success **and** failure — a half-run erasure is the case most worth recording |
+| `tool.invoke` | Every **mutating** tool call: succeeded, failed, or **refused** |
+| `connection.create` | Every OAuth callback: linked, failed, or cross-tenant refused |
+
+**Reads are deliberately not audited.** The threat this answers is confused deputy — *actions taken*, not data read — and every append serializes on a tail read, so auditing the seven read tools would put a global write lock on the hottest path and add thousands of rows a day that answer no security question. `Tool.is_audited` encodes the rule.
+
+**Refusals are recorded.** A rejected confirmation is what a confused-deputy attempt looks like from outside; auditing only successes would leave exactly the attempts worth investigating with no trace. An agent-originated call also records `origin=agent_run`.
+
+Neither path copies tool arguments or token material into the trail — the confirmation binding's args hash is the non-health handle to a mutation's exact inputs. `export` is in the vocabulary but unemitted (no export service).
 
 ### Security headers and CORS
 
