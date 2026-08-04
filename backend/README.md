@@ -268,6 +268,17 @@ Two properties are enforced:
 
 `audit_events` deliberately has **no FK to `tenants`**: the record must outlive the tenant it describes, or a privacy deletion would destroy its own proof.
 
+**Verification runs on a schedule.** A leader-gated `audit.verify_chain` job (hourly, system tenant) walks the chain and publishes two gauges:
+
+| Metric | Meaning |
+|--------|---------|
+| `akunaki_audit_chain_intact` | 1 when the last pass found no tampering, 0 when it did |
+| `akunaki_audit_chain_verified_timestamp_seconds` | When that pass ran — a **stale** value is itself an alert that the verifier stopped |
+
+It runs on the worker rather than behind an endpoint: verification is O(chain), so a route would hand any caller an unbounded scan. Detected tampering does **not** fail the job — tampering is not transient, so a retry would dead-letter and turn a standing alert into a one-off error. The gauge stays at 0 until a pass succeeds.
+
+`verify()` walks in bounded batches; the table only grows, so materializing it would fail first on the deployment with the most history to protect.
+
 **Honest limit:** a hash chain detects row-level tampering by someone editing the database. It does **not** defend against an attacker who can rewrite the whole chain — that needs signed batches or an external anchor, which is not built.
 
 Wired today:
