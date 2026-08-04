@@ -2,9 +2,9 @@
 
 Model-free **FastAPI + SQLAlchemy 2 + sqlalchemy-libsql + Alembic** foundation.
 
-This package intentionally includes **no** frontend, auth product surface, or model/AI SDKs. Full product schema remains **pending**.
+This package intentionally includes **no** frontend and **no** model/AI SDKs. The authenticated `/v1` product surface ships (see below); the full product schema remains **pending**.
 
-Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR/temperature/respiratory from the Oura sleep payload), the composite **`/v1/today`** view stitching recovery and sleep, **versioned score persistence** (`daily_health_scores`/`score_factors`), and the **`score.recompute` handler chained after `raw.normalize`** so scores recompute automatically as data lands. the authenticated **`POST /v1/checkin`** write path feeding the subjective component, and recovery/today surfaces that **serve the persisted score** (disclosing its version and freshness), falling back to compute-on-read only for a day never scored. All nine recovery components have their formulas and can activate from real data (prior-load from `workout_sessions`). The deterministic **anomaly detectors + persistence** (open/2-day-clear intervals, detected automatically during `score.recompute`), **training label**, and **recommendation rules** (Stage 4/5) are implemented; the training label + primary/supporting recommendations ship on `/v1/today`, a persisted high-severity anomaly floors the label at `light`, the day's descriptive ACWR (from workout load) drives the over-load downshift, and a high check-in symptom burden floors the label at `light`. The **typed tool registry** (AI-independent) is exposed over `/v1/tools`. Each recomputed score records a **derivation run** with an opaque, tenant-scoped **provenance token** — `/v1/today` returns it as `provenance_url` and `GET /v1/provenance/{token}` resolves it to disclosed lineage (versions, status, input roles) that leaks no ids. **Canonical zone-load** and the **Polar workout normalizer** activate the prior-load/ACWR path from `workout_sessions`, flowing through the ingestion loop via schema-version dispatch. The **Polar fetch client** (AccessLink exercises) ships alongside the workout normalizer, and a **provider-parameterized backfill config** (`sync_config_for_provider`) lets the same initial-sync handler backfill a linked Polar connection into `workout_sessions` (proven end to end). The **Polar OAuth client** (`PolarOAuthClient`: authorize URL + Basic-auth code exchange, no PKCE, no refresh token, capturing Polar's `x_user_id` as the connection's `external_user_id`) ships too. The **Google Health v4 connector** ships its fetch client (`dataPoints:reconcile` POST with an RFC3339 window and `nextPageToken` pagination) and a pure sleep-segment normalizer that aggregates stage segments into one canonical session per wake-date; the same initial-sync handler backfills a linked Google Health connection into `sleep_sessions` (proven end to end). With two sleep providers now possible, a deterministic **sleep source precedence** (`source_policy_v0.1.0`: Oura authoritative, Google Health fallback) selects one provider per day in the sleep feature queries — no averaging, no cross-provider fallback — so a second connector cannot double-count a night; that decision is also **persisted** as a versioned `source_selections` row (daily-metric slice) with the competing providers recorded as candidates for the "Why". The **Google Health OAuth client** (`GoogleHealthOAuthClient`: PKCE authorize URL with `access_type=offline`/`prompt=consent`, form-body client_secret code exchange, refresh) ships too. The **OAuth linking service now handles all three providers uniformly** — a `uses_pkce` flag on the client port makes it thread a PKCE verifier only for Oura/Google Health and seal an empty placeholder for Polar, so a full authorize→callback link works for a non-PKCE provider too (with Polar's `x_user_id` landing as the connection's external user id). The **authenticated connector link routes** ship: `GET /v1/connections/{provider}/authorize` + `/callback` take the tenant from the session, resolve per-provider OAuth credentials from config, and drive the linking service — proven end to end over HTTP that a browser can link a Polar connection to `active`. An unconfigured or unknown provider is an indistinguishable 404. **Incremental sync** (`connection.incremental_sync`) resumes a connection from its stored cursor (minus an overlap) rather than re-pulling a full lookback, sharing the initial-sync page loop and degrading to a lookback on the first run. **Webhooks** ship for the HMAC providers: `POST /webhooks/{provider}/{connection_id}` verifies an HMAC-SHA256 signature over the exact body in constant time, records the delivery once in a deduplicated `webhook_inbox`, and enqueues an incremental-sync refetch — the delivered body is never trusted as data, only as a trigger. A scheduled **reconciliation sweep** (`connection.reconcile_sweep`) catches gaps a missed webhook or sync would leave: it enqueues an incremental sync (idempotency-keyed per connection) for any active connection whose last successful sync is stale. **Daily activity ingestion** (`google_activity_v0.1.0`: steps + active minutes → `daily_activity`, via the `google_activity.` schema dispatch) now feeds the **low-activity anomaly** — a far-below-baseline steps day opens a `low_activity` interval, so all six v0.1.0 detectors are sourced. Not implemented: the `activity`/`strain` **scores** (blocked — no accepted formula/fixtures), the session/workout `source_grains`/`source_grain_versions`/`source_grain_members` grain machinery (the daily-metric `source_selections` slice ships; the versioned-membership tables for episode matching do not, and are deferred until a second workout provider makes cross-provider matching a real need), and workout overlap exclusion (same prerequisite). Webhooks now ship for **all three** providers — HMAC for Oura/Polar and Google-signed push OIDC tokens (JWKS) for Google Health (see below).
+Implemented: the **local** atomic durable-job repository lifecycle (fenced claims with attempt history; transactional completion, retry scheduling, dead-lettering, and lease expiry), the **worker runtime** with retry/backoff policy, **idempotent enqueue**, **envelope encryption** for secret columns, the **OAuth state/PKCE handshake primitives**, the **Oura OAuth client** (authorize URL, PKCE code exchange, refresh), the **OAuth linking service**, the **`connection.initial_sync` handler** with the Oura V2 fetch client and atomic ingestion commit, the **Oura sleep normalizer** writing versioned canonical facts, the **OIDC login flow** with hash-only opaque sessions, the authenticated **`/v1/sleep` deterministic summary** (adherence + 14-day debt, a summary not a score), the authenticated **`/v1/recovery` surface** running the full `general_recovery_v0.1.0` scoring path (a real score once overnight HRV/RHR ingest, else honestly `insufficient`), the **overnight-vitals ingestion** (HRV/RHR/temperature/respiratory from the Oura sleep payload), the composite **`/v1/today`** view stitching recovery and sleep, **versioned score persistence** (`daily_health_scores`/`score_factors`), and the **`score.recompute` handler chained after `raw.normalize`** so scores recompute automatically as data lands. The authenticated **`POST /v1/checkin`** write path feeding the subjective component, and recovery/today surfaces that **serve the persisted score** (disclosing its version and freshness), falling back to compute-on-read only for a day never scored. All nine recovery components have their formulas and can activate from real data (prior-load from `workout_sessions`). The deterministic **anomaly detectors + persistence** (open/2-day-clear intervals, detected automatically during `score.recompute`), **training label**, and **recommendation rules** (Stage 4/5) are implemented; the training label + primary/supporting recommendations ship on `/v1/today`, a persisted high-severity anomaly floors the label at `light`, the day's descriptive ACWR (from workout load) drives the over-load downshift, and a high check-in symptom burden floors the label at `light`. The **typed tool registry** (AI-independent) is exposed over `/v1/tools`. Each recomputed score records a **derivation run** with an opaque, tenant-scoped **provenance token** — `/v1/today` returns it as `provenance_url` and `GET /v1/provenance/{token}` resolves it to disclosed lineage (versions, status, input roles) that leaks no ids. **Canonical zone-load** and the **Polar workout normalizer** activate the prior-load/ACWR path from `workout_sessions`, flowing through the ingestion loop via schema-version dispatch. The **Polar fetch client** (AccessLink exercises) ships alongside the workout normalizer, and a **provider-parameterized backfill config** (`sync_config_for_provider`) lets the same initial-sync handler backfill a linked Polar connection into `workout_sessions` (proven end to end). The **Polar OAuth client** (`PolarOAuthClient`: authorize URL + Basic-auth code exchange, no PKCE, no refresh token, capturing Polar's `x_user_id` as the connection's `external_user_id`) ships too. The **Google Health v4 connector** ships its **v4** fetch client (`dataPoints` GET with an AIP-160 `filter` over `sleep.interval.start_time` and `nextPageToken` pagination) and a pure sleep-segment normalizer that aggregates stage segments into one canonical session per wake-date; the same initial-sync handler backfills a linked Google Health connection into `sleep_sessions` (proven end to end). With two sleep providers now possible, a deterministic **sleep source precedence** (`source_policy_v0.1.0`: Oura authoritative, Google Health fallback) selects one provider per day in the sleep feature queries — no averaging, no cross-provider fallback — so a second connector cannot double-count a night; that decision is also **written on every normalize** as a versioned `source_selections` row (daily-metric slice), with the losing providers recorded as candidates for the "Why" — never a blend, never a silent fallback. The **Google Health OAuth client** (`GoogleHealthOAuthClient`: PKCE authorize URL with `access_type=offline`/`prompt=consent`, form-body client_secret code exchange, refresh) ships too. The **OAuth linking service now handles all three providers uniformly** — a `uses_pkce` flag on the client port makes it thread a PKCE verifier only for Oura/Google Health and seal an empty placeholder for Polar, so a full authorize→callback link works for a non-PKCE provider too (with Polar's `x_user_id` landing as the connection's external user id). The **authenticated connector link routes** ship: `GET /v1/connections/{provider}/authorize` + `/callback` take the tenant from the session, resolve per-provider OAuth credentials from config, and drive the linking service — proven end to end over HTTP that a browser can link a Polar connection to `active`. An unconfigured or unknown provider is an indistinguishable 404. **Incremental sync** (`connection.incremental_sync`) resumes a connection from its stored cursor (minus an overlap) rather than re-pulling a full lookback, sharing the initial-sync page loop and degrading to a lookback on the first run. **Webhooks** ship for all three providers: `POST /webhooks/{provider}/{connection_id}` verifies an HMAC-SHA256 body signature in constant time (Oura/Polar) or a Google-signed push OIDC token against Google's rotating JWKS (Google Health), records the delivery once in a deduplicated `webhook_inbox`, and enqueues an incremental-sync refetch — the delivered body is never trusted as data, only as a trigger. A scheduled **reconciliation sweep** (`connection.reconcile_sweep`) catches gaps a missed webhook or sync would leave: it enqueues an incremental sync (idempotency-keyed per connection) for any active connection whose last successful sync is stale. **Daily activity ingestion** (`google_activity_v0.1.0`: steps + active minutes → `daily_activity`, via the `google_activity.` schema dispatch) now feeds the **low-activity anomaly** — a far-below-baseline steps day opens a `low_activity` interval, so all six v0.1.0 detectors are sourced. The **authenticated `/v1` surface** has since widened: `GET /v1/connections` (per-connection sync status), `POST /v1/connections/{id}/sync` (manual sync, `Idempotency-Key`), `GET /v1/anomalies` (active and recently-cleared non-diagnostic flags), `GET /v1/workouts` + `/{id}` (cursor-paginated sessions with zone minutes), and `POST /v1/privacy/delete` + status (irreversible, synchronous erasure). The **internal debug router is gone**, so no route accepts a client-supplied `tenant_id` anywhere. Job side effects are fenced by a **unit of work** that re-checks the job lease inside the write transaction, so a worker whose lease expired mid-compute cannot supersede the row the rightful owner wrote. **Confirmation enforcement** ships for mutating tools: `connections.sync` executes only against a one-time, expiring confirmation bound to the exact call. Not implemented: the `activity`/`strain` **scores** (blocked — no accepted formula/fixtures), the session/workout `source_grains`/`source_grain_versions`/`source_grain_members` grain machinery (the daily-metric `source_selections` slice ships; the versioned-membership tables for episode matching do not, and are deferred until a second workout provider makes cross-provider matching a real need), and workout overlap exclusion (same prerequisite).
 
 **Implemented storage scope:** local **libSQL / Turso-compatible** `sqlite+libsql` only (in-memory or file). **Turso Cloud / remote** is intentionally deferred by product decision — not wired in this foundation and **not** blocked on credentials. Long-term production Turso architecture remains documented under `docs/` as proposed future context (ADR 0003, architecture pages).
 
@@ -244,18 +244,18 @@ requested -> jobs_cancelled -> rows_scrubbed -> backups_scheduled -> completed
 
 **Not built:** the restoration-suppression ledger (needs a dedicated deletion key with access separation — an empty table would imply a guarantee the system cannot make), and actual backup expiry (no backup provider is wired; the pipeline records the stage only).
 
-### Internal debug surface
+### No unauthenticated tenant surface
 
-A single **internal, unauthenticated** connection-status route remains as a local diagnostic aid:
+The internal debug router is **gone**, along with its `AKUNAKI_DEBUG_ROUTES_ENABLED` flag. Its two routes were superseded: `latest-sleep` by the authenticated `/v1/sleep`, and `sync-status` by `GET /v1/connections` (below).
 
-```bash
-AKUNAKI_DEBUG_ROUTES_ENABLED=true uv run python -m akunaki.api
-curl 'localhost:8000/internal/debug/sync-status?tenant_id=t1'
-```
+That removal cleared the last route that took a `tenant_id` as a **query parameter**. **No route anywhere accepts a client-supplied tenant** — every product surface derives it from the validated session. The only unauthenticated routers left are ones that must be:
 
-**Off by default and fails closed**: with the flag unset the route is not registered at all, so it is absent from the OpenAPI schema rather than merely guarded at request time. Responses carry `private, no-store`.
-
-The health-data readback (`latest-sleep`) has been **removed** — it is fully superseded by the authenticated `/v1/sleep`, so no unauthenticated route serves health values anymore. `sync-status` has no `/v1` equivalent yet; a future authenticated connection-status route would replace it.
+| Router | Why it is unauthenticated |
+|--------|---------------------------|
+| `/auth/*` | Login itself; there is no session yet |
+| `/healthz`, `/readyz` | Probes; no tenant data, no writes |
+| `/metrics` | Scraper cannot hold a cookie. PHI-free by construction (bounded label tokens, never a tenant id or health value) and off unless `AKUNAKI_METRICS_ENABLED` |
+| `/webhooks/*` | The vendor calls it; trust comes from the signature or Google-signed push token |
 
 ### Security headers and CORS
 
@@ -401,7 +401,27 @@ curl -X POST --cookie akunaki_session=<token> -H 'X-Akunaki-CSRF: <secret>' \
   localhost:8000/v1/tools/health.get_sleep
 ```
 
-Each tool is a `Tool` with Pydantic `input_model`/`output_model` and declared metadata — `scopes`, `sensitivity`, `side_effect`, `model_exposure`, `requires_confirmation`. The read-health tools (`health.get_today` / `get_recovery` / `get_sleep`) wrap the surface services and carry no formula. The **tenant comes from the tool context**, never the input, so a tool can no more cross tenants than a direct route; invoke is a state-changing POST, so CSRF is enforced. Verified end to end, including 404 for an unknown tool and 422 for a malformed argument.
+Each tool is a `Tool` with Pydantic `input_model`/`output_model` and declared metadata — `scopes`, `sensitivity`, `side_effect`, `model_exposure`, `requires_confirmation`. Tools wrap the surface services and carry no formula. The **tenant comes from the tool context**, never the input, so a tool can no more cross tenants than a direct route; invoke is a state-changing POST, so CSRF is enforced. A tool whose subject does not exist raises `LookupError`, mapped to a generic **404** so a tool cannot become an id-probing oracle.
+
+Registered today:
+
+| Tool | Side effect | Scope |
+|------|-------------|-------|
+| `health.get_today` / `get_recovery` / `get_sleep` | none | `read:health` |
+| `health.find_anomalies` | none | `read:health` |
+| `health.get_recent_workouts` / `get_workout` | none | `read:health` |
+| `connections.list` | none | `read:connections` |
+| `connections.sync` | `enqueue_job` | `write:connections` |
+
+`connections.list` is scoped `read:connections`, **not** `read:health`: connection metadata is not health data, and folding it in would over-grant a caller that only needs a day view.
+
+#### Confirmation for mutating tools
+
+`connections.sync` is the one mutating tool. It declares `requires_confirmation`, enforced for calls carrying a `run_id` — the canonical registry's **"yes if agent"**. A person pressing "sync now" in their own session is already an explicit, CSRF-enforced act; a call claiming to originate in an agent run must redeem a confirmation bound to that exact call.
+
+A confirmation authorizes **one specific call**, bound to `tenant_id` + `user_id` + `run_id` + `tool_name` + **canonical args hash** + **idempotency key**. It is one-time and expiring, stored as a SHA-256 hash only (`tool_confirmations`, migration `0025`). Consumption is a conditional CAS inside the same transaction as the binding check. The practical effect: a model that swaps an argument between the user's approval and execution **does not execute**, and a replay runs the side effect exactly once. Every rejection is the same generic 403, so a caller cannot probe for valid tool names or live tokens.
+
+`exports.create` and `privacy.delete` are **not** registered — they need their own service wiring.
 
 ### `/v1/provenance/{token}` — opaque derivation lineage
 
@@ -411,7 +431,9 @@ Every recomputed recovery score records a **derivation run** (formula version, s
 curl --cookie akunaki_session=<token> localhost:8000/v1/provenance/opaque_tok_...
 ```
 
-The lookup is authenticated and **tenant-scoped**. It discloses the artifact kind, versions, status, freshness, and the **roles** of the inputs — never a table, raw, or run id. An unknown token and a token owned by another tenant are the **same 404**, so a token cannot be probed for cross-tenant existence. Typed fact-id inputs are not threaded yet (the input service exposes roles, not fact ids), so runs currently carry no per-input rows.
+The lookup is authenticated and **tenant-scoped**. It discloses the artifact kind, versions, status, freshness, and the **roles** of the inputs — never a table, raw, or run id. An unknown token and a token owned by another tenant are the **same 404**, so a token cannot be probed for cross-tenant existence.
+
+Typed fact-id inputs **are** threaded: `score.recompute` records one `derivation_inputs` row per contributing fact with a real `fact_record_id` FK, so a score resolves to the exact fact versions it read — the last hop of "traceable back to the raw payload". Only **present** components contribute (a component omitted for an immature baseline read no fact), and sleep collapses to the authoritative provider, so a candidate that lost source selection never reads as an input. The public response is unchanged: roles only, deduplicated, since a repeated role would leak the day's fact count.
 
 ### `/v1/connections/{provider}` — link a wearable
 
@@ -427,6 +449,58 @@ curl --cookie akunaki_session=<token> \
 ```
 
 Per-provider OAuth credentials come from config (`AKUNAKI_{PROVIDER}_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URI`). A provider that is **not fully configured**, or unknown, returns an indistinguishable **404** — an unconfigured deployment reveals nothing about which providers *could* be linked. `build_oauth_client` maps a provider to its concrete client (`oura`/`polar`/`google_health`), so the linking service stays provider-uniform. A transient token-exchange failure is a `503`; a permanent one (`invalid_grant`) a `400` that should drive re-consent.
+
+### `GET /v1/connections` — is my data actually flowing?
+
+Lists the caller's connections with per-connection sync status: provider, lifecycle status, last successful sync, failure streak, and ingest counts. Tenant from the session, so a caller sees only their own.
+
+```bash
+curl --cookie akunaki_session=<token> localhost:8000/v1/connections
+```
+
+Carries **no health values** — statuses, timestamps, and counts only — and `last_error_class` is an error *class*, never a vendor body, so a failing connector cannot leak payload contents into a user-facing surface. Counts are scoped to their own connection: a tenant with two providers sees each one's real ingest volume, not the tenant-wide total.
+
+### `POST /v1/connections/{id}/sync` — sync now
+
+Enqueues an immediate incremental sync. Authenticated, CSRF-enforced, and requires an `Idempotency-Key`.
+
+```bash
+curl -X POST --cookie akunaki_session=<token> \
+  -H 'X-Akunaki-CSRF: <secret>' -H 'Idempotency-Key: <key>' \
+  localhost:8000/v1/connections/<connection_id>/sync
+```
+
+It queues the **same** `connection.incremental_sync` job the webhook and reconcile paths use, so a manual sync has no separate semantics: it resumes from the stored cursor and dedupes on content hash like any other. The key is namespaced per connection, so a double-clicked button queues one job (`created: false` on the repeat). A `needs_reauth` or `revoked` connection is a **409** rather than a job doomed to burn attempts; unknown and cross-tenant are an indistinguishable **404** that queues nothing.
+
+### `GET /v1/anomalies` — active and recently-cleared flags
+
+Anomalies are deterministic, **non-diagnostic** wellness flags: one metric departed far from the user's own recent baseline. Nothing here names a condition or advises treatment.
+
+```bash
+curl --cookie akunaki_session=<token> \
+  'localhost:8000/v1/anomalies?day=2026-07-25&window_days=14'
+```
+
+`/v1/today` reduces these to one boolean that floors the training label — enough to change a recommendation, not to explain it. This surface discloses the intervals themselves: feature code, severity, start/end days, detector version. Cleared intervals stay listed for a bounded window (default 14 days, capped at 90) because an anomaly that opened Tuesday and cleared Thursday explains a past day; an interval **still open** is always listed regardless of the window. The detector's internal `z_like` is **never disclosed** — a bare z against a private baseline invites exactly the over-reading the non-diagnostic framing avoids. `day` is required, like every day surface: the server never guesses a tenant's local health day from its own clock.
+
+### `GET /v1/workouts` — sessions and detail
+
+```bash
+curl --cookie akunaki_session=<token> 'localhost:8000/v1/workouts?limit=20'
+curl --cookie akunaki_session=<token> localhost:8000/v1/workouts/<workout_id>
+```
+
+Discloses what was **measured** (start/end, per-zone minutes) plus the internally computed `session_load`. There is deliberately **no workout score**: v0.1.0 ships exactly one score code (recovery), and a second would imply a formula that has not been accepted. A row flagged `exclude_from_load = 1` is hidden from the list too, not just from load math — that flag marks a *duplicate* of the same real session from a second provider, so showing it would present one workout twice. Pagination is **keyset** on `(start_utc, id)` with an opaque cursor, not offset: workouts arrive continuously, and an offset would skip or repeat rows when a sync lands between pages.
+
+### `POST /v1/privacy/delete` — irreversible erasure
+
+```bash
+curl -X POST --cookie akunaki_session=<token> \
+  -H 'X-Akunaki-CSRF: <secret>' localhost:8000/v1/privacy/delete
+curl localhost:8000/v1/privacy/delete/<deletion_request_id>   # status
+```
+
+Runs the full pipeline **synchronously**, so a `200` means the data is gone — not queued. Tenant from the session: a caller can only erase their own. The response clears the session cookie, since every session cascades away with its tenant, and carries counts only. The status read is **unauthenticated by necessity** — the tenant and all its sessions are gone by the time a completed request is worth reading — which is safe because the id is an unguessable UUID and the response discloses only a pipeline status; unknown and cross-tenant are the same 404.
 
 ### `/webhooks/{provider}/{connection_id}` — push-triggered refetch
 
@@ -452,7 +526,6 @@ All settings use the **`AKUNAKI_`** prefix (pydantic-settings).
 | `AKUNAKI_OIDC_CLIENT_ID` / `AKUNAKI_OIDC_CLIENT_SECRET` | *(empty)* | OIDC client credentials from the IdP. |
 | `AKUNAKI_OIDC_REDIRECT_URI` | *(empty)* | Exact callback URI registered with the IdP; must match at the callback. |
 | `AKUNAKI_SESSION_COOKIE_SECURE` | `true` | `Secure` attribute on the session cookie; only disable for local HTTP development. |
-| `AKUNAKI_DEBUG_ROUTES_ENABLED` | `false` | Mounts the **unauthenticated** internal debug router. Serves tenant health data with no session check — keep off outside local development. |
 | `AKUNAKI_ACTIVE_KEK_VERSION` | *(empty)* | KEK version new envelopes are sealed under. Optional when exactly one KEK is configured; **required** when several are. |
 
 ### Secret sealing (envelope encryption)
