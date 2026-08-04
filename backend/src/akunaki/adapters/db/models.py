@@ -1541,3 +1541,30 @@ class AuditEventRow(Base):
         Index("ix_audit_events_tenant_seq", "tenant_id", "seq"),
         Index("ix_audit_events_action", "action", "created_at"),
     )
+
+
+class SystemCheck(Base):
+    """Latest result of one scheduled system check.
+
+    Bridges processes: a check runs on the worker and its verdict is read from
+    the API, which process-local metrics cannot do (each process serves its own
+    registry).
+
+    One row per ``name``, overwritten in place — this is a latest-known-state
+    cell, not a history. Durable history belongs in ``audit_events``; a
+    readiness probe must not scan a thousand rows of a check that ran a
+    thousand times.
+    """
+
+    __tablename__ = "system_checks"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    ok: Mapped[int] = mapped_column(Integer, nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checked_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("ok IN (0, 1)", name="system_check_ok_bool"),
+        CheckConstraint("length(name) > 0", name="system_check_name_nonempty"),
+        CheckConstraint("detail IS NULL OR length(detail) <= 200", name="system_check_detail_len"),
+    )

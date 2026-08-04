@@ -10,6 +10,7 @@ queue or leases.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
@@ -18,8 +19,8 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from akunaki.adapters.db.models import Job, LeaderLease
-from akunaki.domain.jobs import JobStatus
+from akunaki.adapters.db.models import Job, LeaderLease, SystemCheck
+from akunaki.domain.jobs import JobStatus, require_aware, to_utc_rfc3339
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,10 @@ class MigrationStatus:
     at_head: bool
     db_revision: str | None
     code_head: str | None
+
+
+# Mirrors the CHECK on system_checks.detail.
+_MAX_CHECK_DETAIL = 200
 
 
 class OperationalStatusRepository:
@@ -87,3 +92,68 @@ def migration_status(engine: Engine, *, config: Config) -> MigrationStatus:
         db_revision=db_revision,
         code_head=code_head,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CheckResult:
+    """The latest recorded result of one scheduled check."""
+
+    name: str
+    ok: bool
+    detail: str | None
+    checked_at: str
+
+
+class SystemCheckRepository:
+    """Persist and read the latest result of each scheduled system check."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._session_factory = session_factory
+
+    def record(
+        self,
+        *,
+        name: str,
+        ok: bool,
+        detail: str | None,
+        now: datetime,
+    ) -> None:
+        """Overwrite the named check's latest result.
+
+        Upsert rather than append: this is a latest-known-state cell, so a
+        check that runs hourly must not accumulate rows a probe would scan.
+        """
+        if not name:
+            msg = "name must be non-empty"
+            raise ValueError(msg)
+        if detail is not None and len(detail) > _MAX_CHECK_DETAIL:
+            msg = f"detail must be at most {_MAX_CHECK_DETAIL} characters"
+            raise ValueError(msg)
+
+        checked_at = to_utc_rfc3339(require_aware(now, field_name="now"))
+        with self._session_factory() as session, session.begin():
+            session.merge(
+                SystemCheck(
+                    name=name,
+                    ok=1 if ok else 0,
+                    detail=detail,
+                    checked_at=checked_at,
+                )
+            )
+
+    def latest(self, *, name: str) -> CheckResult | None:
+        """Return the named check's latest result, or None when it never ran.
+
+        None is meaningfully different from a failure: a check that has not run
+        yet is unknown, not bad, and a probe must not report the two alike.
+        """
+        with self._session_factory() as session:
+            row = session.get(SystemCheck, name)
+            if row is None:
+                return None
+            return CheckResult(
+                name=row.name,
+                ok=bool(row.ok),
+                detail=row.detail,
+                checked_at=row.checked_at,
+            )
