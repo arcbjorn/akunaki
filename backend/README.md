@@ -257,6 +257,21 @@ That removal cleared the last route that took a `tenant_id` as a **query paramet
 | `/metrics` | Scraper cannot hold a cookie. PHI-free by construction (bounded label tokens, never a tenant id or health value) and off unless `AKUNAKI_METRICS_ENABLED` |
 | `/webhooks/*` | The vendor calls it; trust comes from the signature or Google-signed push token |
 
+### Audit events (tamper-evident)
+
+Destructive actions append an `audit_events` row: **what happened, to what, by whom — never a health value.** This is the control for repudiation ("I didn't delete that").
+
+Two properties are enforced:
+
+- **No health values.** `metadata_json` is a bounded key/value map, and a key shaped like a measurement (`hrv_ms`, `recovery_score`, `sleep_min`, `steps`, …) is **rejected**, not filtered — silently dropping a key would make an incomplete record look complete.
+- **Tamper-evident.** Each event hashes its own content *plus* the previous event's hash, so editing, removing, or reordering a row breaks every link after it. `AuditRepository.verify()` returns the `seq` of the first bad event. A `GENESIS_HASH` sentinel means a truncated chain cannot pass as a fresh one.
+
+`audit_events` deliberately has **no FK to `tenants`**: the record must outlive the tenant it describes, or a privacy deletion would destroy its own proof.
+
+**Honest limit:** a hash chain detects row-level tampering by someone editing the database. It does **not** defend against an attacker who can rewrite the whole chain — that needs signed batches or an external anchor, which is not built.
+
+Wired today for `privacy.delete` (on success *and* failure — a half-run erasure is the case most worth recording). `connection.create` and `tool.invoke` are in the action vocabulary but not yet emitted.
+
 ### Security headers and CORS
 
 Every response — including errors — carries a strict set of headers, applied by middleware so no route can forget them: a `default-src 'none'` CSP (this is a JSON API that renders no document), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and same-origin COOP/CORP.
