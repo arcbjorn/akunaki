@@ -25,7 +25,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import akunaki.api.routes.connections as connections_mod
 from akunaki.adapters.connectors.polar import PolarOAuthClient
-from akunaki.adapters.db.models import AuditEventRow, Connection, Job, Tenant, User
+from akunaki.adapters.db.models import (
+    AuditEventRow,
+    Connection,
+    ConnectionSecret,
+    FactRecord,
+    Job,
+    Tenant,
+    User,
+)
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
@@ -496,3 +504,173 @@ def test_link_audit_carries_no_token_material(
     blob = event.metadata_json.lower()
     for token in ("access_token", "refresh", "secret", "code", "bearer"):
         assert token not in blob
+
+
+# ---------------------------------------------------------------------------
+# Disconnect
+# ---------------------------------------------------------------------------
+
+
+def test_disconnect_requires_a_session(client: TestClient) -> None:
+    client.cookies.clear()
+    assert client.delete("/v1/connections/conn-1").status_code == 401
+
+
+def test_disconnect_requires_csrf(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """Revoking credentials is state-changing, so a bare cookie is not enough."""
+    _login(client, factory)
+    connection_id = _link_polar(client)
+
+    assert client.delete(f"/v1/connections/{connection_id}").status_code == 403
+
+
+def test_disconnect_deletes_the_stored_secret(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The point of disconnecting: this system can no longer use the grant."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    with factory() as session:
+        assert session.get(ConnectionSecret, connection_id) is not None
+
+    response = client.delete(f"/v1/connections/{connection_id}", headers={CSRF_HEADER_NAME: csrf})
+
+    assert response.status_code == 200
+    assert response.json() == {"connection_id": connection_id, "status": "revoked"}
+    with factory() as session:
+        assert session.get(ConnectionSecret, connection_id) is None
+        assert session.get(Connection, connection_id).status == "revoked"
+
+
+def test_disconnect_preserves_history(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """Decided 2026-07-19: disconnect revokes credentials, never destroys facts.
+
+    Only an explicit privacy delete removes health data.
+    """
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    with factory() as session, session.begin():
+        session.add(
+            FactRecord(
+                id="fact-1",
+                tenant_id="tenant-1",
+                connection_id=connection_id,
+                provider="polar",
+                entity_type="workout_session",
+                vendor_record_id="w1",
+                origin=None,
+                method="wearable",
+                utc_instant=NOW_S,
+                start_utc=NOW_S,
+                end_utc=NOW_S,
+                source_offset_minutes=0,
+                iana_timezone="UTC",
+                local_health_day="2026-08-04",
+                unit=None,
+                quality="high",
+                confidence=1.0,
+                freshness_at=NOW_S,
+                raw_revision_id=None,
+                raw_payload_id=None,
+                schema_version="polar.v1",
+                normalizer_version="polar_workout_v0.1.0",
+                content_hash="h1",
+                fact_key="workout_session:w1",
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                deletion_state="active",
+                exclude_from_load=0,
+                created_at=NOW_S,
+            )
+        )
+
+    client.delete(f"/v1/connections/{connection_id}", headers={CSRF_HEADER_NAME: csrf})
+
+    with factory() as session:
+        assert session.get(FactRecord, "fact-1") is not None
+
+
+def test_disconnected_connection_still_listed(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A revoked connection stays visible so the user can see what happened."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    client.delete(f"/v1/connections/{connection_id}", headers={CSRF_HEADER_NAME: csrf})
+
+    [row] = client.get("/v1/connections").json()["connections"]
+
+    assert row["connection_id"] == connection_id
+    assert row["status"] == "revoked"
+
+
+def test_disconnected_connection_cannot_sync(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A revoked connection has no tokens, so a sync would be doomed."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    client.delete(f"/v1/connections/{connection_id}", headers={CSRF_HEADER_NAME: csrf})
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 409
+    with factory() as session:
+        assert session.scalars(select(Job)).all() == []
+
+
+def test_disconnecting_another_tenants_connection_is_404(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Cross-tenant and unknown are indistinguishable, and nothing is revoked."""
+    csrf = _login(client, factory)
+    with factory() as session, session.begin():
+        session.add(
+            Tenant(
+                id="tenant-2",
+                created_at=NOW_S,
+                status="active",
+                primary_timezone="UTC",
+                display_name="Other",
+            )
+        )
+        session.add(
+            Connection(
+                id="conn-theirs",
+                tenant_id="tenant-2",
+                provider="oura",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+
+    theirs = client.delete("/v1/connections/conn-theirs", headers={CSRF_HEADER_NAME: csrf})
+    unknown = client.delete("/v1/connections/nope", headers={CSRF_HEADER_NAME: csrf})
+
+    assert theirs.status_code == unknown.status_code == 404
+    assert theirs.json() == unknown.json()
+    with factory() as session:
+        assert session.get(Connection, "conn-theirs").status == "active"
+
+
+def test_disconnect_is_audited(client: TestClient, factory: sessionmaker[Session]) -> None:
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    client.delete(f"/v1/connections/{connection_id}", headers={CSRF_HEADER_NAME: csrf})
+
+    with factory() as session:
+        events = session.scalars(
+            select(AuditEventRow).where(AuditEventRow.action == "connection.revoke")
+        ).all()
+
+    assert len(events) == 1
+    assert events[0].resource_id == connection_id
+    assert json.loads(events[0].metadata_json) == {"outcome": "revoked"}

@@ -88,6 +88,13 @@ class SyncRequestedResponse(BaseModel):
     )
 
 
+class DisconnectedResponse(BaseModel):
+    """A revoked connector."""
+
+    connection_id: str
+    status: str = Field(description="Always 'revoked'; history is preserved.")
+
+
 class ConnectionsResponse(BaseModel):
     """The caller's connections. Empty when nothing is linked."""
 
@@ -160,6 +167,39 @@ def list_connections(
             for summary in service.connections_for_tenant(tenant_id=session.tenant_id)
         ]
     )
+
+
+@router.delete("/{connection_id}", response_model=DisconnectedResponse)
+def disconnect(
+    connection_id: str,
+    response: Response,
+    session: CurrentSession,
+    session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
+) -> DisconnectedResponse:
+    """Disconnect a connector: drop its stored tokens and mark it revoked.
+
+    Authenticated, CSRF-enforced, tenant from the session. **Historical facts
+    are preserved** — disconnecting revokes credentials, it never destroys
+    history; only an explicit privacy delete removes facts.
+
+    Vendor-side token revocation is **not** performed: no connector implements
+    a revoke endpoint yet, so claiming it happened would be false. The local
+    secret is deleted, which is what stops *this* system using the grant.
+    """
+    response.headers["Cache-Control"] = "private, no-store"
+    revoked = ConnectionRepository(session_factory).revoke(
+        tenant_id=session.tenant_id,
+        connection_id=connection_id,
+        now=datetime.now(UTC),
+    )
+    audit = AuditRepository(session_factory)
+    if not revoked:
+        # Unknown and cross-tenant are the same 404: ids cannot be probed.
+        _audit_disconnect(audit, session=session, connection_id=None, outcome="not_found")
+        raise HTTPException(status_code=404, detail={"code": "not_found"})
+
+    _audit_disconnect(audit, session=session, connection_id=connection_id, outcome="revoked")
+    return DisconnectedResponse(connection_id=connection_id, status="revoked")
 
 
 @router.post("/{connection_id}/sync", response_model=SyncRequestedResponse)
@@ -304,6 +344,34 @@ def _audit_link(
         )
     except Exception:
         logger.exception("failed to append connection audit event", extra={"provider": provider})
+
+
+def _audit_disconnect(
+    audit: AuditRepository,
+    *,
+    session: AuthenticatedSession,
+    connection_id: str | None,
+    outcome: str,
+) -> None:
+    """Append a ``connection.revoke`` event. Never raises.
+
+    A refused attempt is recorded too: "someone tried to disconnect this" is
+    what a reviewer needs after an unexpected loss of sync.
+    """
+    try:
+        audit.record(
+            event_id=str(uuid.uuid4()),
+            tenant_id=session.tenant_id,
+            actor_type=ActorType.USER,
+            actor_id=session.user_id,
+            action=AuditAction.CONNECTION_REVOKE,
+            resource_type="connection",
+            resource_id=connection_id,
+            metadata={"outcome": outcome},
+            now=datetime.now(UTC),
+        )
+    except Exception:
+        logger.exception("failed to append disconnect audit event")
 
 
 def _status_for(rejection: LinkRejection | None) -> int:

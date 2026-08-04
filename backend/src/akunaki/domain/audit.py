@@ -64,6 +64,7 @@ class AuditAction(StrEnum):
 
     CONNECTION_CREATE = "connection.create"
     CONNECTION_SYNC = "connection.sync"
+    CONNECTION_REVOKE = "connection.revoke"
     TOOL_INVOKE = "tool.invoke"
     EXPORT = "export"
     DELETE = "delete"
