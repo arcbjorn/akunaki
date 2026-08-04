@@ -116,6 +116,23 @@ class Tool[In: BaseModel, Out: BaseModel]:
 
     confirmation: ConfirmationPolicy = ConfirmationPolicy.NEVER
     audit: str | None = None
+    """Audit action name for this tool, or None to record nothing."""
+
+    @property
+    def is_audited(self) -> bool:
+        """Whether invoking this tool appends an audit event.
+
+        **Mutations only.** The threat audit answers here is confused deputy —
+        "the model tricked a tool into doing something" — which is about actions
+        taken, not data read. Auditing the seven read tools would also make the
+        chain a write bottleneck on the hottest path: every append serializes on
+        a tail read, and a dashboard polling ``health.get_today`` would add
+        thousands of rows a day that no reviewer will ever read.
+
+        A read tool still declares an ``audit`` name; it is used for log
+        correlation, not for a durable event.
+        """
+        return self.audit is not None and self.side_effect is not SideEffect.NONE
 
     @property
     def requires_confirmation(self) -> bool:

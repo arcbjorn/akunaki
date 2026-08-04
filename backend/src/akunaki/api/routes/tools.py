@@ -52,6 +52,7 @@ from akunaki.application.tools.connections import register_connection_tools
 from akunaki.application.tools.health import register_health_tools
 from akunaki.application.tools.privacy import register_privacy_tools
 from akunaki.application.workouts_surface import WorkoutsSurfaceService
+from akunaki.domain.audit import ActorType, AuditAction
 from akunaki.domain.confirmations import ConfirmationBinding, canonical_args_hash
 from akunaki.domain.sessions import AuthenticatedSession
 
@@ -94,6 +95,12 @@ class ToolInvokeRequest(BaseModel):
         default=None,
         description="Agent conversation run this call belongs to, when any.",
     )
+
+
+def _audit(
+    session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
+) -> AuditRepository:
+    return AuditRepository(session_factory)
 
 
 def _confirmations(
@@ -214,6 +221,49 @@ def _require_confirmation(
         )
 
 
+def _audit_invocation(
+    *,
+    tool: Tool[Any, Any],
+    body: ToolInvokeRequest,
+    session: AuthenticatedSession,
+    audit: AuditRepository,
+    outcome: str,
+) -> None:
+    """Append a ``tool.invoke`` event for a mutating tool, or do nothing.
+
+    Records **that** the tool ran and how it ended — never the arguments. A
+    tool's input can carry a day, a workout id, or (in future) a free-text
+    note; copying it into the trail would risk turning audit into a second
+    store of the very data it is meant to describe. The confirmation binding
+    already pins the exact arguments for a mutation, and its args hash is the
+    non-health handle to them.
+
+    Never raises: the action has already happened, so failing here would report
+    an error for work that succeeded.
+    """
+    if not tool.is_audited:
+        return
+    metadata = {"outcome": outcome}
+    if body.run_id is not None:
+        # Distinguishes an agent-originated call from a direct one, which is
+        # the first thing a reviewer asks about a suspicious mutation.
+        metadata["origin"] = "agent_run"
+    try:
+        audit.record(
+            event_id=str(uuid.uuid4()),
+            tenant_id=session.tenant_id,
+            actor_type=ActorType.USER,
+            actor_id=session.user_id,
+            action=AuditAction.TOOL_INVOKE,
+            resource_type="tool",
+            resource_id=tool.name,
+            metadata=metadata,
+            now=datetime.now(UTC),
+        )
+    except Exception:
+        logger.exception("failed to append tool audit event", extra={"tool": tool.name})
+
+
 @router.post("/{tool_name}")
 def invoke_tool(
     tool_name: str,
@@ -222,6 +272,7 @@ def invoke_tool(
     registry: RegistryDep,
     body: ToolInvokeRequest,
     confirmations: Annotated[ConfirmationRepository, Depends(_confirmations)],
+    audit: Annotated[AuditRepository, Depends(_audit)],
 ) -> dict[str, Any]:
     """Invoke a read tool by name under the caller's session context."""
     response.headers["Cache-Control"] = "private, no-store"
@@ -236,18 +287,25 @@ def invoke_tool(
     # an "if agent" mutation needs one only inside an agent run, and a
     # destructive tool needs one from every caller.
     if tool.needs_confirmation(in_agent_run=body.run_id is not None):
-        _require_confirmation(
-            tool=tool,
-            body=body,
-            session=session,
-            confirmations=confirmations,
-        )
+        try:
+            _require_confirmation(
+                tool=tool,
+                body=body,
+                session=session,
+                confirmations=confirmations,
+            )
+        except HTTPException:
+            # A refused mutation is the most audit-worthy event there is: it is
+            # what a confused-deputy attempt looks like from the outside.
+            _audit_invocation(tool=tool, body=body, session=session, audit=audit, outcome="refused")
+            raise
 
     context = ToolContext(tenant_id=session.tenant_id, user_id=session.user_id)
     try:
         result = tool.invoke(body.input, context)
     except ValueError as exc:
         # Input validation or a bad day argument: a client error, not a 500.
+        _audit_invocation(tool=tool, body=body, session=session, audit=audit, outcome="failed")
         raise HTTPException(
             status_code=422, detail={"code": "invalid_tool_input", "message": str(exc)}
         ) from exc
@@ -255,5 +313,8 @@ def invoke_tool(
         # The tool ran but its subject does not exist for this tenant. The
         # message is generic on purpose: unknown and cross-tenant must be
         # indistinguishable, so an id cannot be probed through a tool either.
+        _audit_invocation(tool=tool, body=body, session=session, audit=audit, outcome="failed")
         raise HTTPException(status_code=404, detail={"code": "not_found"}) from exc
+
+    _audit_invocation(tool=tool, body=body, session=session, audit=audit, outcome="succeeded")
     return result.model_dump()

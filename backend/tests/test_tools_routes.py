@@ -7,6 +7,7 @@ comes from the session, and CSRF is enforced on the POST invoke path.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ from akunaki.adapters.db.confirmation_repository import ConfirmationRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.models import (
+    AuditEventRow,
     Connection,
     FactRecord,
     Job,
@@ -888,3 +890,115 @@ def test_confirmation_token_is_stored_hashed_only(
         row = session.scalars(select(ToolConfirmation)).one()
     assert row.token_hash != token
     assert token not in row.token_hash
+
+
+# ---------------------------------------------------------------------------
+# tool.invoke auditing (mutations only)
+# ---------------------------------------------------------------------------
+
+
+def _audit_rows(factory: sessionmaker[Session]) -> list[AuditEventRow]:
+    with factory() as session:
+        return list(session.scalars(select(AuditEventRow).order_by(AuditEventRow.seq)))
+
+
+def test_read_tools_are_not_audited(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """Auditing reads would flood the chain and stall the hottest path.
+
+    Every append serializes on a tail read; a dashboard polling a day view
+    would add thousands of rows a day that answer no security question.
+    """
+    _seed_sleep(factory, day=DAY, fact_id="s1")
+    csrf = _login(client, factory)
+
+    client.post(
+        "/v1/tools/health.get_sleep",
+        json={"input": {"day": DAY}},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert _audit_rows(factory) == []
+
+
+def test_mutating_tool_invocation_is_audited(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    with factory() as session, session.begin():
+        session.add(
+            Connection(
+                id="conn-1",
+                tenant_id="tenant-1",
+                provider="polar",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+    csrf = _login(client, factory)
+
+    client.post(
+        "/v1/tools/connections.sync",
+        json={"input": {"connection_id": "conn-1"}},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    [event] = _audit_rows(factory)
+    assert event.action == "tool.invoke"
+    assert event.resource_type == "tool"
+    assert event.resource_id == "connections.sync"
+    assert event.actor_id == "user-1"
+    assert json.loads(event.metadata_json) == {"outcome": "succeeded"}
+
+
+def test_refused_mutation_is_audited(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """A refusal is what a confused-deputy attempt looks like from outside.
+
+    If only successes were recorded, the attempts worth investigating would be
+    exactly the ones that left no trace.
+    """
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/tools/privacy.delete",
+        json={"input": {}},  # no confirmation: refused
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 403
+    [event] = _audit_rows(factory)
+    assert event.resource_id == "privacy.delete"
+    assert json.loads(event.metadata_json) == {"outcome": "refused"}
+
+
+def test_agent_origin_is_recorded(
+    mutating_client: tuple[TestClient, list[str]], factory: sessionmaker[Session]
+) -> None:
+    """A reviewer's first question about a suspicious mutation is "who called it"."""
+    client, _calls = mutating_client
+    csrf = _login(client, factory)
+
+    client.post(
+        "/v1/tools/test.mutate",
+        json={"input": {"target": "a"}, "run_id": RUN_ID},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    [event] = _audit_rows(factory)
+    assert json.loads(event.metadata_json)["origin"] == "agent_run"
+
+
+def test_audit_carries_no_tool_arguments(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Arguments can carry health context; the trail must not copy them."""
+    csrf = _login(client, factory)
+    client.post(
+        "/v1/tools/connections.sync",
+        json={"input": {"connection_id": "secret-connection-id"}},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    for event in _audit_rows(factory):
+        assert "secret-connection-id" not in event.metadata_json
