@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.crypto.sessions import hash_token
@@ -151,3 +151,21 @@ class ConfirmationRepository:
                 .values(status=ConfirmationStatus.CANCELLED.value)
             )
             return affected_rows(result) == 1
+
+    def purge_expired(self, *, now: datetime) -> int:
+        """Delete confirmations past their expiry. Returns rows removed.
+
+        Safe for **consumed** rows too, and that is the point: a consumed
+        confirmation's job is to make a replay fail, and an expired one already
+        fails on expiry alone. Keeping it longer only retains a token hash and
+        an args hash for a call that can never run again.
+
+        Deletes by ``expires_at`` rather than status, so a pending row someone
+        abandoned is cleared on the same rule as one that was spent.
+        """
+        now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
+        with self._session_factory() as session, session.begin():
+            result = session.execute(
+                delete(ToolConfirmation).where(ToolConfirmation.expires_at <= now_s)
+            )
+            return affected_rows(result)
