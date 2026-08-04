@@ -554,6 +554,19 @@ curl -X POST --cookie akunaki_session=<token> \
 
 It queues the **same** `connection.incremental_sync` job the webhook and reconcile paths use, so a manual sync has no separate semantics: it resumes from the stored cursor and dedupes on content hash like any other. The key is namespaced per connection, so a double-clicked button queues one job (`created: false` on the repeat). A `needs_reauth` or `revoked` connection is a **409** rather than a job doomed to burn attempts; unknown and cross-tenant are an indistinguishable **404** that queues nothing.
 
+### `DELETE /v1/connections/{id}` — disconnect
+
+```bash
+curl -X DELETE --cookie akunaki_session=<token> \
+  -H 'X-Akunaki-CSRF: <secret>' localhost:8000/v1/connections/<connection_id>
+```
+
+Deletes the stored secret and marks the connection `revoked` in **one transaction** — a crash between them would leave a connection the user believes is disconnected still holding usable vendor tokens.
+
+**Historical facts are preserved** (decided 2026-07-19): disconnecting revokes credentials, it never destroys history. Only an explicit privacy delete removes facts. The revoked connection stays listed so the user can see what happened, and a sync against it is a **409** rather than a queued job that cannot succeed.
+
+**Vendor-side revocation is not claimed.** No connector implements a revoke endpoint yet, so saying "tokens revoked at the provider" would be false; deleting the local secret is what stops *this* system using the grant.
+
 ### `GET /v1/anomalies` — active and recently-cleared flags
 
 Anomalies are deterministic, **non-diagnostic** wellness flags: one metric departed far from the user's own recent baseline. Nothing here names a condition or advises treatment.
