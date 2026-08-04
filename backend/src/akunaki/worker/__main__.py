@@ -21,6 +21,7 @@ from akunaki.adapters.db.engine import (
 )
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.wiring.registry import build_registry
+from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE
 from akunaki.application.sync_handlers import RECONCILE_SWEEP_JOB_TYPE
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import get_settings
@@ -30,6 +31,9 @@ from akunaki.domain.tenants import SYSTEM_TENANT_ID
 # How often the leader enqueues a reconciliation sweep. The sweep skips fresh
 # connections, so a frequent tick is cheap; staleness is decided by the handler.
 _RECONCILE_INTERVAL = timedelta(minutes=30)
+# Hourly is enough for a control that detects *past* tampering: the evidence
+# does not decay, and a tighter loop would rescan the whole chain for no gain.
+_AUDIT_VERIFY_INTERVAL = timedelta(hours=1)
 
 logger = logging.getLogger("akunaki.worker")
 
@@ -91,7 +95,16 @@ def run_worker(*, stop_event: threading.Event | None = None) -> int:
                 interval=_RECONCILE_INTERVAL,
                 tenant_id=SYSTEM_TENANT_ID,
                 idempotency_key="reconcile_sweep",
-            )
+            ),
+            # Verifies the audit chain and publishes the verdict as a gauge.
+            # Leader-gated like the sweep, so one process checks however many
+            # workers are running.
+            ScheduleSpec(
+                job_type=AUDIT_VERIFY_JOB_TYPE,
+                interval=_AUDIT_VERIFY_INTERVAL,
+                tenant_id=SYSTEM_TENANT_ID,
+                idempotency_key="audit_verify_chain",
+            ),
         ]
         worker = JobWorker(
             repository,

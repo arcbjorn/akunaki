@@ -268,8 +268,18 @@ WORKER_LEADER = REGISTRY.gauge(
     "akunaki_worker_leader",
     "1 while this process holds the reaper/scheduler leader lease, else 0.",
 )
+AUDIT_CHAIN_INTACT = REGISTRY.gauge(
+    "akunaki_audit_chain_intact",
+    "1 when the last audit-chain verification found no tampering, 0 when it did.",
+)
+AUDIT_CHAIN_VERIFIED_AT = REGISTRY.gauge(
+    "akunaki_audit_chain_verified_timestamp_seconds",
+    "Unix time of the last completed audit-chain verification.",
+)
 
 __all__ = [
+    "AUDIT_CHAIN_INTACT",
+    "AUDIT_CHAIN_VERIFIED_AT",
     "CONNECTOR_FETCH",
     "CONTENT_TYPE",
     "JOBS_DEAD_LETTERED",

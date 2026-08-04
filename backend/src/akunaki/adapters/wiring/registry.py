@@ -27,6 +27,7 @@ from akunaki.adapters.connectors.polar_fetch import PolarFetchClient
 from akunaki.adapters.crypto.config import build_sealer
 from akunaki.adapters.crypto.sessions import generate_provenance_token
 from akunaki.adapters.db.anomaly_repository import AnomalyRepository
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.checkin_repository import CheckInRepository
 from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.derivation_repository import DerivationRepository
@@ -37,6 +38,7 @@ from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.adapters.db.source_selection_repository import SourceSelectionRepository
 from akunaki.adapters.db.unit_of_work import FencedUnitOfWork
 from akunaki.application.anomaly_tracker import AnomalyTracker
+from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE, AuditVerifyHandler
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.application.recovery_surface import RecoverySurfaceService
@@ -140,5 +142,8 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
             NORMALIZE_JOB_TYPE: normalize,
             SCORE_RECOMPUTE_JOB_TYPE: recompute,
             RECONCILE_SWEEP_JOB_TYPE: reconcile,
+            AUDIT_VERIFY_JOB_TYPE: AuditVerifyHandler(
+                audit=AuditRepository(session_factory),
+            ),
         }
     )

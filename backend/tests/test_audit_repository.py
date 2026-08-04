@@ -18,7 +18,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
+from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import AuditEventRow, Tenant
+from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE, AuditVerifyHandler
+from akunaki.application.handlers import HandlerRegistry
+from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.audit import (
     GENESIS_HASH,
@@ -27,6 +31,7 @@ from akunaki.domain.audit import (
     InvalidAuditMetadataError,
 )
 from akunaki.domain.jobs import to_utc_rfc3339
+from akunaki.domain.tenants import SYSTEM_TENANT_ID
 
 T0 = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -220,3 +225,43 @@ def test_verify_rejects_a_nonsense_batch_size(factory: sessionmaker[Session]) ->
     with pytest.raises(ValueError, match="batch_size"):
         AuditRepository(factory).verify(batch_size=0)
 
+
+def test_verify_job_detects_tampering_through_the_real_worker(
+    factory: sessionmaker[Session],
+) -> None:
+    """The detector actually runs: schedule -> job -> verdict.
+
+    Proves the wiring, not just the handler — a chain nobody verifies is
+    theatre, and this is the path that makes the verification happen.
+    """
+    repo = AuditRepository(factory)
+    _record(repo, event_id="e1")
+    _record(repo, event_id="e2", offset_seconds=1)
+
+    # The system tenant is seeded by migration 0024; the job's FK resolves to it.
+    JobRepository(factory).enqueue_job(
+        job_id="audit-job-1",
+        tenant_id=SYSTEM_TENANT_ID,
+        job_type=AUDIT_VERIFY_JOB_TYPE,
+        payload_json="{}",
+        now=T0,
+    )
+    worker = JobWorker(
+        JobRepository(factory),
+        owner="worker-1",
+        config=WorkerConfig(lease_ttl=timedelta(seconds=60)),
+        registry=HandlerRegistry({AUDIT_VERIFY_JOB_TYPE: AuditVerifyHandler(audit=repo)}),
+        clock=lambda: T0,
+        sleep=lambda _s: None,
+        jitter=lambda: 0.0,
+    )
+    worker.run_once()
+    assert worker.stats.succeeded == 1
+
+    # Now corrupt a row and run it again: still succeeds (tampering is not a
+    # transient error), but the chain reports the break.
+    with factory() as session, session.begin():
+        session.execute(
+            update(AuditEventRow).where(AuditEventRow.id == "e1").values(actor_id="someone-else")
+        )
+    assert repo.verify() is not None
