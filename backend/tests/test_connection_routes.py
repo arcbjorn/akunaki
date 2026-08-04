@@ -9,6 +9,7 @@ route's ``build_oauth_client`` to return a Polar client over a mock transport.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,7 +25,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import akunaki.api.routes.connections as connections_mod
 from akunaki.adapters.connectors.polar import PolarOAuthClient
-from akunaki.adapters.db.models import Connection, Job, Tenant, User
+from akunaki.adapters.db.models import AuditEventRow, Connection, Job, Tenant, User
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
@@ -440,3 +441,58 @@ def test_sync_on_a_reauth_needing_connection_is_409(
     assert response.json()["detail"]["code"] == "connection_not_syncable"
     with factory() as session:
         assert session.scalars(select(Job)).all() == []
+
+
+# ---------------------------------------------------------------------------
+# connection.create auditing
+# ---------------------------------------------------------------------------
+
+
+def test_successful_link_is_audited(client: TestClient, factory: sessionmaker[Session]) -> None:
+    _login(client, factory)
+    connection_id = _link_polar(client)
+
+    with factory() as session:
+        [event] = session.scalars(select(AuditEventRow)).all()
+
+    assert event.action == "connection.create"
+    assert event.resource_type == "connection"
+    assert event.resource_id == connection_id
+    assert event.tenant_id == "tenant-1"
+    assert json.loads(event.metadata_json) == {"provider": "polar", "outcome": "linked"}
+
+
+def test_failed_link_is_audited_too(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """ "Someone tried to link here" is what a reviewer needs after a bad callback.
+
+    A failed exchange produces no connection, so the event is attributed to the
+    session's tenant rather than a row that does not exist.
+    """
+    _login(client, factory)
+
+    response = client.get(
+        "/v1/connections/polar/callback",
+        params={"state": "never-issued", "code": "auth-code-1"},
+    )
+
+    assert response.status_code >= 400
+    with factory() as session:
+        [event] = session.scalars(select(AuditEventRow)).all()
+    assert event.action == "connection.create"
+    assert event.resource_id is None
+    assert json.loads(event.metadata_json)["outcome"] == "failed"
+
+
+def test_link_audit_carries_no_token_material(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The trail records that a link happened, never the credentials."""
+    _login(client, factory)
+    _link_polar(client)
+
+    with factory() as session:
+        [event] = session.scalars(select(AuditEventRow)).all()
+
+    blob = event.metadata_json.lower()
+    for token in ("access_token", "refresh", "secret", "code", "bearer"):
+        assert token not in blob

@@ -12,6 +12,7 @@ exposes no half-built connect surface.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -30,6 +31,7 @@ from akunaki.adapters.crypto.oauth import (
     generate_code_verifier,
     generate_state,
 )
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
@@ -39,6 +41,10 @@ from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.oauth_linking import LinkRejection, OAuthLinkingService
 from akunaki.application.sync_request import SyncRequestRejection, SyncRequestService
 from akunaki.config import ConnectorOAuthConfig, Settings
+from akunaki.domain.audit import ActorType, AuditAction
+from akunaki.domain.sessions import AuthenticatedSession
+
+logger = logging.getLogger("akunaki.connections")
 
 router = APIRouter(prefix="/v1/connections", tags=["connections"])
 
@@ -242,19 +248,62 @@ def callback(
         redirect_uri=config.redirect_uri,
         now=datetime.now(UTC),
     )
+    audit = AuditRepository(session_factory)
     if not result.ok or result.connection is None:
+        # Audit the failure against the *session's* tenant: a failed exchange
+        # produced no connection, but "someone tried to link here" is exactly
+        # what a reviewer needs after a suspicious callback.
+        _audit_link(audit, session=session, provider=provider, outcome="failed")
         raise HTTPException(
             status_code=_status_for(result.rejection), detail={"code": "link_failed"}
         )
     # The state's tenant is the authoritative one; a session for a different
     # tenant must not claim someone else's in-flight authorization.
     if result.connection.tenant_id != session.tenant_id:
+        _audit_link(audit, session=session, provider=provider, outcome="refused")
         raise HTTPException(status_code=404, detail={"code": "link_failed"})
+
+    _audit_link(
+        audit,
+        session=session,
+        provider=provider,
+        outcome="linked",
+        connection_id=result.connection.connection_id,
+    )
     return LinkedResponse(
         connection_id=result.connection.connection_id,
         provider=provider,
         status=result.connection.status.value,
     )
+
+
+def _audit_link(
+    audit: AuditRepository,
+    *,
+    session: AuthenticatedSession,
+    provider: str,
+    outcome: str,
+    connection_id: str | None = None,
+) -> None:
+    """Append a ``connection.create`` event. Never raises.
+
+    The link either happened or did not by the time this runs; failing here
+    would report an error for work that already completed.
+    """
+    try:
+        audit.record(
+            event_id=str(uuid.uuid4()),
+            tenant_id=session.tenant_id,
+            actor_type=ActorType.USER,
+            actor_id=session.user_id,
+            action=AuditAction.CONNECTION_CREATE,
+            resource_type="connection",
+            resource_id=connection_id,
+            metadata={"provider": provider, "outcome": outcome},
+            now=datetime.now(UTC),
+        )
+    except Exception:
+        logger.exception("failed to append connection audit event", extra={"provider": provider})
 
 
 def _status_for(rejection: LinkRejection | None) -> int:
