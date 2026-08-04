@@ -21,11 +21,32 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
 
+from akunaki.domain.audit import ActorType, AuditAction
 from akunaki.domain.deletion import DeletionStatus, ScrubCounts
 
 logger = logging.getLogger("akunaki.deletion")
 
 __all__ = ["DeletionOutcome", "DeletionPipelinePort", "DeletionService"]
+
+
+class AuditSink(Protocol):
+    """Port: append one audit event."""
+
+    def record(
+        self,
+        *,
+        event_id: str,
+        tenant_id: str | None,
+        actor_type: ActorType,
+        actor_id: str | None,
+        action: AuditAction,
+        resource_type: str,
+        resource_id: str | None,
+        metadata: dict[str, str],
+        now: datetime,
+    ) -> str:
+        """Append the event and return its chain hash."""
+        ...
 
 
 class DeletionPipelinePort(Protocol):
@@ -90,9 +111,47 @@ class DeletionService:
         *,
         pipeline: DeletionPipelinePort,
         new_id: Callable[[], str],
+        audit: AuditSink | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._new_id = new_id
+        self._audit = audit
+
+    def _record_audit(
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        outcome: str,
+        now: datetime,
+    ) -> None:
+        """Append the audit event, never letting it break the deletion.
+
+        The erasure has already happened by the time this runs; raising here
+        would report a failure for work that succeeded, and the tenant's data
+        would still be gone. A failed append is logged loudly instead.
+        """
+        if self._audit is None:
+            return
+        try:
+            self._audit.record(
+                event_id=self._new_id(),
+                tenant_id=tenant_id,
+                actor_type=ActorType.USER,
+                actor_id=None,
+                action=AuditAction.DELETE,
+                resource_type="tenant",
+                # The deletion request id, not the tenant id: the request is
+                # the artifact that outlives the erasure.
+                resource_id=request_id,
+                metadata={"outcome": outcome},
+                now=now,
+            )
+        except Exception:
+            logger.exception(
+                "failed to append deletion audit event",
+                extra={"deletion_request_id": request_id},
+            )
 
     def delete_tenant(self, *, tenant_id: str, now: datetime) -> DeletionOutcome:
         """Erase a tenant's data, in the pipeline's required order.
@@ -130,7 +189,23 @@ class DeletionService:
                 "privacy deletion failed",
                 extra={"deletion_request_id": request_id},
             )
+            # Audit the attempt even when it failed: "I never asked for a
+            # deletion" is exactly the claim the trail has to answer, and a
+            # half-run erasure is the case most worth having on record.
+            self._record_audit(
+                tenant_id=tenant_id,
+                request_id=request_id,
+                outcome="failed",
+                now=now,
+            )
             raise
+
+        self._record_audit(
+            tenant_id=tenant_id,
+            request_id=request_id,
+            outcome="completed",
+            now=now,
+        )
 
         # No tenant id in the log: the tenant is gone, and the request id is
         # the only handle that legitimately outlives it.

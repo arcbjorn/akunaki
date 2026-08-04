@@ -6,6 +6,7 @@ scrubbed, or an in-flight sync could re-insert data that was just deleted.
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Generator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -48,6 +49,8 @@ from akunaki.domain.deletion import (
 )
 from akunaki.domain.jobs import JobStatus, to_utc_rfc3339
 from akunaki.domain.sleep_normalizer import normalize_sleep_payload
+
+_AUDIT_IDS = itertools.count(1)
 
 T0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -551,3 +554,33 @@ def test_a_failed_stage_is_recorded_and_never_reads_as_complete() -> None:
 
     assert pipeline.failed_as == "RuntimeError"
     assert pipeline.completed is False
+
+
+class _FailingAudit:
+    """An audit sink that always raises."""
+
+    def record(self, **kwargs: object) -> str:
+        msg = "audit store unavailable"
+        raise RuntimeError(msg)
+
+
+def test_audit_failure_does_not_fail_a_completed_deletion(
+    factory: sessionmaker[Session],
+) -> None:
+    """The erasure already happened; raising would report a false failure.
+
+    The tenant's data is gone either way, so a broken audit sink must be a loud
+    log rather than an exception that tells the caller nothing was deleted.
+    """
+    _populate(factory, "tenant-1")
+    service = DeletionService(
+        pipeline=DeletionRepository(factory),
+        new_id=lambda: f"id-{next(_AUDIT_IDS)}",
+        audit=_FailingAudit(),
+    )
+
+    outcome = service.delete_tenant(tenant_id="tenant-1", now=T0)
+
+    assert outcome.status is DeletionStatus.COMPLETED
+    with factory() as session:
+        assert session.get(Tenant, "tenant-1") is None

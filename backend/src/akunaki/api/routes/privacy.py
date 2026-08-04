@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.deletion_repository import DeletionRepository
 from akunaki.api.app import get_session_factory
 from akunaki.api.security import CurrentSession, clear_session_cookie
@@ -70,6 +71,7 @@ def start_deletion(
     service = DeletionService(
         pipeline=DeletionRepository(session_factory),
         new_id=lambda: str(uuid.uuid4()),
+        audit=AuditRepository(session_factory),
     )
     outcome = service.delete_tenant(tenant_id=session.tenant_id, now=datetime.now(UTC))
 

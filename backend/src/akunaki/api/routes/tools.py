@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.anomaly_repository import AnomalyRepository
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.checkin_repository import CheckInRepository
 from akunaki.adapters.db.confirmation_repository import ConfirmationRepository
 from akunaki.adapters.db.connection_repository import ConnectionRepository
@@ -136,6 +137,7 @@ def _registry(
         deletion=DeletionService(
             pipeline=DeletionRepository(session_factory),
             new_id=lambda: str(uuid.uuid4()),
+            audit=AuditRepository(session_factory),
         ),
     )
     return registry

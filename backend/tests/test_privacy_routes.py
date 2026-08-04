@@ -7,6 +7,7 @@ end against a migrated database.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,8 +19,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.models import (
+    AuditEventRow,
     DeletionCompletionProof,
     DeletionRequest,
     SubjectiveCheckIn,
@@ -231,3 +234,45 @@ def test_status_reports_a_completed_deletion(
 def test_unknown_deletion_request_is_404(client: TestClient) -> None:
     """An unguessable id that does not exist discloses nothing."""
     assert client.get("/v1/privacy/delete/no-such-request").status_code == 404
+
+
+def test_deletion_writes_a_surviving_audit_event(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The trail must outlive the erasure it records.
+
+    "I never asked for a deletion" is the repudiation claim audit exists to
+    answer, so the event cannot be cascaded away with the tenant.
+    """
+    csrf = _login(client, factory)
+    request_id = client.post("/v1/privacy/delete", headers={CSRF_HEADER_NAME: csrf}).json()[
+        "deletion_request_id"
+    ]
+
+    with factory() as session:
+        assert session.get(Tenant, "tenant-1") is None
+        event = session.scalars(select(AuditEventRow)).one()
+
+    assert event.action == "delete"
+    assert event.tenant_id == "tenant-1"
+    assert event.resource_id == request_id
+    assert event.actor_type == "user"
+    # Counts and health values stay out of the trail.
+    assert json.loads(event.metadata_json) == {"outcome": "completed"}
+    assert AuditRepository(factory).verify() is None
+
+
+def test_audit_metadata_carries_no_health_values(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """An audit trail that logged measurements would be a second PHI store."""
+    _add_health_row(factory, tenant_id="tenant-1", row_id="ci-1")
+    csrf = _login(client, factory)
+    client.post("/v1/privacy/delete", headers={CSRF_HEADER_NAME: csrf})
+
+    with factory() as session:
+        event = session.scalars(select(AuditEventRow)).one()
+
+    blob = event.metadata_json.lower()
+    for token in ("hrv", "sleep", "score", "steps", "energy", "stress"):
+        assert token not in blob
