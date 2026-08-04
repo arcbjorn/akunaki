@@ -1,6 +1,6 @@
 # Implementation status
 
-**Last updated:** 2026-07-24
+**Last updated:** 2026-08-03
 
 Honest truth table for what exists in this repository. Prefer this page over roadmap marketing language when asking “is it built?”
 
