@@ -173,6 +173,30 @@ def chain_hash(
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def verify_link(event: AuditEvent, *, expected_previous: str) -> bool:
+    """Whether ``event`` links to ``expected_previous`` and matches its own hash.
+
+    The single-event step behind :func:`verify_chain`, exposed so a caller can
+    walk a long chain in batches without holding every event in memory — the
+    audit table only grows, so a verifier that materializes it does not survive
+    contact with a real deployment.
+    """
+    if event.previous_hash != expected_previous:
+        return False
+    recomputed = chain_hash(
+        previous_hash=event.previous_hash,
+        tenant_id=event.tenant_id,
+        actor_type=event.actor_type,
+        actor_id=event.actor_id,
+        action=event.action,
+        resource_type=event.resource_type,
+        resource_id=event.resource_id,
+        metadata=event.metadata,
+        created_at=event.created_at,
+    )
+    return recomputed == event.event_hash
+
+
 def verify_chain(events: list[AuditEvent]) -> int | None:
     """Return the index of the first tampered event, or None when intact.
 
@@ -182,20 +206,7 @@ def verify_chain(events: list[AuditEvent]) -> int | None:
     """
     expected_previous = GENESIS_HASH
     for index, event in enumerate(events):
-        if event.previous_hash != expected_previous:
-            return index
-        recomputed = chain_hash(
-            previous_hash=event.previous_hash,
-            tenant_id=event.tenant_id,
-            actor_type=event.actor_type,
-            actor_id=event.actor_id,
-            action=event.action,
-            resource_type=event.resource_type,
-            resource_id=event.resource_id,
-            metadata=event.metadata,
-            created_at=event.created_at,
-        )
-        if recomputed != event.event_hash:
+        if not verify_link(event, expected_previous=expected_previous):
             return index
         expected_previous = event.event_hash
     return None

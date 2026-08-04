@@ -24,9 +24,13 @@ from akunaki.domain.audit import (
     AuditEvent,
     chain_hash,
     validate_metadata,
-    verify_chain,
+    verify_link,
 )
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
+
+# Bounded read per round trip: big enough to be few queries, small enough
+# that one batch never dominates worker memory.
+_VERIFY_BATCH = 500
 
 __all__ = ["AuditRepository"]
 
@@ -95,34 +99,55 @@ class AuditRepository:
             )
             return digest
 
-    def verify(self) -> int | None:
+    def verify(self, *, batch_size: int = _VERIFY_BATCH) -> int | None:
         """Return the ``seq`` of the first tampered event, or None when intact.
 
-        Verifies the whole chain in insertion order. The chain is global rather
-        than per-tenant so a deleted tenant's events still anchor the events
-        that followed them — a per-tenant chain would let erasing one tenant
-        silently re-root another's history.
-        """
-        with self._session_factory() as session:
-            rows = list(
-                session.execute(select(AuditEventRow).order_by(AuditEventRow.seq)).scalars()
-            )
+        Walks the chain in insertion order **in batches**: the audit table only
+        grows, so materializing it would eventually exhaust memory on the very
+        deployment that has the most history to protect.
 
-        events = [
-            AuditEvent(
-                event_id=row.id,
-                tenant_id=row.tenant_id,
-                actor_type=ActorType(row.actor_type),
-                actor_id=row.actor_id,
-                action=AuditAction(row.action),
-                resource_type=row.resource_type,
-                resource_id=row.resource_id,
-                metadata=json.loads(row.metadata_json),
-                created_at=row.created_at,
-                previous_hash=row.previous_hash,
-                event_hash=row.event_hash,
-            )
-            for row in rows
-        ]
-        index = verify_chain(events)
-        return rows[index].seq if index is not None else None
+        The chain is global rather than per-tenant so a deleted tenant's events
+        still anchor the ones that followed — a per-tenant chain would let
+        erasing one tenant silently re-root another's history.
+        """
+        if batch_size < 1:
+            msg = "batch_size must be >= 1"
+            raise ValueError(msg)
+
+        expected_previous = GENESIS_HASH
+        after_seq = 0
+        while True:
+            with self._session_factory() as session:
+                rows = list(
+                    session.execute(
+                        select(AuditEventRow)
+                        .where(AuditEventRow.seq > after_seq)
+                        .order_by(AuditEventRow.seq)
+                        .limit(batch_size)
+                    ).scalars()
+                )
+            if not rows:
+                return None
+
+            for row in rows:
+                if not verify_link(_to_event(row), expected_previous=expected_previous):
+                    return row.seq
+                expected_previous = row.event_hash
+            after_seq = rows[-1].seq
+
+
+def _to_event(row: AuditEventRow) -> AuditEvent:
+    """Rehydrate a stored row into the domain event the verifier checks."""
+    return AuditEvent(
+        event_id=row.id,
+        tenant_id=row.tenant_id,
+        actor_type=ActorType(row.actor_type),
+        actor_id=row.actor_id,
+        action=AuditAction(row.action),
+        resource_type=row.resource_type,
+        resource_id=row.resource_id,
+        metadata=json.loads(row.metadata_json),
+        created_at=row.created_at,
+        previous_hash=row.previous_hash,
+        event_hash=row.event_hash,
+    )

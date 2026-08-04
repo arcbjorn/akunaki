@@ -189,3 +189,34 @@ def test_system_events_carry_no_tenant(factory: sessionmaker[Session]) -> None:
 
 def test_empty_chain_verifies(factory: sessionmaker[Session]) -> None:
     assert AuditRepository(factory).verify() is None
+
+
+def test_verify_walks_the_chain_in_batches(factory: sessionmaker[Session]) -> None:
+    """Batched verification must give the same answer as a single pass.
+
+    The audit table only grows, so the verifier reads in bounded chunks. A
+    tamper that straddles a batch boundary is exactly where an off-by-one in
+    the paging would hide it.
+    """
+    repo = AuditRepository(factory)
+    for n in range(7):
+        _record(repo, event_id=f"e{n}", offset_seconds=n)
+    assert repo.verify(batch_size=2) is None
+
+    # Corrupt an event that is not the first of its batch.
+    with factory() as session, session.begin():
+        session.execute(
+            update(AuditEventRow).where(AuditEventRow.id == "e4").values(resource_id="edited")
+        )
+
+    tampered_seq = repo.verify(batch_size=2)
+    assert tampered_seq is not None
+    # Same verdict whatever the batching, including a single-row batch.
+    assert repo.verify(batch_size=1) == tampered_seq
+    assert repo.verify(batch_size=1000) == tampered_seq
+
+
+def test_verify_rejects_a_nonsense_batch_size(factory: sessionmaker[Session]) -> None:
+    with pytest.raises(ValueError, match="batch_size"):
+        AuditRepository(factory).verify(batch_size=0)
+
