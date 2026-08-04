@@ -27,6 +27,7 @@ from enum import StrEnum
 from typing import Final
 
 __all__ = [
+    "AUDIT_CHAIN_CHECK",
     "GENESIS_HASH",
     "ActorType",
     "AuditAction",
@@ -40,6 +41,10 @@ __all__ = [
 # rather than empty string, so a truncated chain cannot be passed off as a fresh
 # one by nulling the link.
 GENESIS_HASH: Final = "0" * 64
+
+# Name of the scheduled audit-chain verification, shared by the handler that
+# writes the verdict and the probe that reads it.
+AUDIT_CHAIN_CHECK: Final = "audit_chain"
 
 
 class ActorType(StrEnum):

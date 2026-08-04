@@ -40,6 +40,7 @@ from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
 from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.adapters.db.source_selection_repository import SourceSelectionRepository
+from akunaki.adapters.db.status_repository import SystemCheckRepository
 from akunaki.adapters.db.unit_of_work import FencedUnitOfWork
 from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE, AuditVerifyHandler
@@ -152,6 +153,7 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
             RECONCILE_SWEEP_JOB_TYPE: reconcile,
             AUDIT_VERIFY_JOB_TYPE: AuditVerifyHandler(
                 audit=AuditRepository(session_factory),
+                checks=SystemCheckRepository(session_factory),
             ),
             RETENTION_SWEEP_JOB_TYPE: RetentionSweepHandler(
                 stores={
