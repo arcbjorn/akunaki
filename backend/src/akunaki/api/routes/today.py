@@ -111,7 +111,7 @@ def _score_repository(
     return ScoreRepository(session_factory)
 
 
-def _today_service(
+def today_service(
     session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
 ) -> TodaySurfaceService:
     facts = FactRepository(session_factory)
@@ -138,7 +138,7 @@ def _today_service(
 def today(
     response: Response,
     session: CurrentSession,
-    service: Annotated[TodaySurfaceService, Depends(_today_service)],
+    service: Annotated[TodaySurfaceService, Depends(today_service)],
     scores: Annotated[ScoreRepository, Depends(_score_repository)],
     day: Annotated[
         str,
