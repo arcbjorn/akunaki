@@ -92,6 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from akunaki.api.routes.metrics_series import router as metrics_series_router
     from akunaki.api.routes.privacy import router as privacy_router
     from akunaki.api.routes.provenance import router as provenance_router
+    from akunaki.api.routes.providers import router as providers_router
     from akunaki.api.routes.recommendations import router as recommendations_router
     from akunaki.api.routes.recovery import router as recovery_router
     from akunaki.api.routes.session import router as session_router
@@ -119,6 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(metrics_series_router)
     app.include_router(trends_router)
     app.include_router(recommendations_router)
+    app.include_router(providers_router)
     app.include_router(data_quality_router)
     app.include_router(webhooks_router)
 
