@@ -20,7 +20,7 @@ from datetime import datetime
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from akunaki.adapters.db.models import SourceSelection, SourceSelectionCandidate
+from akunaki.adapters.db.models import FactRecord, SourceSelection, SourceSelectionCandidate
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
 from akunaki.domain.source_policy import DailySelectionSpec, SelectionCandidate
 
@@ -183,3 +183,99 @@ def _validate_reason(spec: SelectionSpec) -> None:
     elif spec.selected_fact_record_id is None or spec.missing_reason is not None:
         msg = "a non-missing selection requires a selected fact and no missing_reason"
         raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class DisclosedCandidate:
+    """One competing provider for a day, as shown to the user."""
+
+    provider: str
+    rank: int
+    eligibility: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class DisclosedSelection:
+    """A recorded source decision, with the providers that competed."""
+
+    metric_family: str
+    local_health_day: str
+    selected_provider: str | None
+    selection_reason: str
+    missing_reason: str | None
+    policy_version: str
+    version_n: int
+    candidates: tuple[DisclosedCandidate, ...]
+
+
+class SourceSelectionReader:
+    """Read recorded source decisions for disclosure to the user."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._session_factory = session_factory
+
+    def disclosed_selection(
+        self, *, tenant_id: str, metric_family: str, local_health_day: str
+    ) -> DisclosedSelection | None:
+        """The current decision for a day, resolved to providers, or None.
+
+        Candidates are resolved to their **provider**, never their fact id: the
+        user's question is "which source won and what else was there", and the
+        provenance surface already refuses to hand out row ids. Tenant-scoped,
+        so one tenant cannot read another's decisions.
+        """
+        with self._session_factory() as session:
+            selection = session.execute(
+                select(SourceSelection).where(
+                    SourceSelection.tenant_id == tenant_id,
+                    SourceSelection.metric_family == metric_family,
+                    SourceSelection.granularity == GRANULARITY_DAILY,
+                    SourceSelection.grain_key == local_health_day,
+                    SourceSelection.is_current == 1,
+                )
+            ).scalar_one_or_none()
+            if selection is None:
+                return None
+
+            selected_provider: str | None = None
+            if selection.selected_fact_record_id is not None:
+                selected_provider = session.execute(
+                    select(FactRecord.provider).where(
+                        FactRecord.id == selection.selected_fact_record_id
+                    )
+                ).scalar_one_or_none()
+
+            rows = session.execute(
+                select(
+                    FactRecord.provider,
+                    SourceSelectionCandidate.rank,
+                    SourceSelectionCandidate.eligibility,
+                    SourceSelectionCandidate.reason,
+                )
+                .join(
+                    FactRecord,
+                    FactRecord.id == SourceSelectionCandidate.fact_record_id,
+                )
+                .where(SourceSelectionCandidate.source_selection_id == selection.id)
+                .order_by(SourceSelectionCandidate.rank)
+            ).all()
+
+        return DisclosedSelection(
+            metric_family=selection.metric_family,
+            local_health_day=selection.grain_key,
+            selected_provider=selected_provider,
+            selection_reason=selection.selection_reason,
+            missing_reason=selection.missing_reason,
+            policy_version=selection.source_policy_version_id,
+            version_n=selection.version_n,
+            candidates=tuple(
+                DisclosedCandidate(
+                    provider=provider or "",
+                    rank=rank,
+                    eligibility=eligibility,
+                    reason=reason,
+                )
+                for provider, rank, eligibility, reason in rows
+            ),
+        )
