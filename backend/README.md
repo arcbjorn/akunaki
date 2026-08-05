@@ -554,6 +554,20 @@ curl -X POST --cookie akunaki_session=<token> \
 
 It queues the **same** `connection.incremental_sync` job the webhook and reconcile paths use, so a manual sync has no separate semantics: it resumes from the stored cursor and dedupes on content hash like any other. The key is namespaced per connection, so a double-clicked button queues one job (`created: false` on the repeat). A `needs_reauth` or `revoked` connection is a **409** rather than a job doomed to burn attempts; unknown and cross-tenant are an indistinguishable **404** that queues nothing.
 
+### `GET /v1/metrics/{metric}` — one measured series
+
+```bash
+curl --cookie akunaki_session=<token> localhost:8000/v1/metrics
+curl --cookie akunaki_session=<token> \
+  'localhost:8000/v1/metrics/hrv?day=2026-08-04&window_days=30'
+```
+
+Reads the **same** windowed `daily_*` queries the recovery components consume, so a chart and a score can never disagree about what was measured. Eight metrics ship: `hrv`, `resting_hr`, `temperature_deviation`, `respiratory_rate`, `sleep_duration`, `sleep_efficiency`, `steps`, `strain_load`.
+
+**Measurements, not scores.** v0.1.0 ships exactly one score code (recovery), so a per-metric rating would imply a formula nobody accepted. The baseline is disclosed as centre and robust scale — enough to draw a band — never as a normalized good/bad number, and it reads `insufficient` on a sparse window rather than producing a confident-looking one.
+
+**Gaps are omitted, never zero-filled**: `known_days` and `coverage_is_partial` let a chart show a gap instead of a measured zero. An unexposed metric name is a **404**, not an empty series that reads as "no data"; `GET /v1/metrics` lists the valid names.
+
 ### `/v1/source-policies` — why this provider won
 
 ADR 0005 requires source policies to be **inspectable**, and the product principles require a user to be able to audit *why* a day looks the way it does.
