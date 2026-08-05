@@ -44,6 +44,48 @@ _SLEEP_PRECEDENCE: tuple[str, ...] = (
 
 
 @dataclass(frozen=True, slots=True)
+class MetricFamilyPolicy:
+    """The effective precedence for one metric family.
+
+    ``providers`` is ordered most-authoritative first. A provider absent from it
+    is never authoritative for this family, so it cannot win a day the listed
+    ones cover.
+    """
+
+    metric_family: str
+    providers: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EffectivePolicy:
+    """The source policy actually in force, as a user can inspect it."""
+
+    policy_version: str
+    families: tuple[MetricFamilyPolicy, ...]
+
+
+def effective_policy() -> EffectivePolicy:
+    """Describe the source precedence this build actually enforces.
+
+    Deliberately reports only families with a **real** precedence rule. The ADR
+    also names authoritative providers for overnight vitals, daytime activity,
+    and workouts, but no code selects between providers for those — one
+    connector supplies each today — so listing them would present an aspiration
+    as an enforced rule, which is exactly what an "inspectable policy" must not
+    do.
+    """
+    return EffectivePolicy(
+        policy_version=SOURCE_POLICY_VERSION,
+        families=(
+            MetricFamilyPolicy(
+                metric_family=SLEEP_METRIC_FAMILY,
+                providers=_SLEEP_PRECEDENCE,
+            ),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class SelectionCandidate:
     """One competing provider fact, with why it did or did not win.
 
