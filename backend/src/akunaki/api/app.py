@@ -99,6 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from akunaki.api.routes.session import router as session_router
     from akunaki.api.routes.sleep import router as sleep_router
     from akunaki.api.routes.source_policies import router as source_policies_router
+    from akunaki.api.routes.sync_status import router as sync_status_router
     from akunaki.api.routes.today import router as today_router
     from akunaki.api.routes.tools import router as tools_router
     from akunaki.api.routes.trends import router as trends_router
@@ -123,6 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(recommendations_router)
     app.include_router(providers_router)
     app.include_router(me_router)
+    app.include_router(sync_status_router)
     app.include_router(data_quality_router)
     app.include_router(webhooks_router)
 
