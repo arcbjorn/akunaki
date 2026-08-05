@@ -88,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from akunaki.api.routes.checkin import router as checkin_router
     from akunaki.api.routes.confirmations import router as confirmations_router
     from akunaki.api.routes.connections import router as connections_router
+    from akunaki.api.routes.data_quality import router as data_quality_router
     from akunaki.api.routes.metrics_series import router as metrics_series_router
     from akunaki.api.routes.privacy import router as privacy_router
     from akunaki.api.routes.provenance import router as provenance_router
@@ -116,6 +117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(source_policies_router)
     app.include_router(metrics_series_router)
     app.include_router(trends_router)
+    app.include_router(data_quality_router)
     app.include_router(webhooks_router)
 
     # Login routes only when OIDC is configured. An unconfigured deployment
