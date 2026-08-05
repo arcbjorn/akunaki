@@ -568,6 +568,33 @@ Reads the **same** windowed `daily_*` queries the recovery components consume, s
 
 **Gaps are omitted, never zero-filled**: `known_days` and `coverage_is_partial` let a chart show a gap instead of a measured zero. An unexposed metric name is a **404**, not an empty series that reads as "no data"; `GET /v1/metrics` lists the valid names.
 
+### `GET /v1/providers` — what can I link, and what would it give me?
+
+```bash
+curl --cookie akunaki_session=<token> localhost:8000/v1/providers
+```
+
+`/v1/connections` describes what you already have. This describes what is on offer, and what each option actually contributes:
+
+```json
+{
+  "providers": [
+    {"provider": "google_health", "capabilities": ["sleep"],
+     "supports_recovery_score": false, "connection_status": null},
+    {"provider": "oura", "capabilities": ["sleep", "overnight_vitals"],
+     "supports_recovery_score": true, "connection_status": "active"},
+    {"provider": "polar", "capabilities": ["workouts"],
+     "supports_recovery_score": false, "connection_status": null}
+  ]
+}
+```
+
+**`supports_recovery_score` is the field that matters.** The v0.1.0 gate needs sleep-target adherence *and* either HRV or resting HR. Linking only Polar gives you workouts and a permanently `insufficient` recovery score — worth knowing before you wait a week for one to appear. It is necessary, not sufficient: the gate also needs a minimum available weight, so even a capable provider yields nothing until enough days carry real measurements.
+
+**Only implemented capabilities are listed.** `ingestion-and-sync.md` carries a much wider matrix — Oura SpO2, Polar swim structure, Health Connect, HealthKit — explicitly labelled *proposed targets*. Publishing it would promise data that never arrives, so this mirrors the sync dispatch table instead, with a test that fails if the two drift apart.
+
+**Only configured providers are listed.** A provider without complete OAuth credentials is absent here, exactly as it 404s from the authorize route — an unconfigured deployment must not be probeable for what it *could* link.
+
 ### `GET /v1/recommendations` — the guidance, including what lost
 
 ```bash
