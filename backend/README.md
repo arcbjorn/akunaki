@@ -568,6 +568,30 @@ Reads the **same** windowed `daily_*` queries the recovery components consume, s
 
 **Gaps are omitted, never zero-filled**: `known_days` and `coverage_is_partial` let a chart show a gap instead of a measured zero. An unexposed metric name is a **404**, not an empty series that reads as "no data"; `GET /v1/metrics` lists the valid names.
 
+### `GET /v1/sync/status` — did my syncs actually run?
+
+```bash
+curl --cookie akunaki_session=<token> \
+  'localhost:8000/v1/sync/status?limit=20'
+```
+
+```json
+{
+  "runs": [
+    {"run_id": "run-9", "connection_id": "conn-1", "provider": "oura",
+     "trigger": "schedule", "stream": "sleep", "status": "failed",
+     "started_at": "2026-08-05T12:00:00Z", "finished_at": "2026-08-05T12:00:04Z",
+     "error_class": "TransientJobError"}
+  ]
+}
+```
+
+`/v1/connections` tells you a connection failed three times. It cannot tell you **when**, on which stream, or whether the most recent attempt succeeded — a counter has no history. This does.
+
+`sync_runs` shipped with the transport migration and had no writer, so `raw_payloads.sync_run_id` and `raw_revisions.sync_run_id` were permanently NULL. Runs are now opened *before* the fetch and closed with the outcome, so a worker that dies mid-run leaves a `running` row with a null `finished_at` — a visible incomplete attempt beats no record at all. A settled run is never rewritten, so a retry reusing an id cannot turn a recorded failure into a success.
+
+`error_class` is the exception class name only, never a vendor message: this row is user-facing.
+
 ### `GET /v1/me` — the account, and which timezone your days are in
 
 ```bash
