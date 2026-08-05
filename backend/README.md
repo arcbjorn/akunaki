@@ -568,6 +568,20 @@ Reads the **same** windowed `daily_*` queries the recovery components consume, s
 
 **Gaps are omitted, never zero-filled**: `known_days` and `coverage_is_partial` let a chart show a gap instead of a measured zero. An unexposed metric name is a **404**, not an empty series that reads as "no data"; `GET /v1/metrics` lists the valid names.
 
+### `GET /v1/data-quality` — is my data flowing?
+
+```bash
+curl --cookie akunaki_session=<token> localhost:8000/v1/data-quality
+```
+
+Distinct from `/v1/today`'s `data_gaps`. A gap is a property of **one day** ("this day has no HRV") that resolves when data arrives. A finding is a **standing** condition the user can usually act on: reconnect a provider, or know one has been silent for days.
+
+Six codes in a closed vocabulary — `connection_needs_reauth`, `connection_revoked`, `connection_stale_sync`, `connection_never_synced`, `connection_repeated_failures`, `no_connections_linked` — each with `info`/`warning`/`error`, ordered most severe first. A client renders copy per code, so there is no server-authored message to mistranslate or leak vendor detail.
+
+Two judgment calls worth knowing: a **revoked** connection is `info`, not an error (the user chose it; it is reported only so a missing chart has an explanation), and a revoked or reauth-needing connection is **not also flagged stale** — staleness is the consequence, not the actionable finding.
+
+Carries **no health values**: codes, severities, and provider names only. **Derived on read, not stored** — the design lists a `data_quality_findings` table but no detector or resolution lifecycle, and a persisted finding would outlive its condition and tell the user to fix something already fixed.
+
 ### `GET /v1/trends` — several metrics at once
 
 ```bash
