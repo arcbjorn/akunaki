@@ -568,6 +568,33 @@ Reads the **same** windowed `daily_*` queries the recovery components consume, s
 
 **Gaps are omitted, never zero-filled**: `known_days` and `coverage_is_partial` let a chart show a gap instead of a measured zero. An unexposed metric name is a **404**, not an empty series that reads as "no data"; `GET /v1/metrics` lists the valid names.
 
+### `GET /v1/recommendations` — the guidance, including what lost
+
+```bash
+curl --cookie akunaki_session=<token> \
+  'localhost:8000/v1/recommendations?day=2026-08-04'
+```
+
+`/v1/today` renders the primary and supporting recommendations as part of a composite day view. This surface is the recommendation **set itself**, and it additionally discloses the rules that fired and were **suppressed**, each naming the rule that beat it:
+
+```json
+{
+  "local_health_day": "2026-08-04",
+  "ruleset_version": "training_label_v0.1.0",
+  "primary": {"rule_id": "rest_day", "role": "primary",
+              "conflict_group": "load", "suppressed_by": null},
+  "supporting": [],
+  "suppressed": [
+    {"rule_id": "load_ease", "role": "suppressed",
+     "conflict_group": "load", "suppressed_by": "rest_day"}
+  ]
+}
+```
+
+That disclosure is why the endpoint exists. Conflict resolution keeps one winner per group and drops the losers, so "you were also over your load target, but rest outranked it" was being computed and thrown away — leaving no way to answer *why am I not being told to ease off?* The honest answer is that a higher-priority rule won, not that nothing fired.
+
+`day` is required rather than defaulted to the server's today, like every day surface: a local health day belongs to the tenant's timezone. Rule ids are stable codes, not sentences — the client owns the wording. Guidance only: wellness and performance, never diagnosis, treatment, or injury prediction.
+
 ### `GET /v1/data-quality` — is my data flowing?
 
 ```bash
