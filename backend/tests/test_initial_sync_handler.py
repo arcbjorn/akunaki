@@ -28,6 +28,7 @@ from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.ingestion_repository import IngestionRepository
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import Connection, RawPayload, RawRevision, SyncCursor, Tenant
+from akunaki.adapters.db.sync_run_repository import SyncRunRecord, SyncRunRepository
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.sync_handlers import (
     INITIAL_SYNC_JOB_TYPE,
@@ -501,3 +502,116 @@ def test_sync_config_validates() -> None:
         SyncConfig(lookback_days=0)
     with pytest.raises(ValueError, match="max_pages must be >= 1"):
         SyncConfig(max_pages=0)
+
+
+# ---------------------------------------------------------------------------
+# Sync run recording
+# ---------------------------------------------------------------------------
+
+
+def _recording_handler(
+    factory: sessionmaker[Session],
+    responder: Callable[[httpx2.Request], httpx2.Response],
+) -> InitialSyncHandler:
+    """The standard handler, plus the durable run recorder the worker wires."""
+    ids = (f"id-{n}" for n in _ID_COUNTER)
+    return InitialSyncHandler(
+        fetch_client=OuraFetchClient(
+            transport=httpx2.Client(transport=httpx2.MockTransport(responder))
+        ),
+        ingestion=IngestionRepository(factory),
+        connections=ConnectionRepository(factory),
+        sealer=EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1"),
+        new_id=lambda: next(ids),
+        config=SyncConfig(max_pages=5),
+        clock=lambda: T0,
+        sync_runs=SyncRunRepository(factory),
+    )
+
+
+def _runs(factory: sessionmaker[Session]) -> list[SyncRunRecord]:
+    return SyncRunRepository(factory).recent_for_tenant(tenant_id="tenant-1", limit=10)
+
+
+def _rate_limited() -> Callable[[httpx2.Request], httpx2.Response]:
+    def limited(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(429, json={"error": "rate_limit"}, headers={"retry-after": "120"})
+
+    return limited
+
+
+def _unauthorized() -> Callable[[httpx2.Request], httpx2.Response]:
+    def denied(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, json={"error": "unauthorized"})
+
+    return denied
+
+
+def test_a_successful_sync_is_recorded(factory: sessionmaker[Session]) -> None:
+    """``sync_runs`` had no writer at all until this path existed."""
+    _run_job(factory, _recording_handler(factory, _ok(PAGE_ONE)))
+
+    [run] = _runs(factory)
+
+    assert run.status == "succeeded"
+    assert run.trigger == "initial"
+    assert run.stream == "sleep"
+    assert run.finished_at is not None
+    assert run.error_class is None
+
+
+def test_a_failed_sync_is_still_recorded(factory: sessionmaker[Session]) -> None:
+    """The whole point: a failure that leaves no trace is the current bug.
+
+    ``connection_health`` counts failures but cannot say when one happened or
+    whether the last attempt even ran.
+    """
+    _run_job(factory, _recording_handler(factory, _rate_limited()))
+
+    [run] = _runs(factory)
+
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    assert run.error_class == "TransientJobError"
+
+
+def test_an_auth_failure_records_its_permanent_class(factory: sessionmaker[Session]) -> None:
+    _run_job(factory, _recording_handler(factory, _unauthorized()))
+
+    [run] = _runs(factory)
+
+    assert run.status == "failed"
+    assert run.error_class == "PermanentJobError"
+
+
+def test_a_recorded_failure_carries_no_vendor_body(factory: sessionmaker[Session]) -> None:
+    """The error *class*, never the provider's message."""
+    _run_job(factory, _recording_handler(factory, _rate_limited()))
+
+    [run] = _runs(factory)
+
+    assert run.error_class is not None
+    assert "rate_limit" not in run.error_class
+
+
+def test_ingested_rows_link_back_to_their_run(factory: sessionmaker[Session]) -> None:
+    """``raw_payloads.sync_run_id`` was permanently NULL before the recorder.
+
+    That FK exists so ingested data is traceable to the fetch that produced it.
+    """
+    _run_job(factory, _recording_handler(factory, _ok(PAGE_ONE)))
+
+    [run] = _runs(factory)
+    with factory() as session:
+        payloads = session.scalars(select(RawPayload)).all()
+
+    assert payloads
+    assert all(payload.sync_run_id == run.run_id for payload in payloads)
+
+
+def test_a_handler_without_a_recorder_still_syncs(factory: sessionmaker[Session]) -> None:
+    """Recording is additive: an unwired handler behaves exactly as before."""
+    worker = _run_job(factory, _handler(factory, _ok(PAGE_ONE)))
+
+    assert worker.stats.succeeded == 1
+    assert _runs(factory) == []

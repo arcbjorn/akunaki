@@ -41,6 +41,7 @@ from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.adapters.db.source_selection_repository import SourceSelectionRepository
 from akunaki.adapters.db.status_repository import SystemCheckRepository
+from akunaki.adapters.db.sync_run_repository import SyncRunRepository
 from akunaki.adapters.db.unit_of_work import FencedUnitOfWork
 from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE, AuditVerifyHandler
@@ -90,6 +91,7 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
     ingestion = IngestionRepository(session_factory)
     facts = FactRepository(session_factory)
     jobs = JobRepository(session_factory)
+    sync_runs = SyncRunRepository(session_factory)
 
     # One initial + one incremental handler per provider, each fixed to that
     # provider's fetch client and stream/schema config.
@@ -104,6 +106,7 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
             sealer=sealer,
             new_id=_new_id,
             config=config,
+            sync_runs=sync_runs,
         )
         initial[provider] = backfill
         incremental[provider] = IncrementalSyncHandler(

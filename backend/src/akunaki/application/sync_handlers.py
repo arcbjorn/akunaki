@@ -44,6 +44,7 @@ from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.secrets import SecretDecryptionError
 from akunaki.domain.sleep_normalizer import NormalizationError, normalize_sleep_payload
 from akunaki.domain.source_policy import SOURCE_POLICY_VERSION, decide_sleep_selection
+from akunaki.domain.sync_runs import SyncRunStatus, SyncRunTrigger
 from akunaki.domain.vitals_normalizer import normalize_vitals_payload
 from akunaki.domain.workout_normalizer import normalize_workout_payload
 from akunaki.ports.connections import ConnectionRepositoryPort
@@ -57,6 +58,7 @@ from akunaki.ports.facts import (
 from akunaki.ports.fetch import ConnectorFetchPort, IngestionRepositoryPort
 from akunaki.ports.jobs import JobRepositoryPort
 from akunaki.ports.secrets import SecretSealerPort
+from akunaki.ports.sync_runs import SyncRunRecorderPort
 
 logger = logging.getLogger("akunaki.sync_handlers")
 
@@ -188,6 +190,7 @@ class InitialSyncHandler:
         new_id: Callable[[], str],
         config: SyncConfig | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        sync_runs: SyncRunRecorderPort | None = None,
     ) -> None:
         self._fetch = fetch_client
         self._ingestion = ingestion
@@ -196,6 +199,10 @@ class InitialSyncHandler:
         self._new_id = new_id
         self._config = config or SyncConfig()
         self._clock = clock
+        # Optional so a handler can be constructed without history recording;
+        # the worker wires it, and an unwired handler syncs exactly as before
+        # rather than failing.
+        self._sync_runs = sync_runs
 
     def __call__(self, claim: JobClaim) -> None:
         """Execute one initial-sync job."""
@@ -206,10 +213,10 @@ class InitialSyncHandler:
         # Backfill window: a fixed lookback ending now.
         window_start = now - timedelta(days=self._config.lookback_days) - self._config.overlap
 
-        new_revisions = self.sync_window(
+        new_revisions = self.recorded_sync_window(
             claim=claim,
             connection_id=connection_id,
-            sync_run_id=payload.get("sync_run_id"),
+            trigger=SyncRunTrigger.INITIAL,
             window_start=window_start,
             window_end=now,
             now=now,
@@ -241,6 +248,77 @@ class InitialSyncHandler:
             "initial sync completed",
             extra={"connection_id": connection_id, "new_revisions": new_revisions},
         )
+
+    def recorded_sync_window(
+        self,
+        *,
+        claim: JobClaim,
+        connection_id: str,
+        trigger: SyncRunTrigger,
+        window_start: datetime,
+        window_end: datetime,
+        now: datetime,
+    ) -> int:
+        """Run one window, recording the attempt in ``sync_runs``.
+
+        The run is opened **before** the fetch and closed with the outcome, so
+        an attempt that dies mid-flight leaves a visible ``running`` row rather
+        than nothing at all. The id also becomes the ``sync_run_id`` on every
+        payload and revision the window ingests, which is what makes ingested
+        data traceable back to the fetch that produced it — those FK columns
+        were permanently NULL until now.
+
+        Recording never changes the sync's outcome: a failure to write history
+        must not fail a sync that worked, and the close runs in a ``finally`` so
+        a raised fetch error still settles the row before propagating.
+        """
+        if self._sync_runs is None:
+            return self.sync_window(
+                claim=claim,
+                connection_id=connection_id,
+                sync_run_id=None,
+                window_start=window_start,
+                window_end=window_end,
+                now=now,
+            )
+
+        run_id = self._sync_runs.open(
+            run_id=self._new_id(),
+            tenant_id=claim.tenant_id,
+            connection_id=connection_id,
+            trigger=trigger,
+            stream=self._config.stream,
+            now=now,
+        )
+        status = SyncRunStatus.FAILED
+        error_class: str | None = None
+        try:
+            new_revisions = self.sync_window(
+                claim=claim,
+                connection_id=connection_id,
+                sync_run_id=run_id,
+                window_start=window_start,
+                window_end=window_end,
+                now=now,
+            )
+        except Exception as exc:
+            # Every failure is recorded, not just the typed retry ones — an
+            # unexpected error is exactly what a user needs to see happened.
+            # The class *name*, never the message: this row is user-facing and
+            # a vendor body could carry anything. Re-raised unchanged, so
+            # recording never alters the runtime's retry decision.
+            error_class = type(exc).__name__
+            raise
+        else:
+            status = SyncRunStatus.SUCCEEDED
+            return new_revisions
+        finally:
+            self._sync_runs.close(
+                run_id=run_id,
+                status=status,
+                now=self._clock(),
+                error_class=error_class,
+            )
 
     def sync_window(
         self,
@@ -428,10 +506,13 @@ class IncrementalSyncHandler:
         now = self._clock()
 
         window_start = self._window_start(connection_id=connection_id, now=now)
-        new_revisions = self._backfill.sync_window(
+        new_revisions = self._backfill.recorded_sync_window(
             claim=claim,
             connection_id=connection_id,
-            sync_run_id=payload.get("sync_run_id"),
+            # The job type does not say what scheduled it, so an incremental run
+            # is recorded as ``schedule`` — the reconcile sweep and a manual
+            # request enqueue the same job type.
+            trigger=SyncRunTrigger.SCHEDULE,
             window_start=window_start,
             window_end=now,
             now=now,
