@@ -20,6 +20,24 @@ from akunaki.domain.oidc import VerifiedIdentity
 
 
 @dataclass(frozen=True, slots=True)
+class AccountSummary:
+    """The caller's own account and tenant.
+
+    Deliberately excludes ``oidc_subject``: it is the identity credential the
+    login flow matches on, and echoing it to a browser puts an account-linking
+    key somewhere it is never needed.
+    """
+
+    user_id: str
+    tenant_id: str
+    email: str | None
+    created_at: str
+    tenant_status: str
+    primary_timezone: str
+    display_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProvisionedUser:
     """A user after login provisioning.
 
@@ -102,3 +120,52 @@ class UserRepository:
                 )
             )
             return ProvisionedUser(user_id=user_id, tenant_id=tenant_id, created=True)
+
+    def account_for(self, *, user_id: str, tenant_id: str) -> AccountSummary | None:
+        """The caller's own account, or None when no such row exists.
+
+        Scoped by **both** ids rather than the user alone: a session carries the
+        tenant it was issued for, and requiring the pair means a mismatched pair
+        reads nothing instead of quietly returning another tenant's row.
+
+        None is not reachable from a validated session today — ``sessions`` has
+        ``ON DELETE CASCADE`` from both ``users`` and ``tenants``, and the
+        privacy scrub deletes the tenant row, so an account's sessions always
+        die with it. It is still returned rather than raised because the pair is
+        also what makes cross-tenant reads empty, and that case must not be an
+        exception.
+        """
+        with self._session_factory() as session:
+            row = session.execute(
+                select(
+                    User.id,
+                    User.email,
+                    User.created_at,
+                    Tenant.id,
+                    Tenant.status,
+                    Tenant.primary_timezone,
+                    Tenant.display_name,
+                )
+                .join(Tenant, Tenant.id == User.tenant_id)
+                .where(User.id == user_id, User.tenant_id == tenant_id)
+            ).one_or_none()
+        if row is None:
+            return None
+        (
+            found_user_id,
+            email,
+            created_at,
+            found_tenant_id,
+            tenant_status,
+            primary_timezone,
+            display_name,
+        ) = row
+        return AccountSummary(
+            user_id=found_user_id,
+            tenant_id=found_tenant_id,
+            email=email,
+            created_at=created_at,
+            tenant_status=tenant_status,
+            primary_timezone=primary_timezone,
+            display_name=display_name,
+        )
