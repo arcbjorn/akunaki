@@ -173,6 +173,28 @@ class MetricSeriesService:
     def __init__(self, *, source: MetricSource) -> None:
         self._source = source
 
+    def trends_for(
+        self,
+        *,
+        tenant_id: str,
+        metrics: list[str],
+        days: list[str],
+    ) -> tuple[MetricSeries, ...]:
+        """Return several metrics over the same window, in the order asked.
+
+        Built on :meth:`series_for` rather than a parallel query path, so a
+        trend and a single-metric read can never disagree about a value or its
+        baseline — the failure a second implementation would eventually cause.
+
+        Order is preserved so a client can pair the response with its request
+        without matching on name. Raises :class:`MetricNotFoundError` on the
+        first unknown metric: silently dropping it would return a shorter list
+        that looks like "no data for that one".
+        """
+        return tuple(
+            self.series_for(tenant_id=tenant_id, metric=metric, days=days) for metric in metrics
+        )
+
     def series_for(
         self,
         *,

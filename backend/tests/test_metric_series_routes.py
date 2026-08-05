@@ -17,7 +17,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
-from akunaki.adapters.db.models import FactRecord, OvernightVitals, Tenant, User
+from akunaki.adapters.db.models import (
+    DailyActivity,
+    FactRecord,
+    OvernightVitals,
+    Tenant,
+    User,
+)
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import SESSION_COOKIE_NAME
@@ -285,3 +291,147 @@ def test_window_is_bounded(client: TestClient, factory: sessionmaker[Session]) -
     response = client.get("/v1/metrics/hrv", params={"day": DAY, "window_days": 5000})
 
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Multi-metric trends
+# ---------------------------------------------------------------------------
+
+
+def _seed_steps(factory: sessionmaker[Session], *, day: str, steps: float) -> None:
+    fact_id = f"steps-{day}"
+    with factory() as session, session.begin():
+        session.add(
+            FactRecord(
+                id=fact_id,
+                tenant_id="tenant-1",
+                connection_id=None,
+                provider="google_health",
+                entity_type="daily_activity",
+                vendor_record_id=fact_id,
+                origin=None,
+                method="wearable",
+                utc_instant=NOW_S,
+                start_utc=NOW_S,
+                end_utc=NOW_S,
+                source_offset_minutes=0,
+                iana_timezone="UTC",
+                local_health_day=day,
+                unit=None,
+                quality="high",
+                confidence=1.0,
+                freshness_at=NOW_S,
+                raw_revision_id=None,
+                raw_payload_id=None,
+                schema_version="v1",
+                normalizer_version="google_activity_v0.1.0",
+                content_hash=fact_id,
+                fact_key=f"daily_activity:{fact_id}",
+                version_n=1,
+                is_current=1,
+                superseded_by=None,
+                superseded_at=None,
+                deletion_state="active",
+                exclude_from_load=0,
+                created_at=NOW_S,
+            )
+        )
+        session.flush()
+        session.add(
+            DailyActivity(
+                fact_record_id=fact_id,
+                tenant_id="tenant-1",
+                steps=int(steps),
+                active_minutes=None,
+            )
+        )
+
+
+def test_trends_requires_a_session() -> None:
+    client = TestClient(create_app(Settings(database_url="sqlite+libsql:///:memory:")))
+    response = client.get("/v1/trends", params={"day": DAY, "metric": "hrv"})
+    assert response.status_code == 401
+
+
+def test_trends_returns_several_metrics_in_request_order(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """One request instead of a client fanning out N calls."""
+    _seed_hrv(factory, day=DAY, hrv_ms=62.0)
+    _seed_steps(factory, day=DAY, steps=9000.0)
+    _login(client, factory)
+
+    body = client.get(
+        "/v1/trends", params=[("day", DAY), ("metric", "steps"), ("metric", "hrv")]
+    ).json()
+
+    # Order preserved so a client can pair response with request by position.
+    assert [s["metric"] for s in body["series"]] == ["steps", "hrv"]
+    assert body["window_days"] == 30
+
+
+def test_trends_agree_with_the_single_metric_read(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Same service, so a trend and a detail view cannot disagree.
+
+    A second query path would eventually drift; this pins that they share one.
+    """
+    for offset, day in enumerate(_days_before(DAY, 20)):
+        _seed_hrv(factory, day=day, hrv_ms=58.0 if offset % 2 else 62.0)
+    _login(client, factory)
+
+    single = client.get("/v1/metrics/hrv", params={"day": DAY, "window_days": 20}).json()
+    [trend] = client.get(
+        "/v1/trends", params={"day": DAY, "metric": "hrv", "window_days": 20}
+    ).json()["series"]
+
+    assert trend == single
+
+
+def test_trends_reject_an_unknown_metric(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Named explicitly rather than dropped from the list.
+
+    A shorter list would read as "no data for that metric" instead of "that
+    metric does not exist".
+    """
+    _login(client, factory)
+
+    response = client.get(
+        "/v1/trends", params=[("day", DAY), ("metric", "hrv"), ("metric", "nope")]
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["metric"] == "nope"
+
+
+def test_trends_require_at_least_one_metric(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    _login(client, factory)
+
+    assert client.get("/v1/trends", params={"day": DAY}).status_code == 422
+
+
+def test_trends_bound_the_metric_count(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """The payload is metrics x window, so the metric count is the real bound."""
+    _login(client, factory)
+    params = [("day", DAY), *[("metric", "hrv") for _ in range(20)]]
+
+    response = client.get("/v1/trends", params=params)
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "too_many_metrics"
+
+
+def test_trends_never_serve_another_tenant(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    _seed_hrv(factory, day=DAY, hrv_ms=99.0, tenant_id="tenant-2")
+    _login(client, factory)
+
+    [series] = client.get("/v1/trends", params={"day": DAY, "metric": "hrv"}).json()["series"]
+
+    assert series["points"] == []
