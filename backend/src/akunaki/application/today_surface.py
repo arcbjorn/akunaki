@@ -88,6 +88,15 @@ class TodaySurface:
     ruleset_version: str
     primary_recommendation: Recommendation | None
     supporting_recommendations: tuple[Recommendation, ...]
+    suppressed_recommendations: tuple[Recommendation, ...]
+    """Rules that fired but lost their conflict group, each with ``suppressed_by``.
+
+    Kept rather than dropped so a caller can answer "why am I not being told to
+    rest?" — the losing rule and the rule that beat it are both named. The
+    composite ``/v1/today`` response does not render these; ``/v1/recommendations``
+    does.
+    """
+
     data_gaps: tuple[RecoveryGap, ...]
     formula_version: str
 
@@ -201,6 +210,7 @@ class TodaySurfaceService:
             ruleset_version=label.ruleset_version,
             primary_recommendation=recs.primary,
             supporting_recommendations=recs.supporting,
+            suppressed_recommendations=recs.suppressed,
             data_gaps=deduped_gaps,
             formula_version=recovery.formula_version,
         )

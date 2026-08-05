@@ -39,13 +39,39 @@ def _hard_recovery(day: str, *, hrv_magnitude: float = 85.0) -> RecoverySurface:
     )
 
 
+def _rest_recovery(day: str) -> RecoverySurface:
+    """A score under the rest band (< 40) with a weak HRV component.
+
+    Both halves matter: the low score drives the REST training label, and the
+    weak HRV lets ``load_ease`` fire alongside it so the two collide in the
+    load conflict group.
+    """
+    return RecoverySurface(
+        local_health_day=day,
+        score_code="recovery",
+        status=RecoveryStatus.OK,
+        score=25,
+        confidence=0.9,
+        available_weight=0.9,
+        factors=(
+            RecoveryFactor(factor_code="hrv", present=True, weight=0.25, magnitude=30.0),
+            RecoveryFactor(factor_code="resting_hr", present=True, weight=0.20, magnitude=30.0),
+        ),
+        data_gaps=(),
+        formula_version="general_recovery_v0.1.0",
+    )
+
+
 class _Recovery:
-    def __init__(self, hrv_magnitude: float = 85.0) -> None:
+    def __init__(self, hrv_magnitude: float = 85.0, *, rest: bool = False) -> None:
         self._hrv_magnitude = hrv_magnitude
+        self._rest = rest
 
     def recovery_for_day(
         self, *, tenant_id: str, local_health_day: str, target_min: int = 480
     ) -> RecoverySurface:
+        if self._rest:
+            return _rest_recovery(local_health_day)
         return _hard_recovery(local_health_day, hrv_magnitude=self._hrv_magnitude)
 
 
@@ -170,3 +196,40 @@ def test_no_load_source_leaves_the_hard_label() -> None:
     )
     surface = service.today_for_day(tenant_id="tenant-1", local_health_day=TARGET_DAY)
     assert surface.training_label is TrainingLabel.HARD
+
+
+# --- Suppressed recommendations survive the composite ------------------------
+
+
+def _rest_service(acwr: float | None) -> TodaySurfaceService:
+    return TodaySurfaceService(
+        recovery=_Recovery(rest=True),
+        sleep=SleepSurfaceService(durations=_Durations()),
+        load=_Load(acwr),
+    )
+
+
+def test_suppressed_recommendations_reach_the_surface() -> None:
+    """The composite must not drop the losers of conflict resolution.
+
+    ``rest_day`` and ``load_ease`` share the load group, so an over-load day
+    with a rest label fires both and suppresses ``load_ease``. Without this the
+    field could silently stay empty and nothing else would notice.
+    """
+    surface = _rest_service(acwr=1.5).today_for_day(
+        tenant_id="tenant-1", local_health_day=TARGET_DAY
+    )
+
+    assert surface.primary_recommendation is not None
+    assert surface.primary_recommendation.rule_id is RuleId.REST_DAY
+    suppressed = {rec.rule_id: rec for rec in surface.suppressed_recommendations}
+    assert RuleId.LOAD_EASE in suppressed
+    # The winner is named, or the client cannot explain the absence.
+    assert suppressed[RuleId.LOAD_EASE].suppressed_by is RuleId.REST_DAY
+
+
+def test_nothing_is_suppressed_when_no_rules_collide() -> None:
+    """An empty list is the normal case, not a sign the field is unwired."""
+    surface = _service(acwr=1.0).today_for_day(tenant_id="tenant-1", local_health_day=TARGET_DAY)
+
+    assert surface.suppressed_recommendations == ()

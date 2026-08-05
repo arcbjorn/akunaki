@@ -88,6 +88,7 @@ class _FakeToday:
                 conflict_group=ConflictGroup.SLEEP,
             ),
             supporting_recommendations=(),
+            suppressed_recommendations=(),
             data_gaps=(RecoveryGap(code="strain_not_available"),),
             formula_version="general_recovery_v0.1.0",
         )
