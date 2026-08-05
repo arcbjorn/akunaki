@@ -568,6 +568,32 @@ Reads the **same** windowed `daily_*` queries the recovery components consume, s
 
 **Gaps are omitted, never zero-filled**: `known_days` and `coverage_is_partial` let a chart show a gap instead of a measured zero. An unexposed metric name is a **404**, not an empty series that reads as "no data"; `GET /v1/metrics` lists the valid names.
 
+### `GET /v1/me` — the account, and which timezone your days are in
+
+```bash
+curl --cookie akunaki_session=<token> localhost:8000/v1/me
+```
+
+```json
+{
+  "user_id": "user-1",
+  "email": "person@example.com",
+  "created_at": "2026-08-05T12:00:00Z",
+  "tenant": {
+    "tenant_id": "tenant-1",
+    "status": "active",
+    "primary_timezone": "Europe/Berlin",
+    "display_name": "Test Person"
+  }
+}
+```
+
+Distinct from `/v1/session`, which answers *is this cookie valid and whose is it* and says nothing about the account.
+
+**`primary_timezone` is the reason this exists.** It is stored on every tenant at signup and was, until now, read by nothing. Every day surface makes you pass an explicit `day` because the server must never guess a local health day from its own clock — but nothing told you which timezone defines that day. Use it to choose which `day` to request; it does **not** reinterpret days already returned, since a fact's local health day is fixed from that payload's own offset when it is normalized.
+
+**The OIDC subject is never echoed.** It is the credential the login flow matches on, and a browser response is no place for an account-linking key. Email and display name *are* returned — they are sensitive PII that must stay out of logs and audit records, which is a different question from what a user may read about their own account.
+
 ### `GET /v1/providers` — what can I link, and what would it give me?
 
 ```bash
