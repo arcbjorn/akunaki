@@ -93,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from akunaki.api.routes.recovery import router as recovery_router
     from akunaki.api.routes.session import router as session_router
     from akunaki.api.routes.sleep import router as sleep_router
+    from akunaki.api.routes.source_policies import router as source_policies_router
     from akunaki.api.routes.today import router as today_router
     from akunaki.api.routes.tools import router as tools_router
     from akunaki.api.routes.webhooks import router as webhooks_router
@@ -110,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(anomalies_router)
     app.include_router(workouts_router)
     app.include_router(confirmations_router)
+    app.include_router(source_policies_router)
     app.include_router(webhooks_router)
 
     # Login routes only when OIDC is configured. An unconfigured deployment
