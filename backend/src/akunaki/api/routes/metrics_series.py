@@ -29,12 +29,16 @@ from akunaki.application.metric_series import (
     MAX_WINDOW_DAYS,
     SUPPORTED_METRICS,
     MetricNotFoundError,
+    MetricSeries,
     MetricSeriesService,
 )
 
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
 
 DEFAULT_WINDOW_DAYS = 30
+# Trends fans out over the metric registry, so the honest bound is how many
+# metrics one request may ask for — not a cursor over a fixed set of eight.
+MAX_TREND_METRICS = len(SUPPORTED_METRICS)
 
 
 class MetricPointResponse(BaseModel):
@@ -76,6 +80,44 @@ class SupportedMetricsResponse(BaseModel):
     metrics: list[str]
 
 
+def series_response(series: MetricSeries) -> MetricSeriesResponse:
+    """Project one series into its wire shape.
+
+    Shared by the single-metric and trends routes so the two can never drift
+    into disclosing different fields for the same data.
+    """
+    return MetricSeriesResponse(
+        metric=series.metric,
+        unit=series.unit,
+        window_days=series.window_days,
+        known_days=series.known_days,
+        coverage_is_partial=series.coverage_is_partial,
+        points=[
+            MetricPointResponse(local_health_day=point.local_health_day, value=point.value)
+            for point in series.points
+        ],
+        baseline_maturity=series.baseline_maturity,
+        baseline_center=series.baseline_center,
+        baseline_robust_scale=series.baseline_robust_scale,
+    )
+
+
+def window_days_ending(day: str, window_days: int) -> list[str]:
+    """The window's local health days, oldest first.
+
+    Rejects a malformed day before any query runs, so a bad request never
+    reaches the database.
+    """
+    try:
+        end = date.fromisoformat(day)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_day", "message": "day must be YYYY-MM-DD"},
+        ) from exc
+    return [(end - timedelta(days=offset)).isoformat() for offset in range(window_days - 1, -1, -1)]
+
+
 @router.get("", response_model=SupportedMetricsResponse)
 def list_metrics(response: Response, session: CurrentSession) -> SupportedMetricsResponse:
     """List the metric names that can be read.
@@ -107,17 +149,9 @@ def read_metric(
 ) -> MetricSeriesResponse:
     """Return one metric's measured series for the caller's tenant."""
     response.headers["Cache-Control"] = "private, no-store"
-    try:
-        # Required, like every day surface: a local health day belongs to the
-        # tenant's timezone, so the server must never guess it from its clock.
-        end = date.fromisoformat(day)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "invalid_day", "message": "day must be YYYY-MM-DD"},
-        ) from exc
-
-    days = [(end - timedelta(days=offset)).isoformat() for offset in range(window_days - 1, -1, -1)]
+    # ``day`` is required, like every day surface: a local health day belongs
+    # to the tenant's timezone, so the server must never guess it from its own.
+    days = window_days_ending(day, window_days)
     service = MetricSeriesService(source=FactRepository(session_factory))
     try:
         series = service.series_for(tenant_id=session.tenant_id, metric=metric, days=days)
@@ -126,17 +160,4 @@ def read_metric(
             status_code=404, detail={"code": "unknown_metric", "metric": metric}
         ) from exc
 
-    return MetricSeriesResponse(
-        metric=series.metric,
-        unit=series.unit,
-        window_days=series.window_days,
-        known_days=series.known_days,
-        coverage_is_partial=series.coverage_is_partial,
-        points=[
-            MetricPointResponse(local_health_day=point.local_health_day, value=point.value)
-            for point in series.points
-        ],
-        baseline_maturity=series.baseline_maturity,
-        baseline_center=series.baseline_center,
-        baseline_robust_scale=series.baseline_robust_scale,
-    )
+    return series_response(series)
