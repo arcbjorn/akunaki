@@ -568,6 +568,19 @@ Reads the **same** windowed `daily_*` queries the recovery components consume, s
 
 **Gaps are omitted, never zero-filled**: `known_days` and `coverage_is_partial` let a chart show a gap instead of a measured zero. An unexposed metric name is a **404**, not an empty series that reads as "no data"; `GET /v1/metrics` lists the valid names.
 
+### `GET /v1/trends` — several metrics at once
+
+```bash
+curl --cookie akunaki_session=<token> \
+  'localhost:8000/v1/trends?day=2026-08-04&metric=hrv&metric=steps&window_days=30'
+```
+
+Multi-metric exploration in one request instead of fanning out N calls. Built on the **same** service as `/v1/metrics/{metric}`, so a trend and a detail view can never disagree about a value or its baseline — a test asserts the two responses are identical for the same window.
+
+Series come back in the order requested, so a client can pair them by position. An unknown metric is a **404 naming it**, not a silently shorter list that would read as "no data for that metric".
+
+**No cursor**, despite the spec's "cursor/window params": the payload is bounded by the metric registry (eight) times the capped window — 1440 points worst case — so the real limit is how many metrics one request may ask for.
+
 ### `/v1/source-policies` — why this provider won
 
 ADR 0005 requires source policies to be **inspectable**, and the product principles require a user to be able to audit *why* a day looks the way it does.
