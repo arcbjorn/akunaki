@@ -554,6 +554,22 @@ curl -X POST --cookie akunaki_session=<token> \
 
 It queues the **same** `connection.incremental_sync` job the webhook and reconcile paths use, so a manual sync has no separate semantics: it resumes from the stored cursor and dedupes on content hash like any other. The key is namespaced per connection, so a double-clicked button queues one job (`created: false` on the repeat). A `needs_reauth` or `revoked` connection is a **409** rather than a job doomed to burn attempts; unknown and cross-tenant are an indistinguishable **404** that queues nothing.
 
+### `/v1/source-policies` — why this provider won
+
+ADR 0005 requires source policies to be **inspectable**, and the product principles require a user to be able to audit *why* a day looks the way it does.
+
+```bash
+curl --cookie akunaki_session=<token> localhost:8000/v1/source-policies/effective
+curl --cookie akunaki_session=<token> \
+  'localhost:8000/v1/source-policies/decisions?day=2026-08-04'
+```
+
+`/effective` returns the ordered precedence and its policy version. It lists **only families the engine actually selects between** — the ADR also names authoritative providers for overnight vitals, activity, and workouts, but no code chooses between providers there (one connector supplies each), so listing them would present an aspiration as an enforced rule.
+
+`/decisions` returns what was chosen for one local day and which providers competed, with the losers retained (never averaged, never a silent fallback). Candidates are disclosed by **provider, never fact id**: the user's question is which source won, and the provenance surface already refuses to hand out row ids — this must not become the back door. A day with nothing recorded is a **404**, not an invented default.
+
+`GET/PUT /v1/source-policies/override` is **not** built: the policy is code-defined in v0.1.0, so a settable endpoint over a constant would imply a control that does not exist.
+
 ### `DELETE /v1/connections/{id}` — disconnect
 
 ```bash
