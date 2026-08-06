@@ -615,3 +615,71 @@ def test_a_handler_without_a_recorder_still_syncs(factory: sessionmaker[Session]
 
     assert worker.stats.succeeded == 1
     assert _runs(factory) == []
+
+
+class _BrokenRecorder:
+    """A recorder whose close always fails, as a locked database would."""
+
+    def __init__(self, factory: sessionmaker[Session]) -> None:
+        self._real = SyncRunRepository(factory)
+
+    def open(self, **kwargs: object) -> str:
+        return self._real.open(**kwargs)  # type: ignore[arg-type]
+
+    def close(self, **_kwargs: object) -> bool:
+        msg = "database is locked"
+        raise RuntimeError(msg)
+
+
+def _handler_with_recorder(
+    factory: sessionmaker[Session],
+    responder: Callable[[httpx2.Request], httpx2.Response],
+    recorder: object,
+) -> InitialSyncHandler:
+    ids = (f"id-{n}" for n in _ID_COUNTER)
+    return InitialSyncHandler(
+        fetch_client=OuraFetchClient(
+            transport=httpx2.Client(transport=httpx2.MockTransport(responder))
+        ),
+        ingestion=IngestionRepository(factory),
+        connections=ConnectionRepository(factory),
+        sealer=EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1"),
+        new_id=lambda: next(ids),
+        config=SyncConfig(max_pages=5),
+        clock=lambda: T0,
+        sync_runs=recorder,  # type: ignore[arg-type]
+    )
+
+
+def test_a_failed_close_does_not_fail_a_successful_sync(
+    factory: sessionmaker[Session],
+) -> None:
+    """History is bookkeeping; it must never break the sync it describes.
+
+    The close runs in a ``finally``, so a raised write would fail a sync whose
+    data is already committed — and the runtime would retry work that worked.
+    """
+    handler = _handler_with_recorder(factory, _ok(PAGE_ONE), _BrokenRecorder(factory))
+
+    worker = _run_job(factory, handler)
+
+    assert worker.stats.succeeded == 1
+    with factory() as session:
+        assert session.scalars(select(RawPayload)).all()
+
+
+def test_a_failed_close_does_not_mask_the_fetch_error(
+    factory: sessionmaker[Session],
+) -> None:
+    """An exception from ``finally`` would *replace* the real failure.
+
+    A vendor rate limit must still reach the runtime as a retryable error, not
+    be swapped for a confusing database one.
+    """
+    handler = _handler_with_recorder(factory, _rate_limited(), _BrokenRecorder(factory))
+
+    worker = _run_job(factory, handler)
+
+    # Still classified as transient by the vendor 429, not by the close failure.
+    assert worker.stats.retried == 1
+    assert worker.stats.dead_lettered == 0

@@ -313,11 +313,42 @@ class InitialSyncHandler:
             status = SyncRunStatus.SUCCEEDED
             return new_revisions
         finally:
+            self._close_run(
+                run_id=run_id,
+                status=status,
+                error_class=error_class,
+            )
+
+    def _close_run(
+        self,
+        *,
+        run_id: str,
+        status: SyncRunStatus,
+        error_class: str | None,
+    ) -> None:
+        """Settle a run's row, never letting bookkeeping break the sync.
+
+        Runs inside a ``finally``, so an exception raised here would **replace**
+        the fetch error being propagated — turning a diagnosable vendor failure
+        into a confusing database one — and would fail a sync whose data is
+        already committed, causing the runtime to retry work that succeeded.
+        History is strictly less important than the sync it describes, so a
+        write failure is logged and swallowed.
+        """
+        if self._sync_runs is None:  # pragma: no cover - guarded by the caller
+            return
+        try:
             self._sync_runs.close(
                 run_id=run_id,
                 status=status,
                 now=self._clock(),
                 error_class=error_class,
+            )
+        except Exception:
+            logger.warning(
+                "failed to record sync run outcome",
+                extra={"sync_run_id": run_id, "status": status.value},
+                exc_info=True,
             )
 
     def sync_window(
