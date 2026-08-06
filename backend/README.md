@@ -581,7 +581,7 @@ curl --cookie akunaki_session=<token> \
     {"run_id": "run-9", "connection_id": "conn-1", "provider": "oura",
      "trigger": "schedule", "stream": "sleep", "status": "failed",
      "started_at": "2026-08-05T12:00:00Z", "finished_at": "2026-08-05T12:00:04Z",
-     "error_class": "TransientJobError"}
+     "error_class": "TransientJobError", "new_revisions": 0}
   ]
 }
 ```
@@ -590,7 +590,7 @@ curl --cookie akunaki_session=<token> \
 
 `sync_runs` shipped with the transport migration and had no writer, so `raw_payloads.sync_run_id` and `raw_revisions.sync_run_id` were permanently NULL. Runs are now opened *before* the fetch and closed with the outcome, so a worker that dies mid-run leaves a `running` row with a null `finished_at` — a visible incomplete attempt beats no record at all. A settled run is never rewritten, so a retry reusing an id cannot turn a recorded failure into a success.
 
-`error_class` is the exception class name only, never a vendor message: this row is user-facing.
+`new_revisions` is how many logical records the run ingested — `stats_json` is *counts only* per the schema, and the type enforces it. Null and zero mean different things: null is a run that never settled, zero is a fetch that worked and found nothing new.\n\n`error_class` is the exception class name only, never a vendor message: this row is user-facing. Recording never breaks a sync — a failed history write is logged and swallowed, because an exception from the closing `finally` would both fail an already-committed sync and mask the real error.
 
 ### `GET /v1/me` — the account, and which timezone your days are in
 
