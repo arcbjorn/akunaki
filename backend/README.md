@@ -568,6 +568,8 @@ Reads the **same** windowed `daily_*` queries the recovery components consume, s
 
 **Gaps are omitted, never zero-filled**: `known_days` and `coverage_is_partial` let a chart show a gap instead of a measured zero. An unexposed metric name is a **404**, not an empty series that reads as "no data"; `GET /v1/metrics` lists the valid names.
 
+A manual sync is **audited** as `connection.sync`, including refused attempts — a reviewer investigating unexpected vendor traffic needs the attempts, not only the successes. A queued sync and an idempotent retry that collapsed onto an existing job are recorded distinctly, so the trail does not overstate how often the vendor was asked for data. A 404 records a null resource id: the audit must not confirm an id the 404 deliberately hides.
+
 ### `GET /v1/sync/status` — did my syncs actually run?
 
 ```bash
