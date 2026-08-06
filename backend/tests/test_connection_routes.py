@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import akunaki.api.routes.connections as connections_mod
 from akunaki.adapters.connectors.polar import PolarOAuthClient
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.models import (
     AuditEventRow,
     Connection,
@@ -674,3 +675,124 @@ def test_disconnect_is_audited(client: TestClient, factory: sessionmaker[Session
     assert len(events) == 1
     assert events[0].resource_id == connection_id
     assert json.loads(events[0].metadata_json) == {"outcome": "revoked"}
+
+
+# ---------------------------------------------------------------------------
+# connection.sync auditing
+# ---------------------------------------------------------------------------
+
+
+def _sync_events(factory: sessionmaker[Session]) -> list[AuditEventRow]:
+    """Only the sync events; linking writes a connection.create event first."""
+    with factory() as session:
+        return [
+            event
+            for event in session.scalars(select(AuditEventRow)).all()
+            if event.action == "connection.sync"
+        ]
+
+
+def test_sync_request_is_audited(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """A manual sync is a state change a user made; link and revoke both audit."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+
+    client.post(
+        f"/v1/connections/{connection_id}/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    [event] = _sync_events(factory)
+    assert event.resource_type == "connection"
+    assert event.resource_id == connection_id
+    assert event.tenant_id == "tenant-1"
+    assert json.loads(event.metadata_json) == {"outcome": "queued"}
+
+
+def test_a_deduplicated_sync_is_audited_distinctly(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Recording a collapsed retry as a queue would overstate vendor traffic."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    headers = {CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"}
+
+    client.post(f"/v1/connections/{connection_id}/sync", headers=headers)
+    client.post(f"/v1/connections/{connection_id}/sync", headers=headers)
+
+    outcomes = [json.loads(event.metadata_json)["outcome"] for event in _sync_events(factory)]
+    assert outcomes == ["queued", "deduplicated"]
+
+
+def test_a_refused_sync_is_audited_too(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """A reviewer investigating unexpected traffic needs attempts, not only wins."""
+    csrf = _login(client, factory)
+
+    response = client.post(
+        "/v1/connections/does-not-exist/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 404
+    [event] = _sync_events(factory)
+    assert json.loads(event.metadata_json) == {"outcome": "not_found"}
+
+
+def test_an_unknown_sync_target_is_not_named_in_the_audit(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The 404 hides whether an id exists; the audit trail must not reveal it."""
+    csrf = _login(client, factory)
+
+    client.post(
+        "/v1/connections/probe-me/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    [event] = _sync_events(factory)
+    assert event.resource_id is None
+
+
+def test_sync_audit_carries_no_health_values(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+
+    client.post(
+        f"/v1/connections/{connection_id}/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    [event] = _sync_events(factory)
+    assert set(json.loads(event.metadata_json)) == {"outcome"}
+
+
+def test_a_failed_sync_audit_does_not_fail_the_request(
+    client: TestClient, factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auditing is bookkeeping; the sync is already queued when it runs.
+
+    Raising here would report a failure for work that succeeded, and the caller
+    would retry a sync that is already on the queue.
+    """
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        msg = "database is locked"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(AuditRepository, "record", boom)
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["created"] is True
+    with factory() as session:
+        assert session.scalars(
+            select(Job).where(Job.job_type == "connection.incremental_sync")
+        ).one()

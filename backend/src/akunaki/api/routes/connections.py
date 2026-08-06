@@ -237,13 +237,27 @@ def request_sync(
         idempotency_key=idempotency_key,
         now=datetime.now(UTC),
     )
+    audit = AuditRepository(session_factory)
     if outcome is SyncRequestRejection.NOT_FOUND:
-        # Unknown and cross-tenant are the same 404: ids cannot be probed.
+        # Unknown and cross-tenant are the same 404: ids cannot be probed. The
+        # audit event carries no resource id for the same reason.
+        _audit_sync(audit, session=session, connection_id=None, outcome="not_found")
         raise HTTPException(status_code=404, detail={"code": "not_found"})
     if outcome is SyncRequestRejection.NOT_SYNCABLE:
         # 409, not 404: the connection exists but needs re-consent first, and
         # the caller can act on that.
+        _audit_sync(audit, session=session, connection_id=connection_id, outcome="not_syncable")
         raise HTTPException(status_code=409, detail={"code": "connection_not_syncable"})
+
+    # "queued" and "deduplicated" are distinct outcomes: an idempotent retry
+    # collapses onto the existing job, and recording both as a queue would
+    # overstate how often the vendor was actually asked for data.
+    _audit_sync(
+        audit,
+        session=session,
+        connection_id=connection_id,
+        outcome="queued" if outcome.created else "deduplicated",
+    )
     return SyncRequestedResponse(job_id=outcome.job_id, created=outcome.created)
 
 
@@ -372,6 +386,43 @@ def _audit_disconnect(
         )
     except Exception:
         logger.exception("failed to append disconnect audit event")
+
+
+def _audit_sync(
+    audit: AuditRepository,
+    *,
+    session: AuthenticatedSession,
+    connection_id: str | None,
+    outcome: str,
+) -> None:
+    """Append a ``connection.sync`` event. Never raises.
+
+    A manual sync is a state-changing action a user took against a connection —
+    the same class as linking and disconnecting, both of which are audited. It
+    was the one mutating connection endpoint leaving no trail, so "who asked
+    this connection to re-fetch, and when" was unanswerable.
+
+    Refused attempts are recorded too, and for the same reason as disconnect: a
+    reviewer investigating unexpected vendor traffic needs the attempts, not
+    only the successes. ``resource_id`` is null on a 404 so a probe cannot use
+    the audit trail to confirm an id exists.
+    """
+    try:
+        audit.record(
+            event_id=str(uuid.uuid4()),
+            tenant_id=session.tenant_id,
+            actor_type=ActorType.USER,
+            actor_id=session.user_id,
+            action=AuditAction.CONNECTION_SYNC,
+            resource_type="connection",
+            resource_id=connection_id,
+            metadata={"outcome": outcome},
+            now=datetime.now(UTC),
+        )
+    except Exception:
+        # Recording must never fail the request: the sync is already queued,
+        # and raising here would report a failure for work that succeeded.
+        logger.exception("failed to append sync audit event")
 
 
 def _status_for(rejection: LinkRejection | None) -> int:
