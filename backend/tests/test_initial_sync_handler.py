@@ -683,3 +683,22 @@ def test_a_failed_close_does_not_mask_the_fetch_error(
     # Still classified as transient by the vendor 429, not by the close failure.
     assert worker.stats.retried == 1
     assert worker.stats.dead_lettered == 0
+
+
+def test_a_successful_run_records_its_ingest_count(factory: sessionmaker[Session]) -> None:
+    """``stats_json`` is 'counts only' per the schema, and was always NULL."""
+    _run_job(factory, _recording_handler(factory, _ok(PAGE_ONE)))
+
+    [run] = _runs(factory)
+
+    assert run.new_revisions == 1
+
+
+def test_a_failed_run_records_a_zero_count(factory: sessionmaker[Session]) -> None:
+    """Zero is the honest count for a fetch that never committed anything."""
+    _run_job(factory, _recording_handler(factory, _rate_limited()))
+
+    [run] = _runs(factory)
+
+    assert run.status == "failed"
+    assert run.new_revisions == 0

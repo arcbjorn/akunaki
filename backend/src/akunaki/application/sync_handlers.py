@@ -292,6 +292,7 @@ class InitialSyncHandler:
         )
         status = SyncRunStatus.FAILED
         error_class: str | None = None
+        new_revisions = 0
         try:
             new_revisions = self.sync_window(
                 claim=claim,
@@ -317,6 +318,7 @@ class InitialSyncHandler:
                 run_id=run_id,
                 status=status,
                 error_class=error_class,
+                new_revisions=new_revisions,
             )
 
     def _close_run(
@@ -325,6 +327,7 @@ class InitialSyncHandler:
         run_id: str,
         status: SyncRunStatus,
         error_class: str | None,
+        new_revisions: int,
     ) -> None:
         """Settle a run's row, never letting bookkeeping break the sync.
 
@@ -342,6 +345,9 @@ class InitialSyncHandler:
                 run_id=run_id,
                 status=status,
                 now=self._clock(),
+                # Counts only, per the schema's `stats_json` contract: never
+                # health values, and never anything from a vendor body.
+                stats={"new_revisions": new_revisions},
                 error_class=error_class,
             )
         except Exception:

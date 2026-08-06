@@ -20,6 +20,8 @@ incomplete attempt is more honest than an absent one.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -51,6 +53,8 @@ class SyncRunRecord:
     started_at: str
     finished_at: str | None
     error_class: str | None
+    new_revisions: int | None
+    """Logical records this run ingested; None for a run that never settled."""
 
 
 class SyncRunRepository:
@@ -99,6 +103,7 @@ class SyncRunRepository:
         run_id: str,
         status: SyncRunStatus,
         now: datetime,
+        stats: Mapping[str, int] | None = None,
         error_class: str | None = None,
     ) -> bool:
         """Finish a run, returning whether a ``running`` row was closed.
@@ -106,6 +111,10 @@ class SyncRunRepository:
         Guarded on ``status = 'running'`` so a late or duplicated close cannot
         rewrite a settled outcome — a retry that reuses an id must not turn a
         recorded failure into a success.
+
+        ``stats`` is **counts only**, matching the schema's ``stats_json``
+        column note. The type enforces it: an ``int``-valued mapping cannot
+        smuggle a vendor string or a health value into a row the user reads.
         """
         if status is SyncRunStatus.RUNNING:
             msg = "close requires a terminal status"
@@ -123,6 +132,9 @@ class SyncRunRepository:
                     status=status.value,
                     finished_at=finished_at,
                     error_class=error_class,
+                    stats_json=json.dumps(dict(stats), sort_keys=True)
+                    if stats is not None
+                    else None,
                 )
             )
         return affected_rows(result) > 0
@@ -151,6 +163,7 @@ class SyncRunRepository:
                     SyncRun.started_at,
                     SyncRun.finished_at,
                     SyncRun.error_class,
+                    SyncRun.stats_json,
                 )
                 .join(Connection, Connection.id == SyncRun.connection_id)
                 .where(SyncRun.tenant_id == tenant_id)
@@ -169,6 +182,23 @@ class SyncRunRepository:
                 started_at=row[6],
                 finished_at=row[7],
                 error_class=row[8],
+                new_revisions=_new_revisions(row[9]),
             )
             for row in rows
         ]
+
+
+def _new_revisions(stats_json: str | None) -> int | None:
+    """Read the ingest count out of a run's stats blob.
+
+    Tolerant on read, because the count is supporting detail rather than the
+    record itself: an unsettled run has no stats at all, and a build recording
+    different counts must not make the whole listing fail. Malformed text is
+    not among the cases — ``json_valid`` on ``stats_json`` rejects it at write
+    time — so this only has to survive a *well-formed* blob without the key.
+    """
+    if not stats_json:
+        return None
+    stats = json.loads(stats_json)
+    value = stats.get("new_revisions") if isinstance(stats, dict) else None
+    return value if isinstance(value, int) else None

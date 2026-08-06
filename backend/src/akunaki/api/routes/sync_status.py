@@ -54,6 +54,13 @@ class SyncRunResponse(BaseModel):
     error_class: str | None = Field(
         description="Typed failure label only; never a vendor message.",
     )
+    new_revisions: int | None = Field(
+        default=None,
+        description=(
+            "Logical records this run ingested. Null for a run that never "
+            "settled. Zero is meaningful: the fetch worked and nothing was new."
+        ),
+    )
 
 
 class SyncStatusResponse(BaseModel):
@@ -95,6 +102,7 @@ def read_sync_status(
                 started_at=run.started_at,
                 finished_at=run.finished_at,
                 error_class=run.error_class,
+                new_revisions=run.new_revisions,
             )
             for run in runs
         ]

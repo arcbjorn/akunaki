@@ -126,6 +126,70 @@ def test_closing_settles_the_outcome(factory: sessionmaker[Session]) -> None:
     assert run.finished_at is not None
 
 
+def test_stats_are_recorded_as_counts(factory: sessionmaker[Session]) -> None:
+    """``stats_json`` is 'counts only' per the schema's column note."""
+    repo = SyncRunRepository(factory)
+    _open(repo)
+
+    repo.close(
+        run_id="run-1",
+        status=SyncRunStatus.SUCCEEDED,
+        now=T0,
+        stats={"new_revisions": 7},
+    )
+
+    [run] = repo.recent_for_tenant(tenant_id="tenant-1", limit=10)
+    assert run.new_revisions == 7
+
+
+def test_a_run_without_stats_reports_none(factory: sessionmaker[Session]) -> None:
+    """An unsettled run, or a row from an older build, has no count."""
+    repo = SyncRunRepository(factory)
+    _open(repo)
+
+    [run] = repo.recent_for_tenant(tenant_id="tenant-1", limit=10)
+
+    assert run.new_revisions is None
+
+
+def test_a_zero_count_is_distinct_from_absent(factory: sessionmaker[Session]) -> None:
+    """Zero means "fetched, nothing new" — not "unknown"."""
+    repo = SyncRunRepository(factory)
+    _open(repo)
+    repo.close(
+        run_id="run-1",
+        status=SyncRunStatus.SUCCEEDED,
+        now=T0,
+        stats={"new_revisions": 0},
+    )
+
+    [run] = repo.recent_for_tenant(tenant_id="tenant-1", limit=10)
+
+    assert run.new_revisions == 0
+
+
+def test_stats_without_a_count_report_none(factory: sessionmaker[Session]) -> None:
+    """A stats blob is valid JSON by CHECK constraint, but need not carry a count.
+
+    ``json_valid`` on ``stats_json`` makes malformed text unstorable, so the
+    reachable case is a well-formed blob holding other counts — a build that
+    records different stats must not make the whole listing fail.
+    """
+    repo = SyncRunRepository(factory)
+    _open(repo)
+    repo.close(
+        run_id="run-1",
+        status=SyncRunStatus.SUCCEEDED,
+        now=T0,
+        stats={"pages": 3},
+    )
+
+    [run] = repo.recent_for_tenant(tenant_id="tenant-1", limit=10)
+
+    assert run.status == "succeeded"
+    assert run.new_revisions is None
+
+
 def test_a_failure_records_its_error_class(factory: sessionmaker[Session]) -> None:
     repo = SyncRunRepository(factory)
     _open(repo)

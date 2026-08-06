@@ -114,6 +114,7 @@ def _record(
     status: SyncRunStatus | None = SyncRunStatus.SUCCEEDED,
     trigger: SyncRunTrigger = SyncRunTrigger.SCHEDULE,
     error_class: str | None = None,
+    new_revisions: int = 1,
     now: datetime = T0,
 ) -> None:
     """Open a run, and close it unless ``status`` is None (left unsettled)."""
@@ -127,7 +128,13 @@ def _record(
         now=now,
     )
     if status is not None:
-        repo.close(run_id=run_id, status=status, now=now, error_class=error_class)
+        repo.close(
+            run_id=run_id,
+            status=status,
+            now=now,
+            stats={"new_revisions": new_revisions},
+            error_class=error_class,
+        )
 
 
 def _runs(client: TestClient) -> list[dict[str, object]]:
@@ -185,6 +192,28 @@ def test_an_unsettled_run_is_visible(client: TestClient, factory: sessionmaker[S
 
     assert run["status"] == "running"
     assert run["finished_at"] is None
+
+
+def test_a_run_reports_what_it_ingested(client: TestClient, factory: sessionmaker[Session]) -> None:
+    """``stats_json`` is 'counts only' per the schema and was always NULL."""
+    _record(factory, new_revisions=7)
+    _login(client, factory)
+
+    [run] = _runs(client)
+
+    assert run["new_revisions"] == 7
+
+
+def test_an_unsettled_run_reports_no_count(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Null, not zero: a run that never finished ingested an unknown amount."""
+    _record(factory, status=None)
+    _login(client, factory)
+
+    [run] = _runs(client)
+
+    assert run["new_revisions"] is None
 
 
 def test_runs_are_newest_first(client: TestClient, factory: sessionmaker[Session]) -> None:
@@ -260,6 +289,7 @@ def test_carries_no_health_values(client: TestClient, factory: sessionmaker[Sess
     [run] = _runs(client)
 
     assert set(run) == {
+        "new_revisions",
         "run_id",
         "connection_id",
         "provider",

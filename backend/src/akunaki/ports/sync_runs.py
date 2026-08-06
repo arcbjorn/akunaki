@@ -7,6 +7,7 @@ surface that lets them record what happened.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Protocol
 
@@ -37,7 +38,11 @@ class SyncRunRecorderPort(Protocol):
         run_id: str,
         status: SyncRunStatus,
         now: datetime,
+        stats: Mapping[str, int] | None = None,
         error_class: str | None = None,
     ) -> bool:
-        """Finish a run; returns whether a ``running`` row was closed."""
+        """Finish a run; returns whether a ``running`` row was closed.
+
+        ``stats`` is counts only, per the schema's ``stats_json`` contract.
+        """
         ...
