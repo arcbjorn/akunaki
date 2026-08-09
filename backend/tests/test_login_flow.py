@@ -34,7 +34,7 @@ from akunaki.adapters.crypto.oauth import (
 )
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.login_state_repository import LoginStateRepository
-from akunaki.adapters.db.models import Tenant, User
+from akunaki.adapters.db.models import LoginState, Tenant, User
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.adapters.db.user_repository import UserRepository
 from akunaki.adapters.oidc.client import OIDCClient
@@ -398,3 +398,26 @@ def test_login_routes_present_when_configured(login_db: str) -> None:
     paths = app.openapi()["paths"]
     assert "/auth/login" in paths
     assert "/auth/callback" in paths
+
+
+def test_an_unopenable_verifier_is_a_clean_rejection(
+    factory: sessionmaker[Session],
+) -> None:
+    """A sealed verifier that cannot be opened must not surface as a crash.
+
+    Reachable in production: a KEK rotation that retires the old key leaves any
+    in-flight login's verifier unopenable. The user needs a typed rejection the
+    callback can turn into "start again", not a 500 — and without this the
+    ``VERIFIER_UNREADABLE`` branch is never exercised at all.
+    """
+    service = _service(factory, _token_handler(_id_token, []), [])
+    state = _begin_and_get_state(service)
+
+    # Corrupt the stored envelope so it can no longer be opened.
+    with factory() as session, session.begin():
+        row = session.scalars(select(LoginState)).one()
+        row.code_verifier_ciphertext = row.code_verifier_ciphertext[:-4] + b"\x00\x00\x00\x00"
+
+    result = service.complete(state=state, code="c", redirect_uri=REDIRECT, now=NOW)
+
+    assert result.rejection is LoginRejection.VERIFIER_UNREADABLE
