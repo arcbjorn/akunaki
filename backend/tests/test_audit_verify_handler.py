@@ -90,3 +90,36 @@ def test_verification_timestamp_advances_on_every_run() -> None:
     AuditVerifyHandler(audit=_Chain(verdict=None), clock=lambda: later)(_claim())
 
     assert _gauge_value("akunaki_audit_chain_verified_timestamp_seconds") == later.timestamp()
+
+
+class _BrokenChecks:
+    """A check store whose write always fails, as a locked database would."""
+
+    def record(self, **_kwargs: object) -> None:
+        msg = "check store unavailable"
+        raise RuntimeError(msg)
+
+
+def test_a_failed_persist_does_not_fail_the_verification() -> None:
+    """The chain was already verified and the gauge already carries it.
+
+    Raising would retry a full verification pass that succeeded, and a
+    repeatedly failing store would eventually dead-letter the job that is the
+    tamper alarm.
+    """
+    handler = AuditVerifyHandler(
+        audit=_Chain(verdict=None), checks=_BrokenChecks(), clock=lambda: T0
+    )
+
+    handler(_claim())  # must not raise
+
+    assert _gauge_value("akunaki_audit_chain_intact") == 1.0
+
+
+def test_a_failed_persist_does_not_mask_detected_tampering() -> None:
+    """The alarm must still sound when the place to record it is broken."""
+    handler = AuditVerifyHandler(audit=_Chain(verdict=7), checks=_BrokenChecks(), clock=lambda: T0)
+
+    handler(_claim())  # must not raise
+
+    assert _gauge_value("akunaki_audit_chain_intact") == 0.0

@@ -796,3 +796,27 @@ def test_a_failed_sync_audit_does_not_fail_the_request(
         assert session.scalars(
             select(Job).where(Job.job_type == "connection.incremental_sync")
         ).one()
+
+
+def test_a_failed_link_audit_does_not_fail_the_link(
+    client: TestClient, factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The connection is stored before the audit is appended.
+
+    Failing the callback here would tell a user their link failed while the
+    grant is already sealed and usable — the worst possible answer, since a
+    retry would re-run an OAuth exchange whose code is now spent.
+    """
+    _login(client, factory)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        msg = "audit store unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(AuditRepository, "record", boom)
+    connection_id = _link_polar(client)
+
+    with factory() as session:
+        connection = session.get(Connection, connection_id)
+    assert connection is not None
+    assert connection.status == "active"

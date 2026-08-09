@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 import akunaki.api.routes.tools as tools_module
 from akunaki.adapters.crypto.sessions import generate_confirmation_token
 from akunaki.adapters.db.anomaly_repository import AnomalyRepository
+from akunaki.adapters.db.audit_repository import AuditRepository
 from akunaki.adapters.db.confirmation_repository import ConfirmationRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
@@ -1002,3 +1003,46 @@ def test_audit_carries_no_tool_arguments(
 
     for event in _audit_rows(factory):
         assert "secret-connection-id" not in event.metadata_json
+
+
+def test_a_failed_tool_audit_does_not_fail_the_invocation(
+    client: TestClient, factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mutation has already run by the time the audit is appended.
+
+    Raising here would report an error for work that succeeded, and a caller
+    acting on that error could retry a mutation that already took effect.
+    """
+    with factory() as session, session.begin():
+        session.add(
+            Connection(
+                id="conn-1",
+                tenant_id="tenant-1",
+                provider="polar",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+    csrf = _login(client, factory)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        msg = "audit store unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(AuditRepository, "record", boom)
+
+    response = client.post(
+        "/v1/tools/connections.sync",
+        json={"input": {"connection_id": "conn-1"}},
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+
+    assert response.status_code == 200
+    # And the mutation it audits really did happen.
+    with factory() as session:
+        assert session.scalars(
+            select(Job).where(Job.job_type == "connection.incremental_sync")
+        ).one()
