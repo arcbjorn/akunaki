@@ -163,6 +163,13 @@ class FactRepository:
                     created_at=now_s,
                 )
             )
+            # Flush the header before its detail row: no ORM relationship
+            # links them, so SQLAlchemy sorts these inserts by mapper name
+            # rather than by dependency. Sleep/vitals/workout happen to sort
+            # after ``FactRecord`` and activity did not — which is how the
+            # activity path shipped with a latent foreign-key failure. Being
+            # explicit here keeps all four independent of that accident.
+            session.flush()
             session.add(
                 SleepSession(
                     fact_record_id=fact_record_id,
@@ -275,6 +282,13 @@ class FactRepository:
                     created_at=now_s,
                 )
             )
+            # Flush the header before its detail row: no ORM relationship
+            # links them, so SQLAlchemy sorts these inserts by mapper name
+            # rather than by dependency. Sleep/vitals/workout happen to sort
+            # after ``FactRecord`` and activity did not — which is how the
+            # activity path shipped with a latent foreign-key failure. Being
+            # explicit here keeps all four independent of that accident.
+            session.flush()
             session.add(
                 OvernightVitals(
                     fact_record_id=fact_record_id,
@@ -379,6 +393,13 @@ class FactRepository:
                     created_at=now_s,
                 )
             )
+            # Flush the header before its detail row: no ORM relationship
+            # links them, so SQLAlchemy sorts these inserts by mapper name
+            # rather than by dependency. Sleep/vitals/workout happen to sort
+            # after ``FactRecord`` and activity did not — which is how the
+            # activity path shipped with a latent foreign-key failure. Being
+            # explicit here keeps all four independent of that accident.
+            session.flush()
             session.add(
                 WorkoutSession(
                     fact_record_id=fact_record_id,
@@ -485,6 +506,11 @@ class FactRepository:
                     created_at=now_s,
                 )
             )
+            # Flush the header before its detail row: no ORM relationship links
+            # them, so SQLAlchemy sorts these inserts by mapper name rather than
+            # by dependency. ``DailyActivity`` sorts *before* ``FactRecord``,
+            # which is how this path shipped with a latent foreign-key failure.
+            session.flush()
             session.add(
                 DailyActivity(
                     fact_record_id=fact_record_id,

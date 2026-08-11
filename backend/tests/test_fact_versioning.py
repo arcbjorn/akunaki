@@ -22,8 +22,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
-from akunaki.adapters.db.models import Connection, FactRecord, SleepSession, Tenant
+from akunaki.adapters.db.models import (
+    Connection,
+    DailyActivity,
+    FactRecord,
+    SleepSession,
+    Tenant,
+)
 from akunaki.config import Settings, clear_settings_cache
+from akunaki.domain.activity_normalizer import ENTITY_TYPE as ACTIVITY_ENTITY_TYPE
+from akunaki.domain.activity_normalizer import ActivityFact, normalize_activity_payload
 from akunaki.domain.jobs import to_utc_rfc3339
 from akunaki.domain.sleep_normalizer import (
     ENTITY_TYPE,
@@ -372,3 +380,178 @@ def test_same_vendor_id_across_tenants_does_not_collide(
     assert {r.tenant_id for r in records} == {"tenant-1", "tenant-2"}
     assert all(r.is_current == 1 for r in records)
     assert all(r.version_n == 1 for r in records)
+
+
+# ---------------------------------------------------------------------------
+# Daily-activity facts
+#
+# The activity write path had **no** database coverage: `_normalize_activity`
+# is tested against fake ports, so the dispatch was pinned while ~80 statements
+# of supersede/versioning logic had never run against real SQL.
+# ---------------------------------------------------------------------------
+
+
+def _activity_fact(**overrides: object) -> ActivityFact:
+    point: dict[str, object] = {
+        "startTime": "2026-07-18T00:00:00+02:00",
+        "endTime": "2026-07-19T00:00:00+02:00",
+        "steps": 8500,
+        "activeMinutes": 42.5,
+    }
+    point.update(overrides)
+    [fact] = normalize_activity_payload(json.dumps({"dataPoints": [point]}))
+    return fact
+
+
+def _write_activity(
+    factory: sessionmaker[Session],
+    fact: ActivityFact,
+    *,
+    now: datetime = T0,
+) -> object:
+    return FactRepository(factory).write_activity_fact(
+        fact_record_id=f"act-{next(_IDS)}",
+        tenant_id="tenant-1",
+        connection_id="conn-1",
+        fact=fact,
+        raw_revision_id=None,
+        raw_payload_id=None,
+        schema_version="google_activity.v1",
+        now=now,
+    )
+
+
+def _activity_rows(factory: sessionmaker[Session]) -> list[FactRecord]:
+    with factory() as session:
+        return list(
+            session.scalars(
+                select(FactRecord)
+                .where(FactRecord.entity_type == ACTIVITY_ENTITY_TYPE)
+                .order_by(FactRecord.version_n)
+            ).all()
+        )
+
+
+def test_a_first_activity_fact_is_written_current(factory: sessionmaker[Session]) -> None:
+    outcome = _write_activity(factory, _activity_fact())
+
+    assert outcome.is_new_version is True
+    [row] = _activity_rows(factory)
+    assert row.version_n == 1
+    assert row.is_current == 1
+    assert row.superseded_by is None
+
+
+def test_the_activity_detail_row_carries_the_totals(
+    factory: sessionmaker[Session],
+) -> None:
+    _write_activity(factory, _activity_fact())
+
+    with factory() as session:
+        [detail] = session.scalars(select(DailyActivity)).all()
+
+    assert detail.steps == 8500
+    assert detail.active_minutes == 42.5
+
+
+def test_an_identical_activity_fact_does_not_version(
+    factory: sessionmaker[Session],
+) -> None:
+    """Content-hash dedupe: a re-fetched day must not grow the history."""
+    _write_activity(factory, _activity_fact())
+
+    outcome = _write_activity(factory, _activity_fact())
+
+    assert outcome.is_new_version is False
+    assert len(_activity_rows(factory)) == 1
+
+
+def test_a_changed_activity_fact_supersedes_rather_than_updates(
+    factory: sessionmaker[Session],
+) -> None:
+    """A vendor revising the day writes v2; v1 stays readable for provenance."""
+    _write_activity(factory, _activity_fact())
+
+    outcome = _write_activity(factory, _activity_fact(steps=9100), now=T0 + timedelta(hours=1))
+
+    assert outcome.is_new_version is True
+    first, second = _activity_rows(factory)
+    assert first.version_n == 1
+    assert first.is_current == 0
+    assert first.superseded_by == second.id
+    assert second.version_n == 2
+    assert second.is_current == 1
+
+
+def test_only_one_activity_version_is_current(factory: sessionmaker[Session]) -> None:
+    """The engine reads current facts; two would make a day ambiguous."""
+    _write_activity(factory, _activity_fact())
+    _write_activity(factory, _activity_fact(steps=9100), now=T0 + timedelta(hours=1))
+    _write_activity(factory, _activity_fact(steps=9700), now=T0 + timedelta(hours=2))
+
+    rows = _activity_rows(factory)
+
+    assert [row.version_n for row in rows] == [1, 2, 3]
+    assert sum(row.is_current for row in rows) == 1
+    assert rows[-1].is_current == 1
+
+
+def test_superseding_preserves_the_prior_detail_row(
+    factory: sessionmaker[Session],
+) -> None:
+    """Supersede, never update in place: the old totals stay exactly as read."""
+    _write_activity(factory, _activity_fact())
+    _write_activity(factory, _activity_fact(steps=9100), now=T0 + timedelta(hours=1))
+
+    with factory() as session:
+        details = session.scalars(
+            select(DailyActivity).join(FactRecord).order_by(FactRecord.version_n)
+        ).all()
+
+    assert [detail.steps for detail in details] == [8500, 9100]
+
+
+def test_activity_facts_are_tenant_scoped(factory: sessionmaker[Session]) -> None:
+    """The same vendor day for another tenant is a separate history."""
+    _write_activity(factory, _activity_fact())
+    with factory() as session, session.begin():
+        session.add(
+            Tenant(
+                id="tenant-2",
+                created_at=NOW_S,
+                status="active",
+                primary_timezone="UTC",
+                display_name="Other",
+            )
+        )
+
+    FactRepository(factory).write_activity_fact(
+        fact_record_id="act-other",
+        tenant_id="tenant-2",
+        connection_id=None,
+        fact=_activity_fact(),
+        raw_revision_id=None,
+        raw_payload_id=None,
+        schema_version="google_activity.v1",
+        now=T0,
+    )
+
+    rows = _activity_rows(factory)
+    assert len(rows) == 2
+    assert {row.tenant_id for row in rows} == {"tenant-1", "tenant-2"}
+    # Both are current: they are different tenants' facts, not versions.
+    assert all(row.is_current == 1 for row in rows)
+
+
+def test_an_empty_tenant_id_is_rejected(factory: sessionmaker[Session]) -> None:
+    with pytest.raises(ValueError, match="must be non-empty"):
+        FactRepository(factory).write_activity_fact(
+            fact_record_id="act-x",
+            tenant_id="",
+            connection_id=None,
+            fact=_activity_fact(),
+            raw_revision_id=None,
+            raw_payload_id=None,
+            schema_version="google_activity.v1",
+            now=T0,
+        )
