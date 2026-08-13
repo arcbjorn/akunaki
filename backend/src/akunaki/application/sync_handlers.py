@@ -25,7 +25,12 @@ from datetime import UTC, datetime, timedelta
 from typing import NoReturn, Protocol
 
 from akunaki.application.metrics import CONNECTOR_FETCH
-from akunaki.domain.activity_normalizer import normalize_activity_payload
+from akunaki.domain.activity_normalizer import (
+    ActivityFact,
+    normalize_activity_payload,
+    normalize_oura_activity_payload,
+    normalize_polar_activity_payload,
+)
 from akunaki.domain.connections import ConnectionStatus
 from akunaki.domain.fetch import FetchFailure
 from akunaki.domain.google_sleep_normalizer import normalize_google_sleep_payload
@@ -881,7 +886,19 @@ class NormalizeHandler:
         # provider set, and so the source-selection decision.
         sleep_bearing = False
         try:
-            if revision.schema_version.startswith("polar."):
+            # Activity prefixes are matched **before** their provider's default
+            # branch: `polar_activity.v1` also starts with `polar`, so checking
+            # the bare provider prefix first would normalize an activity page as
+            # a workout and silently write nothing.
+            if revision.schema_version.startswith("oura_activity."):
+                written, affected_days = self._normalize_activity(
+                    claim, revision, now, parse=normalize_oura_activity_payload
+                )
+            elif revision.schema_version.startswith("polar_activity."):
+                written, affected_days = self._normalize_activity(
+                    claim, revision, now, parse=normalize_polar_activity_payload
+                )
+            elif revision.schema_version.startswith("polar."):
                 affected_days = self._normalize_workouts(claim, revision, now)
             elif revision.schema_version.startswith("google_activity."):
                 written, affected_days = self._normalize_activity(claim, revision, now)
@@ -1016,9 +1033,16 @@ class NormalizeHandler:
         claim: JobClaim,
         revision: RevisionBody,
         now: datetime,
+        *,
+        parse: Callable[[str], list[ActivityFact]] = normalize_activity_payload,
     ) -> tuple[int, set[str]]:
-        """Normalize a Google Health daily-activity revision into activity facts."""
-        facts = normalize_activity_payload(revision.payload_text)
+        """Normalize a daily-activity revision into canonical activity facts.
+
+        ``parse`` selects the provider's payload reader; every provider yields
+        the same ``ActivityFact``, so only the parsing differs — the fact write,
+        versioning, and affected-day accounting stay shared.
+        """
+        facts = parse(revision.payload_text)
         written = 0
         for fact in facts:
             outcome = self._facts.write_activity_fact(

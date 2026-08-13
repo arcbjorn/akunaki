@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx2
 
@@ -68,6 +68,15 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 # A stream absent here is unsupported.
 STREAM_PATHS = {
     "workout": "exercises",
+    # Daily activity summaries. Unlike `exercises`, this resource **does** take
+    # a date window (`from`/`to`), capped by the vendor at 28 days per request.
+    "daily_activity": "users/activities",
+}
+
+# Streams whose resource accepts a date window, and the vendor's cap on its
+# width. A stream absent here takes no window (the request sends none).
+STREAM_WINDOW_DAYS = {
+    "daily_activity": 28,
 }
 
 
@@ -126,10 +135,27 @@ class PolarFetchClient:
             raise ValueError(msg)
 
         url = f"{self._api_base}/{path}"
-        # `zones=true` inlines each exercise's HR-zone durations, which is what
-        # the canonical zone-load computation needs; without it the exercises
-        # come back without `heart_rate_zones` and normalize to nothing.
-        params = {"zones": "true"}
+        if stream == "workout":
+            # `zones=true` inlines each exercise's HR-zone durations, which is
+            # what the canonical zone-load computation needs; without it the
+            # exercises come back without `heart_rate_zones` and normalize to
+            # nothing. No date filter is sent — see the module docstring: that
+            # absence is what makes a stale cursor unable to lose data.
+            params = {"zones": "true"}
+        else:
+            # The daily-activity resource *does* window, and the vendor caps the
+            # span. A wider request is refused outright, so the window is
+            # clamped rather than sent as asked; re-read days dedupe on content
+            # hash, so clamping costs vendor calls, never data.
+            max_days = STREAM_WINDOW_DAYS.get(stream)
+            clamped_start = start
+            if max_days is not None:
+                floor = end - timedelta(days=max_days)
+                clamped_start = max(start, floor)
+            params = {
+                "from": clamped_start.date().isoformat(),
+                "to": end.date().isoformat(),
+            }
         try:
             response = self._send(url, params, access_token)
         except httpx2.HTTPError:
@@ -160,7 +186,10 @@ class PolarFetchClient:
                 content_type=response.headers.get("content-type"),
                 fetched_at=to_utc_rfc3339(require_aware(now, field_name="now")),
                 # Redacted: a path template only, never the token.
-                request_meta={"url_template": f"v3/{path}", "zones": "true"},
+                # Redacted: the path template and the query actually sent,
+                # never the token. Echoing the real params keeps the retained
+                # record honest about which window produced this body.
+                request_meta={"url_template": f"v3/{path}", **params},
                 page_token=None,
                 next_page_token=None,
             )

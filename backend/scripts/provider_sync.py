@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -33,6 +34,7 @@ from akunaki.adapters.db.models import (
     WorkoutSession,
 )
 from akunaki.adapters.wiring.registry import build_registry
+from akunaki.application.sync_handlers import streams_for_provider
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import INITIAL_SYNC_JOB_TYPE
@@ -69,15 +71,18 @@ def main() -> None:
     now = datetime.now(UTC)
     jobs = JobRepository(factory)
     for connection_id, tenant_id, provider in connections:
-        print(f"enqueuing initial sync: provider={provider} connection={connection_id}")
-        jobs.enqueue_job(
-            job_id=str(uuid.uuid4()),
-            tenant_id=tenant_id,
-            job_type=INITIAL_SYNC_JOB_TYPE,
-            payload_json=f'{{"connection_id":"{connection_id}"}}',
-            now=now,
-            max_attempts=3,
-        )
+        # One job per stream, mirroring the reconcile sweep's fan-out: a
+        # stream-less job would run only the provider's primary stream.
+        for stream, _schema in streams_for_provider(provider):
+            print(f"enqueuing initial sync: provider={provider} stream={stream}")
+            jobs.enqueue_job(
+                job_id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                job_type=INITIAL_SYNC_JOB_TYPE,
+                payload_json=json.dumps({"connection_id": connection_id, "stream": stream}),
+                now=now,
+                max_attempts=3,
+            )
 
     worker = JobWorker(
         jobs,
