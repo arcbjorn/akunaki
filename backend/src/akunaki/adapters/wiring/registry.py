@@ -66,6 +66,7 @@ from akunaki.application.sync_handlers import (
     NormalizeHandler,
     ProviderDispatchSyncHandler,
     ReconcileSweepHandler,
+    streams_for_provider,
     sync_config_for_provider,
 )
 from akunaki.config import Settings
@@ -93,27 +94,31 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
     jobs = JobRepository(session_factory)
     sync_runs = SyncRunRepository(session_factory)
 
-    # One initial + one incremental handler per provider, each fixed to that
-    # provider's fetch client and stream/schema config.
-    initial: dict[str, Callable[..., None]] = {}
-    incremental: dict[str, Callable[..., None]] = {}
+    # One initial + one incremental handler per (provider, stream), each fixed
+    # to that provider's fetch client and that stream's schema config. A
+    # provider with several streams therefore gets several handlers, and the
+    # dispatcher routes on both keys — so one stream failing cannot stop the
+    # others, and each keeps its own cursor and retry budget.
+    initial: dict[tuple[str, str], Callable[..., None]] = {}
+    incremental: dict[tuple[str, str], Callable[..., None]] = {}
     for provider, make_client in _FETCH_CLIENTS.items():
-        config = sync_config_for_provider(provider)
-        backfill = InitialSyncHandler(
-            fetch_client=make_client(),
-            ingestion=ingestion,
-            connections=connections,
-            sealer=sealer,
-            new_id=_new_id,
-            config=config,
-            sync_runs=sync_runs,
-        )
-        initial[provider] = backfill
-        incremental[provider] = IncrementalSyncHandler(
-            backfill=backfill,
-            cursors=ingestion,
-            config=config,
-        )
+        for stream, _schema in streams_for_provider(provider):
+            config = sync_config_for_provider(provider, stream=stream)
+            backfill = InitialSyncHandler(
+                fetch_client=make_client(),
+                ingestion=ingestion,
+                connections=connections,
+                sealer=sealer,
+                new_id=_new_id,
+                config=config,
+                sync_runs=sync_runs,
+            )
+            initial[provider, stream] = backfill
+            incremental[provider, stream] = IncrementalSyncHandler(
+                backfill=backfill,
+                cursors=ingestion,
+                config=config,
+            )
 
     normalize = NormalizeHandler(
         revisions=RevisionReader(session_factory),

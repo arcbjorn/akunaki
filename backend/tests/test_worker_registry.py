@@ -8,6 +8,7 @@ to prove the schedule → sweep → incremental-sync chain has handlers end to e
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -138,8 +139,14 @@ def test_reconcile_sweep_enqueues_a_syncable_job(
             select(Job).where(Job.job_type == INCREMENTAL_SYNC_JOB_TYPE)
         ).all()
         sweep = session.get(Job, "sweep-1")
-    assert len(incremental) == 1
-    assert incremental[0].tenant_id == "tenant-1"
+    # One job per stream the provider serves (Oura: sleep + daily_activity), so
+    # each stream keeps its own cursor and retry budget.
+    assert len(incremental) == 2
+    assert {json.loads(j.payload_json)["stream"] for j in incremental} == {
+        "sleep",
+        "daily_activity",
+    }
+    assert {j.tenant_id for j in incremental} == {"tenant-1"}
     # The sweep job itself completed (it did not dead-letter for a missing handler).
     assert sweep is not None
     assert sweep.status == "succeeded"

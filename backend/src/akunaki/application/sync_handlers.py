@@ -75,6 +75,7 @@ __all__ = [
     "ProviderDispatchSyncHandler",
     "ReconcileSweepHandler",
     "SyncConfig",
+    "streams_for_provider",
     "sync_config_for_provider",
 ]
 
@@ -137,6 +138,38 @@ _PROVIDER_STREAMS: dict[str, tuple[str, str]] = {
     "google_health": ("sleep", "google_health.v4"),
 }
 
+# Every stream each provider backfills, in fan-out order. The entry above stays
+# as the provider's *primary* stream (the one a bare, stream-less sync job means
+# for backwards compatibility); this is the full set the dispatcher fans out to.
+#
+# Each entry is (stream, schema_version). The schema version prefix is what the
+# normalize handler dispatches on, so a new stream reaching an unknown prefix
+# parses nothing and writes nothing rather than being mis-normalized.
+_PROVIDER_ALL_STREAMS: dict[str, tuple[tuple[str, str], ...]] = {
+    "oura": (
+        ("sleep", "oura.v2"),
+        ("daily_activity", "oura_activity.v2"),
+    ),
+    "polar": (
+        ("workout", "polar.v1"),
+        ("daily_activity", "polar_activity.v1"),
+    ),
+    "google_health": (("sleep", "google_health.v4"),),
+}
+
+
+def streams_for_provider(provider: str) -> tuple[tuple[str, str], ...]:
+    """Return every ``(stream, schema_version)`` pair ``provider`` backfills.
+
+    Falls back to the provider's primary stream so a provider wired only in
+    ``_PROVIDER_STREAMS`` keeps working; an unknown provider raises, matching
+    ``sync_config_for_provider``.
+    """
+    if provider in _PROVIDER_ALL_STREAMS:
+        return _PROVIDER_ALL_STREAMS[provider]
+    return (_PROVIDER_STREAMS[provider],)
+
+
 # Vendor-imposed minimum query-window width, per provider. A provider absent
 # here imposes none.
 _PROVIDER_MIN_WINDOWS: dict[str, timedelta] = {
@@ -147,22 +180,36 @@ _PROVIDER_MIN_WINDOWS: dict[str, timedelta] = {
 def sync_config_for_provider(
     provider: str,
     *,
+    stream: str | None = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     overlap: timedelta = DEFAULT_OVERLAP,
     max_pages: int = MAX_PAGES,
 ) -> SyncConfig:
-    """Return the backfill config for ``provider``'s supported stream.
+    """Return the backfill config for one of ``provider``'s streams.
 
-    Raises ``ValueError`` for a provider with no supported backfill, so a
-    typo or an unwired connector fails loudly instead of silently pulling the
-    Oura sleep stream.
+    ``stream`` selects among the provider's streams; omitted, it yields the
+    provider's primary stream, so an existing caller keeps its behaviour.
+
+    Raises ``ValueError`` for a provider with no supported backfill, or a stream
+    that provider does not serve, so a typo or an unwired connector fails loudly
+    instead of silently pulling the Oura sleep stream.
     """
     try:
-        stream, schema_version = _PROVIDER_STREAMS[provider]
+        default_stream, default_schema = _PROVIDER_STREAMS[provider]
     except KeyError as exc:
         supported = ", ".join(sorted(_PROVIDER_STREAMS))
         msg = f"no backfill config for provider {provider!r} (supported: {supported})"
         raise ValueError(msg) from exc
+
+    if stream is None:
+        stream, schema_version = default_stream, default_schema
+    else:
+        matched = dict(streams_for_provider(provider))
+        if stream not in matched:
+            available = ", ".join(sorted(matched))
+            msg = f"provider {provider!r} has no stream {stream!r} (has: {available})"
+            raise ValueError(msg)
+        schema_version = matched[stream]
     return SyncConfig(
         lookback_days=lookback_days,
         overlap=overlap,
@@ -615,23 +662,30 @@ class ProviderDispatchSyncHandler:
         self,
         *,
         connections: ConnectionProviderSource,
-        handlers: dict[str, Callable[[JobClaim], None]],
+        handlers: dict[tuple[str, str], Callable[[JobClaim], None]],
     ) -> None:
         self._connections = connections
         self._handlers = handlers
 
     def __call__(self, claim: JobClaim) -> None:
-        """Dispatch one sync job to its provider's handler."""
-        connection_id = _parse_payload(claim.payload_json)["connection_id"]
+        """Dispatch one sync job to the handler for its provider **and stream**."""
+        payload = _parse_payload(claim.payload_json)
+        connection_id = payload["connection_id"]
         connection = self._connections.get_connection(connection_id=connection_id)
         if connection is None:
             msg = f"connection {connection_id!r} not found"
             raise PermanentJobError(msg)
         provider = str(connection.provider.value)  # type: ignore[attr-defined]
-        handler = self._handlers.get(provider)
+
+        # A job without a stream targets the provider's primary stream, so a
+        # webhook or a job enqueued before fan-out existed still runs exactly
+        # one stream rather than silently becoming a no-op.
+        stream = payload.get("stream") or _PROVIDER_STREAMS[provider][0]
+
+        handler = self._handlers.get((provider, stream))
         if handler is None:
-            supported = ", ".join(sorted(self._handlers))
-            msg = f"no sync handler for provider {provider!r} (have: {supported})"
+            supported = ", ".join(sorted(f"{p}/{s}" for p, s in self._handlers))
+            msg = f"no sync handler for provider {provider!r} stream {stream!r} (have: {supported})"
             raise PermanentJobError(msg)
         handler(claim)
 
@@ -639,8 +693,8 @@ class ProviderDispatchSyncHandler:
 class StaleConnectionSource(Protocol):
     """Port: active connections whose last successful sync predates a cutoff."""
 
-    def stale_connections(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str]]:
-        """Return ``(connection_id, tenant_id)`` for stale active connections."""
+    def stale_connections(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str, str]]:
+        """Return ``(connection_id, tenant_id, provider)`` for stale connections."""
         ...
 
 
@@ -678,19 +732,35 @@ class ReconcileSweepHandler:
         stale = self._connections.stale_connections(cutoff=cutoff, limit=self._batch_limit)
 
         enqueued = 0
-        for connection_id, tenant_id in stale:
-            outcome = self._jobs.enqueue_job(
-                job_id=self._new_id(),
-                tenant_id=tenant_id,
-                job_type=INCREMENTAL_SYNC_JOB_TYPE,
-                payload_json=json.dumps({"connection_id": connection_id}),
-                now=now,
-                # One in-flight reconcile refetch per connection: a webhook or
-                # an earlier sweep may already have queued the same work.
-                idempotency_key=f"reconcile:{connection_id}",
-            )
-            if outcome.created:
-                enqueued += 1
+        for connection_id, tenant_id, provider in stale:
+            # Fan out one refetch per stream the provider serves: each stream
+            # keeps its own cursor and retry budget, so a stream that is failing
+            # (or that this account has no data for) cannot stop the others.
+            try:
+                streams = streams_for_provider(provider)
+            except KeyError:
+                # An unwired provider is a deployment gap, not a reason to abort
+                # the sweep for every other connection.
+                logger.warning(
+                    "reconcile sweep skipping unwired provider",
+                    extra={"connection_id": connection_id, "provider": provider},
+                )
+                continue
+            for stream, _schema in streams:
+                outcome = self._jobs.enqueue_job(
+                    job_id=self._new_id(),
+                    tenant_id=tenant_id,
+                    job_type=INCREMENTAL_SYNC_JOB_TYPE,
+                    payload_json=json.dumps({"connection_id": connection_id, "stream": stream}),
+                    now=now,
+                    # One in-flight reconcile refetch per connection *and
+                    # stream*: a webhook or an earlier sweep may already have
+                    # queued the same work. Keying on the connection alone would
+                    # let the first stream's job suppress every other stream.
+                    idempotency_key=f"reconcile:{connection_id}:{stream}",
+                )
+                if outcome.created:
+                    enqueued += 1
 
         logger.info(
             "reconcile sweep completed",

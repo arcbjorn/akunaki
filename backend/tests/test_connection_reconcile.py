@@ -141,10 +141,12 @@ def test_stale_query_finds_never_synced_and_old(factory: sessionmaker[Session]) 
 
     cutoff = to_utc_rfc3339(T0 - timedelta(hours=6))
     stale = repo.stale_connections(cutoff=cutoff)
-    ids = {cid for cid, _ in stale}
+    ids = {cid for cid, _, _ in stale}
     assert ids == {"old", "stale-link"}
     # tenant is carried for each.
-    assert {tid for _, tid in stale} == {"tenant-3", "tenant-4"}
+    assert {tid for _, tid, _ in stale} == {"tenant-3", "tenant-4"}
+    # provider is carried too, so the sweep can fan out per stream.
+    assert {provider for _, _, provider in stale} == {"oura"}
 
 
 def test_stale_query_respects_limit(factory: sessionmaker[Session]) -> None:

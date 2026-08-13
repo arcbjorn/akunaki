@@ -211,10 +211,10 @@ class ConnectionRepository:
                 external_user_id=row.external_user_id,
             )
 
-    def stale_connections(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str]]:
+    def stale_connections(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str, str]]:
         """Active connections whose last successful sync is older than ``cutoff``.
 
-        Returns ``(connection_id, tenant_id)`` for each ACTIVE connection whose
+        Returns ``(connection_id, tenant_id, provider)`` for each ACTIVE connection whose
         ``connection_health.last_success_at`` is null (never synced) or strictly
         older than ``cutoff`` (a UTC RFC3339 instant). Only ACTIVE connections
         are swept — a ``needs_reauth`` or ``error`` connection will not sync
@@ -223,7 +223,7 @@ class ConnectionRepository:
         """
         with self._session_factory() as session:
             rows = session.execute(
-                select(Connection.id, Connection.tenant_id)
+                select(Connection.id, Connection.tenant_id, Connection.provider)
                 .outerjoin(ConnectionHealth, ConnectionHealth.connection_id == Connection.id)
                 .where(
                     Connection.status == ConnectionStatus.ACTIVE.value,
@@ -233,7 +233,7 @@ class ConnectionRepository:
                 .order_by(Connection.id)
                 .limit(limit)
             ).all()
-        return [(cid, tid) for cid, tid in rows]
+        return [(str(cid), str(tid), str(provider)) for cid, tid, provider in rows]
 
     def connection_statuses(self, *, tenant_id: str) -> list[ConnectionSummary]:
         """Per-connection status and ingest counts for one tenant.

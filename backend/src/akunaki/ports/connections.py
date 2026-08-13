@@ -59,8 +59,12 @@ class ConnectionRepositoryPort(Protocol):
         """Return a connection's identity (tenant, provider, status), or None."""
         ...
 
-    def stale_connections(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str]]:
-        """Active connections whose last successful sync predates ``cutoff``."""
+    def stale_connections(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str, str]]:
+        """Active connections whose last successful sync predates ``cutoff``.
+
+        Returns ``(connection_id, tenant_id, provider)``. The provider is needed
+        so the sweep can fan out one refetch per stream that provider serves.
+        """
         ...
 
 

@@ -59,11 +59,11 @@ class _FakeJobs:
 
 
 class _FakeConnections:
-    def __init__(self, stale: list[tuple[str, str]]) -> None:
+    def __init__(self, stale: list[tuple[str, str, str]]) -> None:
         self._stale = stale
         self.cutoff_seen: str | None = None
 
-    def stale_connections(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str]]:
+    def stale_connections(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str, str]]:
         self.cutoff_seen = cutoff
         return self._stale[:limit]
 
@@ -85,7 +85,9 @@ def _claim() -> JobClaim:
 
 def test_enqueues_one_incremental_sync_per_stale_connection() -> None:
     jobs = _FakeJobs()
-    connections = _FakeConnections([("conn-a", "tenant-1"), ("conn-b", "tenant-2")])
+    connections = _FakeConnections(
+        [("conn-a", "tenant-1", "google_health"), ("conn-b", "tenant-2", "google_health")]
+    )
     handler = ReconcileSweepHandler(
         connections=connections,
         jobs=jobs,
@@ -101,7 +103,7 @@ def test_enqueues_one_incremental_sync_per_stale_connection() -> None:
     # Each carries its own connection and tenant, keyed for idempotence.
     by_conn = {json.loads(c.payload_json)["connection_id"]: c for c in jobs.calls}
     assert by_conn["conn-a"].tenant_id == "tenant-1"
-    assert by_conn["conn-a"].idempotency_key == "reconcile:conn-a"
+    assert by_conn["conn-a"].idempotency_key == "reconcile:conn-a:sleep"
     assert by_conn["conn-b"].tenant_id == "tenant-2"
 
 
@@ -134,9 +136,9 @@ def test_no_stale_connections_enqueues_nothing() -> None:
 def test_already_queued_connection_is_not_double_scheduled() -> None:
     # The idempotency key already exists (a webhook queued it): enqueue is a
     # no-op (created=False), so the sweep does not pile on.
-    jobs = _FakeJobs(existing_keys={"reconcile:conn-a"})
+    jobs = _FakeJobs(existing_keys={"reconcile:conn-a:sleep"})
     handler = ReconcileSweepHandler(
-        connections=_FakeConnections([("conn-a", "tenant-1")]),
+        connections=_FakeConnections([("conn-a", "tenant-1", "google_health")]),
         jobs=jobs,
         new_id=lambda: "id",
         clock=lambda: T0,
@@ -145,3 +147,43 @@ def test_already_queued_connection_is_not_double_scheduled() -> None:
     # The call is made (idempotent enqueue), but nothing new was created.
     assert len(jobs.calls) == 1
     assert jobs.calls[0].created is False
+
+
+def test_multi_stream_provider_fans_out_one_job_per_stream() -> None:
+    """Each stream needs its own job, cursor, and retry budget.
+
+    Keying the enqueue on the connection alone would let the first stream's job
+    suppress every other stream for that connection — the sweep would look
+    healthy while only one stream ever refetched.
+    """
+    jobs = _FakeJobs()
+    handler = ReconcileSweepHandler(
+        connections=_FakeConnections([("conn-a", "tenant-1", "oura")]),
+        jobs=jobs,
+        new_id=lambda: "id",
+        clock=lambda: T0,
+    )
+
+    handler(_claim())
+
+    streams = sorted(json.loads(c.payload_json)["stream"] for c in jobs.calls)
+    assert streams == ["daily_activity", "sleep"]
+    # Distinct idempotency keys, or one stream would suppress the other.
+    assert len({c.idempotency_key for c in jobs.calls}) == len(jobs.calls)
+
+
+def test_unwired_provider_does_not_abort_the_sweep() -> None:
+    """One unknown provider must not stop every other connection refetching."""
+    jobs = _FakeJobs()
+    handler = ReconcileSweepHandler(
+        connections=_FakeConnections(
+            [("conn-bad", "tenant-1", "nonesuch"), ("conn-ok", "tenant-2", "google_health")]
+        ),
+        jobs=jobs,
+        new_id=lambda: "id",
+        clock=lambda: T0,
+    )
+
+    handler(_claim())
+
+    assert [json.loads(c.payload_json)["connection_id"] for c in jobs.calls] == ["conn-ok"]
