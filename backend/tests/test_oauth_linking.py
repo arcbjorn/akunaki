@@ -436,3 +436,45 @@ def test_start_link_requires_tenant(factory: sessionmaker[Session]) -> None:
     service = _service(factory, _token_ok)
     with pytest.raises(ValueError, match="tenant_id must be non-empty"):
         service.start_link(tenant_id="", redirect_uri=REDIRECT, scopes=("daily",), now=T0)
+
+
+def test_relinked_tokens_can_still_be_opened(factory: sessionmaker[Session]) -> None:
+    """Re-consent must store a secret the worker can actually open.
+
+    `link` upserts on `(tenant_id, provider)` and keeps the **existing** row's
+    id, so sealing under a freshly minted id bound the envelope's AAD to an id
+    the database never stores. The ciphertext landed against the old id and
+    could never be opened: the connection read `active` while every sync
+    dead-lettered on "stored credentials could not be opened". Reusing the row
+    is not enough — the stored envelope has to open.
+    """
+    service = _service(factory, _token_ok)
+
+    first_redirect = service.start_link(
+        tenant_id="tenant-1", redirect_uri=REDIRECT, scopes=("daily",), now=T0
+    )
+    first = service.complete_link(
+        state=_state_from(first_redirect.authorize_url), code="c1", redirect_uri=REDIRECT, now=T0
+    )
+
+    later = T0 + timedelta(days=30)
+    second_redirect = service.start_link(
+        tenant_id="tenant-1", redirect_uri=REDIRECT, scopes=("daily",), now=later
+    )
+    second = service.complete_link(
+        state=_state_from(second_redirect.authorize_url),
+        code="c2",
+        redirect_uri=REDIRECT,
+        now=later,
+    )
+
+    assert first.ok and second.ok
+    assert second.connection is not None
+    connection_id = second.connection.connection_id
+
+    # Open the secret exactly as the sync handler does: AAD is the row's id.
+    sealed = ConnectionRepository(factory).get_sealed_secret(connection_id=connection_id)
+    assert sealed is not None
+    sealer = EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1")
+    opened = json.loads(sealer.open(sealed, aad=connection_id.encode()))
+    assert opened["access_token"]

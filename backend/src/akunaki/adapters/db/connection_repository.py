@@ -122,6 +122,16 @@ class ConnectionRepository:
                 external_user_id=external_user_id,
             )
 
+    def existing_connection_id(self, *, tenant_id: str, provider: Provider) -> str | None:
+        """Return the id of this tenant's connection for ``provider``, if any."""
+        with self._session_factory() as session:
+            return session.execute(
+                select(Connection.id).where(
+                    Connection.tenant_id == tenant_id,
+                    Connection.provider == provider.value,
+                )
+            ).scalar_one_or_none()
+
     def mark_status(
         self,
         *,

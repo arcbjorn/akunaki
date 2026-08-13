@@ -30,6 +30,16 @@ class ConnectionRepositoryPort(Protocol):
         """Create or refresh a connection and store its sealed tokens atomically."""
         ...
 
+    def existing_connection_id(self, *, tenant_id: str, provider: Provider) -> str | None:
+        """Return the id of this tenant's connection for ``provider``, if any.
+
+        Callers seal token material bound to the connection id, but ``link``
+        keeps an **existing** row's id on re-consent. Without knowing that id up
+        front a re-link seals under an id nothing is stored against, producing
+        ciphertext that can never be opened.
+        """
+        ...
+
     def mark_status(
         self,
         *,

@@ -250,7 +250,23 @@ class OAuthLinkingService:
                 return LinkResult(rejection=_map_enrollment_failure(enrollment.failure))
 
         # Seal the whole token set under the connection's identity.
-        resolved_connection_id = connection_id or self._new_id()
+        #
+        # The id must be the one the row will actually carry. `link` upserts on
+        # `(tenant_id, provider)` and keeps an **existing** row's id, so on
+        # re-consent a freshly minted id would never reach the database — while
+        # the envelope's AAD was bound to it. The ciphertext would then be
+        # stored against the old id and could never be opened again: the
+        # connection reads `active`, and every sync dead-letters on
+        # "stored credentials could not be opened".
+        provider_enum = Provider(self._client.provider)
+        resolved_connection_id = (
+            connection_id
+            or self._connections.existing_connection_id(
+                tenant_id=consumption.tenant_id,
+                provider=provider_enum,
+            )
+            or self._new_id()
+        )
         sealed_tokens = self._sealer.seal(
             _serialize_tokens(tokens),
             aad=resolved_connection_id.encode(),
@@ -258,7 +274,7 @@ class OAuthLinkingService:
         connection = self._connections.link(
             connection_id=resolved_connection_id,
             tenant_id=consumption.tenant_id,
-            provider=Provider(self._client.provider),
+            provider=provider_enum,
             sealed_secret=sealed_tokens,
             scopes=tokens.scopes,
             # None for a provider that discloses no user id (Oura); populated
