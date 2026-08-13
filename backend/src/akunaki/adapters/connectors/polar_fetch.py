@@ -27,6 +27,22 @@ Two consequences of the non-transactional model, both handled by the caller:
   30 days are returned at all, and only those uploaded after the user linked
   this client.
 
+**Why losing the commit step does not risk losing data.** Dropping a
+transactional lifecycle for a snapshot resource looks like it trades away
+delivery guarantees: nothing tells the vendor what was consumed, so a workout
+that ages out of the 30-day horizon before it is ever read would be gone. It
+cannot happen here, because this request sends **no date filter at all** — the
+window bounds are validated for the uniform connector contract and then
+discarded, so every sync re-reads Polar's entire retention set regardless of
+how stale or narrow the caller's cursor is. A missed workout therefore requires
+*no successful sync for 30 consecutive days*, not merely a lagging cursor. That
+window is guarded from three directions: the reconcile sweep re-syncs any
+connection idle more than 6 hours, a failed fetch raises before ``commit_page``
+so the cursor never advances past unread data, and ``/v1/data-quality`` raises
+``connection_stale_sync`` after **one** day — 29 days before the first record
+could expire. The constant re-reading is what buys this, and content-hash
+dedupe is what makes it free.
+
 Only the ``workout`` stream is supported. The resource is unpaginated, so
 ``next_page_token`` is always None.
 """

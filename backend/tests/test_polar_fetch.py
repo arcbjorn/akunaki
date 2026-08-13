@@ -191,3 +191,29 @@ def test_non_json_body_is_malformed() -> None:
 
 def test_repr_names_the_provider() -> None:
     assert "polar" in repr(PolarFetchClient())
+
+
+def test_window_bounds_are_never_sent_to_the_vendor() -> None:
+    """The durability guarantee rests on this: no date filter is transmitted.
+
+    Because the request carries no window, every sync re-reads Polar's whole
+    30-day retention set regardless of how stale the caller's cursor is — so a
+    lagging cursor can never cause a workout to be missed before it expires.
+    Sending a date filter here would silently convert a stale cursor into
+    permanent data loss, which is why this is pinned rather than assumed.
+    """
+    captured: dict[str, str] = {}
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        captured["url"] = str(request.url)
+        return _ok(request)
+
+    _fetch(_client(responder))
+
+    url = captured["url"]
+    query = url.split("?", 1)[1] if "?" in url else ""
+    # The only parameter is the zone inlining the normalizer needs.
+    assert query == "zones=true"
+    # Neither window bound reaches the vendor, in any spelling.
+    for fragment in ("2026-06-24", "2026-07-22", "start", "from", "since", "after"):
+        assert fragment not in query
