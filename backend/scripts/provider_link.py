@@ -1,24 +1,28 @@
-"""Drive a real Oura OAuth link from the terminal (local dev only).
+"""Drive a real provider OAuth link from the terminal (local dev only).
 
 The HTTP link routes need a logged-in session (tenant comes from the session)
 and therefore a configured OIDC provider. This script skips that by driving the
-same `OAuthLinkingService` directly, so a real Oura authorization can be walked
+same `OAuthLinkingService` directly, so a real authorization can be walked
 without standing up an identity provider first.
 
-It is the *real* flow, not a stub: the service generates the `state` and PKCE
-verifier, seals the verifier bound to its state row, and the callback leg
-consumes that state exactly once — the same code the HTTP routes call.
+It is the *real* flow, not a stub: the service generates the `state` and (for a
+PKCE provider) the verifier, seals it bound to its state row, and the callback
+leg consumes that state exactly once — the same code the HTTP routes call. For
+Polar it also performs the AccessLink user registration, without which every
+subsequent fetch returns 403.
 
 Usage:
 
-    # 1. print the authorize URL, persist the sealed state
-    uv run python scripts/oura_link.py start
+    # one-shot: opens the browser and catches the redirect
+    uv run python scripts/provider_link.py link --provider polar
 
-    # 2. open the URL, approve, copy the `code` from the redirect, then:
-    uv run python scripts/oura_link.py finish --code <CODE> --state <STATE>
+    # or, in two steps, when the browser is elsewhere:
+    uv run python scripts/provider_link.py start --provider google_health
+    uv run python scripts/provider_link.py finish --provider google_health \
+        --code <CODE> --state <STATE>
 
 The browser lands on http://localhost:8000/... which need not be running —
-the URL bar still shows `?code=...&state=...`, which is all step 2 needs.
+the URL bar still shows `?code=...&state=...`, which is all `finish` needs.
 """
 
 from __future__ import annotations
@@ -44,22 +48,17 @@ from akunaki.application.oauth_linking import OAuthLinkingService
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
 
-PROVIDER = "oura"
+PROVIDERS = ("oura", "polar", "google_health")
 TENANT_ID = "dev-tenant"
 
-# The same scopes the HTTP link route requests, so a dev link exercises the
-# real consent set rather than a broader one — asking for more here would mask
-# exactly the scope shortfall this script is useful for detecting (an
-# under-scoped Oura token returns empty arrays, not errors).
-SCOPES = DEFAULT_SCOPES[PROVIDER]
 
-
-def _service(settings: Settings) -> tuple[OAuthLinkingService, object]:
-    config = settings.connector_oauth(PROVIDER)
+def _service(settings: Settings, provider: str) -> tuple[OAuthLinkingService, object]:
+    config = settings.connector_oauth(provider)
     if config is None:
+        env = provider.upper()
         sys.exit(
-            "Oura OAuth is not configured. Set AKUNAKI_OURA_CLIENT_ID / "
-            "_CLIENT_SECRET / _REDIRECT_URI in backend/.env"
+            f"{provider} OAuth is not configured. Set AKUNAKI_{env}_CLIENT_ID / "
+            f"_CLIENT_SECRET / _REDIRECT_URI in backend/.env"
         )
     engine = create_db_engine(settings)
     factory = create_session_factory(engine)
@@ -80,7 +79,7 @@ def _service(settings: Settings) -> tuple[OAuthLinkingService, object]:
             )
 
     service = OAuthLinkingService(
-        client=build_oauth_client(PROVIDER, config),
+        client=build_oauth_client(provider, config),
         states=OAuthStateRepository(factory),
         connections=ConnectionRepository(factory),
         sealer=build_sealer(settings),
@@ -92,12 +91,16 @@ def _service(settings: Settings) -> tuple[OAuthLinkingService, object]:
     return service, config
 
 
-def cmd_start(settings: Settings) -> None:
-    service, config = _service(settings)
+def cmd_start(settings: Settings, provider: str) -> None:
+    service, config = _service(settings, provider)
     redirect = service.start_link(
         tenant_id=TENANT_ID,
         redirect_uri=config.redirect_uri,  # type: ignore[attr-defined]
-        scopes=SCOPES,
+        # The same scopes the HTTP link route requests, so a dev link exercises
+        # the real consent set rather than a broader one — asking for more here
+        # would mask exactly the scope shortfall this script detects (an
+        # under-scoped token returns empty arrays, not errors).
+        scopes=DEFAULT_SCOPES[provider],
         now=datetime.now(UTC),
     )
     print("\nOpen this URL, approve, then copy `code` and `state` from the")
@@ -106,7 +109,7 @@ def cmd_start(settings: Settings) -> None:
     print()
 
 
-def cmd_link(settings: Settings) -> None:
+def cmd_link(settings: Settings, provider: str) -> None:
     """One-shot link: open the browser, catch the redirect, exchange the code.
 
     Runs a throwaway HTTP listener on the redirect URI's port so the browser's
@@ -117,7 +120,7 @@ def cmd_link(settings: Settings) -> None:
     import webbrowser
     from urllib.parse import parse_qs, urlparse
 
-    service, config = _service(settings)
+    service, config = _service(settings, provider)
     redirect_uri: str = config.redirect_uri  # type: ignore[attr-defined]
     parsed = urlparse(redirect_uri)
     port = parsed.port or 80
@@ -125,7 +128,7 @@ def cmd_link(settings: Settings) -> None:
     started = service.start_link(
         tenant_id=TENANT_ID,
         redirect_uri=redirect_uri,
-        scopes=SCOPES,
+        scopes=DEFAULT_SCOPES[provider],
         now=datetime.now(UTC),
     )
 
@@ -159,7 +162,7 @@ def cmd_link(settings: Settings) -> None:
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     print(f"\nListening on {parsed.scheme}://{parsed.hostname}:{port} for the callback.")
-    print("Opening your browser to approve the Oura authorization...\n")
+    print(f"Opening your browser to approve the {provider} authorization...\n")
     print(started.authorize_url, "\n")
     webbrowser.open(started.authorize_url)
 
@@ -171,19 +174,20 @@ def cmd_link(settings: Settings) -> None:
     if "error" in caught:
         sys.exit(f"provider returned an error: {caught['error']}")
 
-    cmd_finish(settings, code=caught["code"], state=caught["state"], service=service)
+    cmd_finish(settings, provider, code=caught["code"], state=caught["state"], service=service)
 
 
 def cmd_finish(
     settings: Settings,
+    provider: str,
     *,
     code: str,
     state: str,
     service: OAuthLinkingService | None = None,
 ) -> None:
-    config = settings.connector_oauth(PROVIDER)
+    config = settings.connector_oauth(provider)
     if service is None:
-        service, config = _service(settings)  # type: ignore[assignment]
+        service, config = _service(settings, provider)  # type: ignore[assignment]
     result = service.complete_link(
         state=state,
         code=code,
@@ -191,18 +195,28 @@ def cmd_finish(
         now=datetime.now(UTC),
     )
     if not result.ok or result.connection is None:
+        # A Polar rejection here is most often the AccessLink user registration
+        # failing, not the token exchange — the grant is fine but the client may
+        # not register this user.
         sys.exit(f"link failed: {result.rejection}")
     conn = result.connection
     print(f"\nlinked: connection_id={conn.connection_id} status={conn.status.value}")
+    if conn.external_user_id:
+        print(f"vendor user id: {conn.external_user_id}")
     print("tokens are sealed at rest; run the sync next.\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("link")
-    sub.add_parser("start")
+
+    def add_provider(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--provider", choices=PROVIDERS, required=True)
+
+    add_provider(sub.add_parser("link"))
+    add_provider(sub.add_parser("start"))
     finish = sub.add_parser("finish")
+    add_provider(finish)
     finish.add_argument("--code", required=True)
     finish.add_argument("--state", required=True)
     args = parser.parse_args()
@@ -211,11 +225,11 @@ def main() -> None:
     settings = Settings()
 
     if args.cmd == "link":
-        cmd_link(settings)
+        cmd_link(settings, args.provider)
     elif args.cmd == "start":
-        cmd_start(settings)
+        cmd_start(settings, args.provider)
     else:
-        cmd_finish(settings, code=args.code, state=args.state)
+        cmd_finish(settings, args.provider, code=args.code, state=args.state)
 
 
 if __name__ == "__main__":
