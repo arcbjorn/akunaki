@@ -5,18 +5,18 @@ description = "Akunaki backend core: FastAPI + SQLAlchemy/libSQL + Alembic (mode
 readme = "README.md"
 requires-python = ">=3.13.14,<3.14"
 dependencies = [
-    "fastapi==0.139.0",
-    "uvicorn==0.51.0",
+    "fastapi==0.141.1",
+    "uvicorn==0.52.3",
     "pydantic==2.13.4",
-    "pydantic-settings==2.14.2",
-    "SQLAlchemy==2.0.51",
-    "alembic==1.18.5",
+    "pydantic-settings==2.15.0",
+    "SQLAlchemy==2.0.52",
+    "alembic==1.19.1",
     "sqlalchemy-libsql==0.2.0",
-    "cryptography==49.0.0",
+    "cryptography==50.0.0",
     # httpx2 is the legitimate Pydantic-published next-generation httpx fork
     # (author Tom Christie, homepage github.com/pydantic/httpx2), not a typosquat
     # of `httpx`. It backs every outbound provider HTTP call.
-    "httpx2==2.6.0",
+    "httpx2==2.10.0",
     "pyjwt==2.13.0",
 ]
 
@@ -24,7 +24,7 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
-    "ruff==0.15.21",
+    "ruff==0.16.3",
     "mypy==2.3.0",
     "import-linter==2.13",
     "pip-audit==2.10.1",
