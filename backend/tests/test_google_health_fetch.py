@@ -88,8 +88,13 @@ def test_list_gets_window_filter_and_returns_exact_body() -> None:
     params = captured["params"]
     assert isinstance(params, dict)
     filter_expr = params["filter"]
-    assert 'sleep.interval.start_time >= "2026-06-24T00:00:00Z"' in filter_expr
-    assert 'sleep.interval.start_time < "2026-07-22T00:00:00Z"' in filter_expr
+    # Sleep windows on the session's END time. v4 supports only end-time
+    # filtering for sleep and rejects `sleep.interval.start_time` with
+    # INVALID_DATA_POINT_FILTER_DATA_TYPE_MEMBER, so asserting the start-time
+    # spelling here is what let a 400-on-every-call ship green once already.
+    assert 'sleep.interval.end_time >= "2026-06-24T00:00:00Z"' in filter_expr
+    assert 'sleep.interval.end_time < "2026-07-22T00:00:00Z"' in filter_expr
+    assert "start_time" not in filter_expr
     assert params["pageSize"] == "25"
     assert "pageToken" not in params
     # The redacted request meta carries no token.
@@ -185,3 +190,27 @@ def test_non_json_body_is_malformed() -> None:
 
 def test_repr_names_the_provider() -> None:
     assert "google_health" in repr(GoogleHealthFetchClient())
+
+
+def test_sleep_never_filters_on_start_time() -> None:
+    """v4 supports only END-time filtering for sleep sessions.
+
+    Filtering on `sleep.interval.start_time` is rejected outright with
+    `INVALID_DATA_POINT_FILTER_DATA_TYPE_MEMBER` ("Member ... is not supported
+    for filtering"), so every fetch 400s and no sleep is ever ingested. That
+    shipped once, green, because the test asserted the same wrong member the
+    client sent — this pins the vendor's constraint rather than our spelling.
+    """
+    captured: dict[str, object] = {}
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        captured["filter"] = dict(request.url.params).get("filter", "")
+        return httpx2.Response(200, text=_SLEEP_PAGE)
+
+    _fetch(_client(responder))
+
+    filter_expr = str(captured["filter"])
+    assert "sleep.interval.end_time" in filter_expr
+    # The rejected member must not appear in any position.
+    assert "start_time" not in filter_expr
+    assert "startTime" not in filter_expr

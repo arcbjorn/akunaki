@@ -46,8 +46,19 @@ SLEEP_PAGE_SIZE = 25
 STREAM_DATA_TYPES = {
     "sleep": "sleep",
 }
+# The filterable member for each stream's window.
+#
+# Sleep filters on the session's **end** time, not its start. This is a v4
+# constraint, not a preference: the reference states only end-time filtering is
+# supported for sleep sessions, and the API rejects `sleep.interval.start_time`
+# outright with `INVALID_DATA_POINT_FILTER_DATA_TYPE_MEMBER` ("Member ... is not
+# supported for filtering"). Verified against the live API 2026-08-13.
+#
+# It also happens to be the correct semantic choice: a night is assigned to the
+# local date it **ended** (the wake-date rule the sleep normalizer applies), so
+# windowing on end time selects exactly the nights that belong to the window.
 STREAM_FILTER_FIELDS = {
-    "sleep": "sleep.interval.start_time",
+    "sleep": "sleep.interval.end_time",
 }
 
 
