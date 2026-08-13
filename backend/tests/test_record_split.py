@@ -125,3 +125,38 @@ def test_non_object_entries_are_skipped() -> None:
     slices = split_page("sleep", json.dumps({"data": ["nope", 5, {"id": "s1"}]}))
     assert len(slices) == 1
     assert slices[0].vendor_record_id == "sleep:s1"
+
+
+def test_empty_google_page_yields_no_slices() -> None:
+    """A quiet Google window must not manufacture an unnormalizable revision.
+
+    Google pages are deliberately kept whole (the sleep normalizer aggregates
+    across a page's segments), but an *empty* one carries no records at all.
+    Slicing it anyway ingested a junk revision keyed by the page hash, which the
+    normalizer then rejected as unnormalizable and dead-lettered — so a provider
+    with nothing to say broke the job chain. Oura (`{"data": []}`) and Polar
+    (`[]`) already yield nothing here; Google now matches.
+    """
+    for payload in ("{}", json.dumps({"dataPoints": []})):
+        assert split_page("sleep", payload) == []
+
+
+def test_google_page_with_points_is_still_one_whole_slice() -> None:
+    """The empty-page rule must not break cross-segment aggregation.
+
+    A page that actually carries data points stays a single whole-page slice, so
+    the normalizer still sees every segment of a night together.
+    """
+    payload = json.dumps(
+        {"dataPoints": [{"name": "dp-1", "sleep": {}}, {"name": "dp-2", "sleep": {}}]}
+    )
+    slices = split_page("sleep", payload)
+    assert len(slices) == 1
+    assert slices[0].vendor_record_id.startswith("sleep:page:")
+    assert slices[0].payload_text == payload
+
+
+def test_unrecognized_page_with_content_is_never_dropped() -> None:
+    """Only a demonstrably empty page yields nothing; unknown shapes are kept."""
+    for payload in (json.dumps({"weird": 1}), json.dumps({"dataPoints": {"not": "a list"}})):
+        assert len(split_page("sleep", payload)) == 1

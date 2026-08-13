@@ -44,6 +44,12 @@ class RecordSlice:
     """False when identity is a body hash rather than a vendor-assigned id."""
 
 
+# Keys under which a vendor page carries its record collection. Used only to
+# recognize an *empty* page; splitting itself keys off `_record_list`, since a
+# Google page with points is deliberately kept whole (see `split_page`).
+_COLLECTION_KEYS = ("data", "dataPoints")
+
+
 def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
     """Split a vendor page into per-record slices.
 
@@ -69,6 +75,15 @@ def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
     else:
         records = None
     if records is None:
+        # A page that carries no records at all yields no slices, whatever its
+        # shape. Without this an *empty* Google page (`{}`, or `{"dataPoints":
+        # []}`) becomes a whole-page slice holding nothing: it ingests a junk
+        # revision keyed by the page hash, which the normalizer then rejects as
+        # unnormalizable and dead-letters. Oura (`{"data": []}`) and Polar
+        # (`[]`) already yield zero slices for the same situation, so a quiet
+        # provider must not be the one that breaks the chain.
+        if _is_empty_page(parsed):
+            return []
         return [_whole_page_slice(stream, payload_text)]
 
     slices: list[RecordSlice] = []
@@ -97,6 +112,27 @@ def _record_list(parsed: dict[str, Any]) -> list[Any] | None:
     """Return the record array under a recognized collection key, or None."""
     value = parsed.get("data")
     return value if isinstance(value, list) else None
+
+
+def _is_empty_page(parsed: Any) -> bool:
+    """Whether a page demonstrably carries no records.
+
+    Deliberately narrow: only an empty object, or one whose sole meaningful
+    content is an empty record collection, counts. Anything else — an unknown
+    shape, a page with content this splitter does not recognize — is *not*
+    treated as empty, because dropping a body the vendor did send is worse than
+    storing one that normalizes to nothing.
+    """
+    if not isinstance(parsed, dict):
+        return False
+    if not parsed:
+        # `{}` — the shape a quiet Google Health window returns.
+        return True
+    for key in _COLLECTION_KEYS:
+        value = parsed.get(key)
+        if isinstance(value, list):
+            return not value
+    return False
 
 
 def _slice_for(stream: str, record: dict[str, Any]) -> RecordSlice:
