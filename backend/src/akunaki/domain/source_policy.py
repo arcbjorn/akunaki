@@ -6,11 +6,18 @@ forbids averaging providers or silently falling back between them. This module
 holds the fixed precedence so that choice is one auditable rule, not scattered
 per query.
 
-v0.1.0 scope is **sleep**: Oura is the overnight-authoritative sleep source, so
-it wins any day it covers; Google Health (Fitbit-origin cloud sleep) is the
-fallback for days Oura did not record. This is a pure precedence, not the full
-``source_selections`` grain machinery (deferred) — but it is the same principle:
-one authoritative source per day, never a blend.
+Precedence is **per metric family**, because the best source depends on what is
+being measured and when the device is worn — not on which vendor is "better". A
+ring worn only between bedtime and waking is the authoritative overnight sleep
+source but records nothing during the day; a training watch measures a workout
+best but is not worn to bed; an always-on tracker owns naps and daily activity
+precisely because it is never taken off. Overnight sleep and naps are therefore
+**separate families**: letting the overnight winner also win naps would suppress
+a real daytime record as ``lower_precedence`` and lose it.
+
+This is a pure precedence, not the full ``source_selections`` grain machinery
+(deferred) — but it is the same principle: one authoritative source per day per
+family, never a blend and never a silent fallback.
 
 ``SOURCE_POLICY_VERSION`` pins the precedence so a stored derivation can record
 which policy chose a day's source.
@@ -26,6 +33,18 @@ SOURCE_POLICY_VERSION = "source_policy_v0.1.0"
 # The metric family a sleep-source decision is recorded under.
 SLEEP_METRIC_FAMILY = "sleep_session"
 
+# Daytime sleep is a **separate** family from overnight sleep, because the
+# authoritative source differs: a ring worn only overnight cannot record a nap it
+# slept through, so letting the overnight winner also win naps would suppress the
+# daytime provider's real data as `lower_precedence` and lose the nap entirely.
+# The sleep normalizer already marks `is_nap`, so routing a fact to one family or
+# the other is deterministic rather than a judgement call.
+NAP_METRIC_FAMILY = "nap"
+
+# Daily activity (steps, calories, active minutes) and training sessions.
+ACTIVITY_METRIC_FAMILY = "daily_activity"
+WORKOUT_METRIC_FAMILY = "workout"
+
 # Selection reason vocabulary (mirrors the ``source_selections`` CHECK).
 REASON_POLICY_MATCH = "policy_match"
 REASON_ONLY_SOURCE = "only_source"
@@ -35,12 +54,45 @@ REASON_MISSING = "missing_authoritative"
 ELIGIBLE = "eligible"
 INELIGIBLE = "ineligible"
 
-# Sleep provider precedence, most authoritative first. A provider absent here is
-# never authoritative for sleep, so it cannot be selected over a listed one.
-_SLEEP_PRECEDENCE: tuple[str, ...] = (
-    "oura",
-    "google_health",
-)
+# Per-family provider precedence, most authoritative first. A provider absent
+# from a family's tuple is never authoritative for it, so it cannot be selected
+# over a listed one — it stays visible as an `ineligible` candidate instead.
+#
+# The default encodes a wear pattern rather than a ranking of vendors, which is
+# why it is data rather than scattered `if`s: a deployment whose user wears their
+# devices differently needs a different precedence, not different code.
+#
+# A provider is listed for a family only where it is genuinely worn for it.
+# Padding a family with every provider "just in case" is not harmless: a listed
+# provider wins any day the ones above it did not cover, so naming a device that
+# was never measuring that family invents an authoritative answer from it.
+_DEFAULT_PRECEDENCE: dict[str, tuple[str, ...]] = {
+    # Overnight sleep: the ring goes on before bed and off on waking. The
+    # always-on tracker is the fallback for nights the ring was not worn.
+    SLEEP_METRIC_FAMILY: ("oura", "google_health"),
+    # Daytime sleep: the ring is off, so the always-on tracker owns naps. Oura
+    # stays as fallback for a nap taken while the ring happened to be on.
+    NAP_METRIC_FAMILY: ("google_health", "oura"),
+    # Training: only the sports watch is worn for a session, so it is the sole
+    # authoritative source — no fallback invents a workout from a step counter.
+    WORKOUT_METRIC_FAMILY: ("polar",),
+    # Everything else in the day: steps, calories, active minutes. The always-on
+    # tracker leads; the watch covers days it alone recorded.
+    ACTIVITY_METRIC_FAMILY: ("google_health", "polar", "oura"),
+}
+
+# Back-compat alias: the sleep precedence several call sites read directly.
+_SLEEP_PRECEDENCE: tuple[str, ...] = _DEFAULT_PRECEDENCE[SLEEP_METRIC_FAMILY]
+
+
+def precedence_for(metric_family: str) -> tuple[str, ...]:
+    """Return the provider precedence for ``metric_family``.
+
+    An unknown family yields an empty precedence rather than raising: every
+    provider then ranks as `ineligible`, so an unpoliced family records its
+    candidates and selects nothing instead of silently inventing a winner.
+    """
+    return _DEFAULT_PRECEDENCE.get(metric_family, ())
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,20 +119,18 @@ class EffectivePolicy:
 def effective_policy() -> EffectivePolicy:
     """Describe the source precedence this build actually enforces.
 
-    Deliberately reports only families with a **real** precedence rule. The ADR
-    also names authoritative providers for overnight vitals, daytime activity,
-    and workouts, but no code selects between providers for those — one
-    connector supplies each today — so listing them would present an aspiration
-    as an enforced rule, which is exactly what an "inspectable policy" must not
-    do.
+    Reports every family with a **real** precedence rule — the rule this build
+    would actually apply if two providers competed. A family is listed once its
+    precedence is consulted at a decision site, not merely because the ADR names
+    an authoritative provider for it: listing an unenforced rule would present an
+    aspiration as a guarantee, which is exactly what an "inspectable policy" must
+    not do.
     """
     return EffectivePolicy(
         policy_version=SOURCE_POLICY_VERSION,
-        families=(
-            MetricFamilyPolicy(
-                metric_family=SLEEP_METRIC_FAMILY,
-                providers=_SLEEP_PRECEDENCE,
-            ),
+        families=tuple(
+            MetricFamilyPolicy(metric_family=family, providers=providers)
+            for family, providers in _DEFAULT_PRECEDENCE.items()
         ),
     )
 
@@ -132,10 +182,19 @@ class SleepSelection:
     missing_reason: str | None
     candidates: tuple[SelectionCandidate, ...]
 
-    def to_spec(self, *, local_health_day: str) -> DailySelectionSpec:
-        """The persistable form of this decision for one local day."""
+    def to_spec(
+        self,
+        *,
+        local_health_day: str,
+        metric_family: str = SLEEP_METRIC_FAMILY,
+    ) -> DailySelectionSpec:
+        """The persistable form of this decision for one local day.
+
+        ``metric_family`` defaults to overnight sleep so existing call sites are
+        unchanged; a nap, workout, or activity decision passes its own.
+        """
         return DailySelectionSpec(
-            metric_family=SLEEP_METRIC_FAMILY,
+            metric_family=metric_family,
             local_health_day=local_health_day,
             selected_fact_record_id=self.selected_fact_record_id,
             selection_reason=self.selection_reason,
@@ -144,8 +203,35 @@ class SleepSelection:
         )
 
 
+def decide_selection(
+    facts_by_provider: Mapping[str, list[str]],
+    *,
+    metric_family: str,
+) -> SleepSelection:
+    """Choose the day's authoritative fact for ``metric_family``.
+
+    The family-generic form of :func:`decide_sleep_selection`: identical rules,
+    but the precedence is looked up per family, so overnight sleep, naps,
+    workouts, and daily activity can each have a different authoritative
+    provider without duplicating the ranking logic.
+    """
+    return _decide(facts_by_provider, precedence=precedence_for(metric_family))
+
+
 def decide_sleep_selection(facts_by_provider: Mapping[str, list[str]]) -> SleepSelection:
-    """Choose the day's authoritative sleep fact and rank the alternatives.
+    """Choose the day's authoritative **overnight sleep** fact.
+
+    Thin wrapper over :func:`decide_selection` for the sleep family.
+    """
+    return decide_selection(facts_by_provider, metric_family=SLEEP_METRIC_FAMILY)
+
+
+def _decide(
+    facts_by_provider: Mapping[str, list[str]],
+    *,
+    precedence: tuple[str, ...],
+) -> SleepSelection:
+    """Choose the authoritative fact and rank the alternatives.
 
     Pure and total: every provider present becomes a candidate, ranked by the
     fixed precedence, so the losers stay inspectable rather than discarded. A
@@ -159,12 +245,12 @@ def decide_sleep_selection(facts_by_provider: Mapping[str, list[str]]) -> SleepS
     and a re-record dedupes instead of writing a new version.
     """
     present = {provider: facts for provider, facts in facts_by_provider.items() if facts}
-    chosen = authoritative_sleep_provider(present.keys())
+    chosen = _highest_precedence(present.keys(), precedence=precedence)
 
     ranked: list[SelectionCandidate] = []
     rank = 1
     # Eligible providers first, in precedence order.
-    for provider in _SLEEP_PRECEDENCE:
+    for provider in precedence:
         for fact_id in present.get(provider, []):
             ranked.append(
                 SelectionCandidate(
@@ -177,7 +263,7 @@ def decide_sleep_selection(facts_by_provider: Mapping[str, list[str]]) -> SleepS
             )
             rank += 1
     # Then anything the policy does not recognize as a sleep source.
-    for provider in sorted(set(present) - set(_SLEEP_PRECEDENCE)):
+    for provider in sorted(set(present) - set(precedence)):
         for fact_id in present[provider]:
             ranked.append(
                 SelectionCandidate(
@@ -185,7 +271,7 @@ def decide_sleep_selection(facts_by_provider: Mapping[str, list[str]]) -> SleepS
                     provider=provider,
                     rank=rank,
                     eligibility=INELIGIBLE,
-                    reason="provider_not_in_sleep_policy",
+                    reason="provider_not_in_policy",
                 )
             )
             rank += 1
@@ -194,9 +280,7 @@ def decide_sleep_selection(facts_by_provider: Mapping[str, list[str]]) -> SleepS
         return SleepSelection(
             selected_fact_record_id=None,
             selection_reason=REASON_MISSING,
-            missing_reason=(
-                "no_recognized_sleep_provider" if present else "no_sleep_facts_for_day"
-            ),
+            missing_reason=("no_recognized_provider" if present else "no_facts_for_day"),
             candidates=tuple(ranked),
         )
 
@@ -219,8 +303,22 @@ def authoritative_sleep_provider(providers_present: Iterable[str]) -> str | None
     (the day has no authoritative sleep — the caller must treat it as unknown,
     never blend the unrecognized sources).
     """
+    return _highest_precedence(providers_present, precedence=_SLEEP_PRECEDENCE)
+
+
+def _highest_precedence(
+    providers_present: Iterable[str],
+    *,
+    precedence: tuple[str, ...],
+) -> str | None:
+    """Return the highest-precedence provider present, or None.
+
+    None when no provider in ``precedence`` supplied the family for this day —
+    the caller must treat that as unknown, never blending the unrecognized
+    sources into an answer the policy did not sanction.
+    """
     present = set(providers_present)
-    for provider in _SLEEP_PRECEDENCE:
+    for provider in precedence:
         if provider in present:
             return provider
     return None

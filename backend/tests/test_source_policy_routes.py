@@ -171,27 +171,35 @@ def test_effective_policy_discloses_the_precedence(
     body = client.get("/v1/source-policies/effective").json()
 
     assert body["policy_version"] == SOURCE_POLICY_VERSION
-    [sleep] = body["families"]
-    assert sleep["metric_family"] == SLEEP_METRIC_FAMILY
+    by_family = {f["metric_family"]: f["providers"] for f in body["families"]}
     # Ordered most-authoritative first: Oura wins any night it covers.
-    assert sleep["providers"] == ["oura", "google_health"]
+    assert by_family[SLEEP_METRIC_FAMILY] == ["oura", "google_health"]
 
 
 def test_effective_policy_lists_only_enforced_families(
     client: TestClient, factory: sessionmaker[Session]
 ) -> None:
-    """The ADR names more families than the engine actually selects between.
+    """Every listed family must be one the engine really selects between.
 
     Listing an unenforced family would present an aspiration as a rule, which
-    is exactly what an inspectable policy must not do.
+    is exactly what an inspectable policy must not do. Each family here has a
+    precedence the decision path consults, and each precedence names only
+    providers actually worn for that family — padding one would invent an
+    authoritative answer from a device that was never measuring it.
     """
     _login(client, factory)
 
-    families = {
-        f["metric_family"] for f in client.get("/v1/source-policies/effective").json()["families"]
+    by_family = {
+        f["metric_family"]: f["providers"]
+        for f in client.get("/v1/source-policies/effective").json()["families"]
     }
 
-    assert families == {SLEEP_METRIC_FAMILY}
+    assert set(by_family) == {"sleep_session", "nap", "workout", "daily_activity"}
+    # Naps invert the sleep order: the ring is off during the day.
+    assert by_family["nap"][0] == "google_health"
+    assert by_family[SLEEP_METRIC_FAMILY][0] == "oura"
+    # Only the sports watch is worn for training; no fallback invents a workout.
+    assert by_family["workout"] == ["polar"]
 
 
 # ---------------------------------------------------------------------------
