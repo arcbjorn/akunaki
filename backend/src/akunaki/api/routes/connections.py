@@ -454,7 +454,24 @@ DEFAULT_SCOPES: dict[str, tuple[str, ...]] = {
     "polar": ("accesslink.read_all",),
     # Google Health scopes are all `.../auth/googlehealth.*` and are Restricted
     # (they require Google's security review before production use).
-    "google_health": ("https://www.googleapis.com/auth/googlehealth.sleep.readonly",),
+    #
+    # The `googlehealth.` prefix is load-bearing and easy to get wrong: the data
+    # types reference lists these scopes by *suffix* only (".sleep.readonly",
+    # ".activity_and_fitness.readonly"), and the bare
+    # `.../auth/activity_and_fitness.readonly` is rejected by Google's authorize
+    # endpoint ("Some requested scopes were invalid"). Both strings below were
+    # verified against the live authorize endpoint on 2026-08-13.
+    #
+    # Two scopes, because they gate different data types: sleep covers the
+    # `sleep` type, while `steps` / `active-minutes` (the daily-activity facts
+    # feeding the low-activity anomaly) sit behind activity_and_fitness. An
+    # under-scoped token fails these loudly with 403 PERMISSION_DENIED rather
+    # than returning an empty page, so a missing scope is not mistaken for an
+    # account that has no data.
+    "google_health": (
+        "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
+        "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+    ),
 }
 
 
