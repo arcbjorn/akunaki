@@ -13,7 +13,7 @@ Implemented: the **local** atomic durable-job repository lifecycle (fenced claim
 | Item | Policy |
 |------|--------|
 | Python | **3.13.14** only (`requires-python = ">=3.13.14,<3.14"`) |
-| Dependencies | **Exact pins** of latest **stable** releases as of 2026-07-13 (`cryptography==49.0.0` 2026-07-18; `httpx2` promoted to runtime, `pyjwt==2.13.0` added 2026-07-19) — **no prereleases** |
+| Dependencies | **Exact pins** of latest **stable** releases, refreshed **2026-08-13** (`cryptography==50.0.0` closes **PYSEC-2026-3552**; also fastapi 0.141.1, uvicorn 0.52.3, SQLAlchemy 2.0.52, alembic 1.19.1, pydantic-settings 2.15.0, httpx2 2.10.0, ruff 0.16.3) — **no prereleases** |
 | Database dialect | Official `sqlite+libsql` via `sqlalchemy-libsql==0.2.0` (local forms only) |
 | Model SDKs | **Forbidden** in core install (openai, anthropic, gemini, xai, openrouter, local-model stacks, …) |
 
@@ -943,7 +943,8 @@ tests/              # temp-file libSQL tests (no leftover artifacts)
 ## Dependency policy
 
 - Prefer **latest stable** only; never pin prereleases for production path.
-- Dev HTTP client for Starlette/FastAPI `TestClient` is **`httpx2==2.5.0`** (Starlette 1.3.1 prefers httpx2; plain `httpx` is deprecated for that path).
+- Dev HTTP client for Starlette/FastAPI `TestClient` is **`httpx2==2.10.0`** (Starlette 1.3.1 prefers httpx2; plain `httpx` is deprecated for that path).
+- **`pip-audit` is advisory in CI, so a CVE will not fail the build** — it must be read. The 2026-08-13 refresh was prompted by exactly this: `cryptography 49.0.0` carried PYSEC-2026-3552 (the library sealing connector tokens at rest) while every gate stayed green.
 - **pydantic 2.13.4** is the latest stable top-level Pydantic release as of **2026-07-13**. **pydantic-core** is a separate internal package with an independent version sequence; Pydantic 2.13.4 requires **pydantic-core 2.46.4** exactly. Therefore **2.13 versus 2.46 is not an age comparison**, and **core 2.47.0 must not be forced**. Do not change the Pydantic pin. An outdated `pydantic-core` line from `uv tree --outdated` is expected under that constraint.
 - Re-run `uv tree --outdated` and `uv run pip-audit` when refreshing pins.
 - Do not add model provider packages to the core dependency set.

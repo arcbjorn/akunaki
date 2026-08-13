@@ -21,7 +21,7 @@ A DEK encrypts exactly one message, so GCM nonce reuse cannot occur across recor
 
 | Parameter | Value |
 |-----------|-------|
-| AEAD | AES-256-GCM (`cryptography==49.0.0`) |
+| AEAD | AES-256-GCM (`cryptography==50.0.0`) |
 | KEK / DEK size | 32 bytes (AES-256) |
 | Nonce size | 12 bytes, freshly random per seal (both layers) |
 | Randomness source | `os.urandom` |
