@@ -89,6 +89,47 @@ class TokenExchangeResult:
         return self.failure is None and self.tokens is not None
 
 
+class EnrollmentFailure(StrEnum):
+    """Why registering a user with a provider's API did not succeed.
+
+    Distinct from ``TokenExchangeFailure``: the grant itself is valid here, but
+    the provider will not serve data until the user is enrolled with the
+    calling client (Polar AccessLink's ``POST /v3/users``).
+    """
+
+    REJECTED = "rejected"
+    """Provider refused the enrollment; the grant cannot be used for data."""
+
+    PROVIDER_ERROR = "provider_error"
+    TRANSPORT_ERROR = "transport_error"
+
+    @property
+    def retryable(self) -> bool:
+        """Whether retrying the same enrollment could plausibly succeed."""
+        return self in {
+            EnrollmentFailure.PROVIDER_ERROR,
+            EnrollmentFailure.TRANSPORT_ERROR,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EnrollmentResult:
+    """Outcome of enrolling a user with a provider's API.
+
+    ``already_enrolled`` is a *success*: a re-consent re-registers a user the
+    client already has, and treating the provider's conflict response as a
+    failure would make re-linking impossible.
+    """
+
+    failure: EnrollmentFailure | None = None
+    already_enrolled: bool = False
+
+    @property
+    def ok(self) -> bool:
+        """True when the user is enrolled (newly or already)."""
+        return self.failure is None
+
+
 def absolute_expiry(now: datetime, expires_in_seconds: int | None) -> str | None:
     """Convert a provider's relative ``expires_in`` to an absolute timestamp.
 

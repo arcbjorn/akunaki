@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 import httpx2
 
 from akunaki.domain.tokens import (
+    EnrollmentResult,
     OAuthTokens,
     TokenExchangeFailure,
     TokenExchangeResult,
@@ -79,6 +80,24 @@ class OuraOAuthClient:
     def uses_pkce(self) -> bool:
         """Oura uses the authorization-code + PKCE flow."""
         return True
+
+    @property
+    def requires_enrollment(self) -> bool:
+        """Oura serves data on the grant alone; no user registration step."""
+        return False
+
+    def enroll_user(
+        self,
+        *,
+        access_token: str,
+        external_user_id: str | None,
+    ) -> EnrollmentResult:
+        """No-op: Oura has no user-registration step, so the grant is enough.
+
+        Present to satisfy the uniform client port; never called, because
+        ``requires_enrollment`` is False.
+        """
+        return EnrollmentResult()
 
     def __repr__(self) -> str:
         """Redacted repr: the client secret must never surface in logs."""

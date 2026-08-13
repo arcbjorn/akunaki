@@ -24,6 +24,8 @@ from urllib.parse import urlencode
 import httpx2
 
 from akunaki.domain.tokens import (
+    EnrollmentFailure,
+    EnrollmentResult,
     OAuthTokens,
     TokenExchangeFailure,
     TokenExchangeResult,
@@ -36,6 +38,8 @@ PROVIDER = "polar"
 AUTHORIZE_ENDPOINT = "https://flow.polar.com/oauth2/authorization"
 # Public endpoint URL, not a credential (S105 matches the "token" substring).
 TOKEN_ENDPOINT = "https://polarremote.com/v2/oauth2/token"  # noqa: S105
+# AccessLink serves no data until the authorized user is registered here.
+REGISTER_ENDPOINT = "https://www.polaraccesslink.com/v3/users"
 
 DEFAULT_TIMEOUT_SECONDS = 15.0
 
@@ -60,6 +64,7 @@ class PolarOAuthClient:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         authorize_endpoint: str = AUTHORIZE_ENDPOINT,
         token_endpoint: str = TOKEN_ENDPOINT,
+        register_endpoint: str = REGISTER_ENDPOINT,
     ) -> None:
         if not client_id.strip():
             msg = "client_id must be a non-empty string"
@@ -73,6 +78,7 @@ class PolarOAuthClient:
         self._timeout = timeout_seconds
         self._authorize_endpoint = authorize_endpoint
         self._token_endpoint = token_endpoint
+        self._register_endpoint = register_endpoint
 
     @property
     def provider(self) -> str:
@@ -83,6 +89,11 @@ class PolarOAuthClient:
     def uses_pkce(self) -> bool:
         """Polar's AccessLink flow does not use PKCE."""
         return False
+
+    @property
+    def requires_enrollment(self) -> bool:
+        """AccessLink requires registering the user with the calling client."""
+        return True
 
     def __repr__(self) -> str:
         """Redacted repr: the client secret must never surface in logs."""
@@ -155,6 +166,80 @@ class PolarOAuthClient:
         port and drives ``needs_reauth`` through the same path as any dead grant.
         """
         return TokenExchangeResult(failure=TokenExchangeFailure.INVALID_GRANT)
+
+    def enroll_user(
+        self,
+        *,
+        access_token: str,
+        external_user_id: str | None,
+    ) -> EnrollmentResult:
+        """Register the user with this AccessLink client (``POST /v3/users``).
+
+        AccessLink serves **no** exercise data until the authorized user is
+        registered to the calling client: without this, every fetch returns 403
+        and the connection looks mis-credentialed rather than un-enrolled.
+
+        A ``409 Conflict`` means this client already has the user, which is a
+        success — otherwise re-consenting to an existing connection could never
+        complete. The request body carries only the vendor's own user id.
+        """
+        if not access_token:
+            msg = "access_token must be non-empty"
+            raise ValueError(msg)
+        if not external_user_id:
+            # The token body carries x_user_id; its absence means the exchange
+            # returned something this client cannot enroll.
+            logger.warning("polar enrollment skipped: no external user id")
+            return EnrollmentResult(failure=EnrollmentFailure.REJECTED)
+
+        try:
+            response = self._send_registration(access_token, external_user_id)
+        except httpx2.HTTPError:
+            # As with the token request: the exception can echo the request,
+            # whose Authorization header holds the access token.
+            logger.warning("polar user registration transport error")
+            return EnrollmentResult(failure=EnrollmentFailure.TRANSPORT_ERROR)
+
+        if response.status_code == httpx2.codes.CONFLICT:
+            # Already registered to this client — the desired end state.
+            logger.info("polar user already registered")
+            return EnrollmentResult(already_enrolled=True)
+
+        if response.status_code >= 500:
+            logger.warning(
+                "polar user registration provider error",
+                extra={"status": response.status_code},
+            )
+            return EnrollmentResult(failure=EnrollmentFailure.PROVIDER_ERROR)
+
+        if response.status_code >= 400:
+            # 403 here means the client is not permitted to register the user;
+            # the body is never logged (it can echo request material).
+            logger.warning(
+                "polar user registration rejected",
+                extra={"status": response.status_code},
+            )
+            return EnrollmentResult(failure=EnrollmentFailure.REJECTED)
+
+        return EnrollmentResult()
+
+    def _send_registration(self, access_token: str, external_user_id: str) -> httpx2.Response:
+        """POST the AccessLink user registration with the user's bearer token."""
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        payload = {"member-id": external_user_id}
+        if self._transport is not None:
+            return self._transport.post(
+                self._register_endpoint,
+                json=payload,
+                headers=headers,
+                timeout=self._timeout,
+            )
+        with httpx2.Client(timeout=self._timeout) as client:
+            return client.post(self._register_endpoint, json=payload, headers=headers)
 
     def _post_token(self, form: dict[str, str], *, now: datetime) -> TokenExchangeResult:
         """POST to the token endpoint with Basic auth; map to a typed result."""

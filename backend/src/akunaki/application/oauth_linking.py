@@ -25,7 +25,7 @@ from enum import StrEnum
 
 from akunaki.domain.connections import ConnectionStatus, LinkedConnection, Provider
 from akunaki.domain.secrets import SecretDecryptionError
-from akunaki.domain.tokens import OAuthTokens, TokenExchangeFailure
+from akunaki.domain.tokens import EnrollmentFailure, OAuthTokens, TokenExchangeFailure
 from akunaki.ports.connections import ConnectionRepositoryPort, OAuthStateRepositoryPort
 from akunaki.ports.oauth_client import OAuthClientPort
 from akunaki.ports.secrets import SecretSealerPort
@@ -229,6 +229,26 @@ class OAuthLinkingService:
         tokens = exchange.tokens
         assert consumption.tenant_id is not None
 
+        # Enroll before writing the connection. Polar AccessLink serves no data
+        # until the user is registered to this client, so a connection stored
+        # ahead of a failed enrollment would sit `active` while every sync 403s
+        # — a link that reports success and silently never yields data.
+        if self._client.requires_enrollment:
+            enrollment = self._client.enroll_user(
+                access_token=tokens.access_token,
+                external_user_id=tokens.external_user_id,
+            )
+            if not enrollment.ok:
+                assert enrollment.failure is not None
+                logger.warning(
+                    "provider user enrollment failed",
+                    extra={
+                        "provider": self._client.provider,
+                        "failure": str(enrollment.failure),
+                    },
+                )
+                return LinkResult(rejection=_map_enrollment_failure(enrollment.failure))
+
         # Seal the whole token set under the connection's identity.
         resolved_connection_id = connection_id or self._new_id()
         sealed_tokens = self._sealer.seal(
@@ -270,6 +290,18 @@ class OAuthLinkingService:
             now=now,
             error_class="invalid_grant",
         )
+
+
+def _map_enrollment_failure(failure: EnrollmentFailure) -> LinkRejection:
+    """Translate an enrollment failure into a link rejection.
+
+    A rejected enrollment is a permanent refusal by the provider (the client is
+    not permitted to register this user), so it drives re-consent rather than a
+    retry; transport and 5xx failures are transient.
+    """
+    if failure.retryable:
+        return LinkRejection.PROVIDER_UNAVAILABLE
+    return LinkRejection.PROVIDER_REJECTED
 
 
 def _serialize_tokens(tokens: OAuthTokens) -> bytes:

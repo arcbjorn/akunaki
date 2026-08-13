@@ -344,3 +344,102 @@ def test_transport_error_logs_no_request_body() -> None:
     rendered = captured.rendered()
     assert "transport error" in rendered
     assert CLIENT_SECRET not in rendered
+
+
+# ---------------------------------------------------------------------------
+# User enrollment (POST /v3/users)
+# ---------------------------------------------------------------------------
+
+
+def test_client_declares_it_requires_enrollment() -> None:
+    client, _ = _client(_json_response(200, TOKEN_BODY))
+    assert client.requires_enrollment is True
+
+
+def test_enrollment_posts_the_member_id_with_the_user_bearer_token() -> None:
+    client, seen = _client(_json_response(200, {"member-id": "987654"}))
+
+    result = client.enroll_user(access_token=ACCESS_TOKEN, external_user_id="987654")
+
+    assert result.ok
+    assert result.already_enrolled is False
+    request = seen[-1]
+    assert request.method == "POST"
+    assert request.url.path.endswith("/v3/users")
+    assert request.headers["Authorization"] == f"Bearer {ACCESS_TOKEN}"
+    assert json.loads(request.content.decode()) == {"member-id": "987654"}
+
+
+def test_already_registered_user_is_a_success() -> None:
+    """A 409 means this client already has the user, which is the end state.
+
+    Treating it as a failure would make re-consenting to an existing Polar
+    connection impossible.
+    """
+    client, _ = _client(_json_response(409, {"error": "already exists"}))
+
+    result = client.enroll_user(access_token=ACCESS_TOKEN, external_user_id="987654")
+
+    assert result.ok
+    assert result.already_enrolled is True
+
+
+def test_forbidden_enrollment_is_a_permanent_rejection() -> None:
+    client, _ = _client(_json_response(403, {"error": "forbidden"}))
+
+    result = client.enroll_user(access_token=ACCESS_TOKEN, external_user_id="987654")
+
+    assert not result.ok
+    assert result.failure is not None
+    assert result.failure.retryable is False
+
+
+def test_server_error_on_enrollment_is_retryable() -> None:
+    client, _ = _client(_json_response(503, {"error": "unavailable"}))
+
+    result = client.enroll_user(access_token=ACCESS_TOKEN, external_user_id="987654")
+
+    assert not result.ok
+    assert result.failure is not None
+    assert result.failure.retryable is True
+
+
+def test_transport_error_on_enrollment_is_retryable() -> None:
+    def boom(_request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection reset")
+
+    client, _ = _client(boom)
+
+    result = client.enroll_user(access_token=ACCESS_TOKEN, external_user_id="987654")
+
+    assert not result.ok
+    assert result.failure is not None
+    assert result.failure.retryable is True
+
+
+def test_enrollment_without_a_user_id_is_rejected_without_calling_the_provider() -> None:
+    """No x_user_id means there is nothing to register; do not call blindly."""
+    client, seen = _client(_json_response(200, {}))
+
+    result = client.enroll_user(access_token=ACCESS_TOKEN, external_user_id=None)
+
+    assert not result.ok
+    assert seen == []
+
+
+def test_enrollment_validates_the_access_token() -> None:
+    client, _ = _client(_json_response(200, {}))
+
+    with pytest.raises(ValueError, match="access_token"):
+        client.enroll_user(access_token="", external_user_id="987654")
+
+
+def test_enrollment_failure_logs_no_token_material() -> None:
+    client, _ = _client(_json_response(403, {"echo": f"token={ACCESS_TOKEN}"}))
+
+    with _captured_logs() as captured:
+        client.enroll_user(access_token=ACCESS_TOKEN, external_user_id="987654")
+
+    rendered = captured.rendered()
+    assert "registration rejected" in rendered
+    assert ACCESS_TOKEN not in rendered

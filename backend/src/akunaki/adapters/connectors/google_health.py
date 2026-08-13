@@ -24,6 +24,7 @@ from urllib.parse import urlencode
 import httpx2
 
 from akunaki.domain.tokens import (
+    EnrollmentResult,
     OAuthTokens,
     TokenExchangeFailure,
     TokenExchangeResult,
@@ -83,6 +84,24 @@ class GoogleHealthOAuthClient:
     def uses_pkce(self) -> bool:
         """Google Health uses the authorization-code + PKCE flow."""
         return True
+
+    @property
+    def requires_enrollment(self) -> bool:
+        """Google Health serves data on the grant alone; no registration step."""
+        return False
+
+    def enroll_user(
+        self,
+        *,
+        access_token: str,
+        external_user_id: str | None,
+    ) -> EnrollmentResult:
+        """No-op: Google Health has no user-registration step.
+
+        Present to satisfy the uniform client port; never called, because
+        ``requires_enrollment`` is False.
+        """
+        return EnrollmentResult()
 
     def __repr__(self) -> str:
         """Redacted repr: the client secret must never surface in logs."""

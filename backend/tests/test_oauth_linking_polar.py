@@ -112,7 +112,15 @@ def _service(
     )
 
 
-def _token_ok(_request: httpx2.Request) -> httpx2.Response:
+def _token_ok(request: httpx2.Request) -> httpx2.Response:
+    """Answer the token exchange, then the AccessLink user registration.
+
+    Routed by URL rather than answering every call with 200: the link now makes
+    two distinct provider calls, and a catch-all would let a missing or
+    misdirected registration pass unnoticed.
+    """
+    if request.url.path.endswith("/users"):
+        return httpx2.Response(200, json={"member-id": "987654"})
     return httpx2.Response(200, json=TOKEN_BODY)
 
 
@@ -183,3 +191,97 @@ def test_replayed_callback_is_rejected(factory: sessionmaker[Session]) -> None:
     second = service.complete_link(state=state, code="c", redirect_uri=REDIRECT, now=T0)
     assert first.ok
     assert second.rejection is LinkRejection.INVALID_STATE
+
+
+def test_link_registers_the_user_with_accesslink(factory: sessionmaker[Session]) -> None:
+    """AccessLink serves no data until the user is registered to this client."""
+    seen: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/users"):
+            return httpx2.Response(200, json={"member-id": "987654"})
+        return httpx2.Response(200, json=TOKEN_BODY)
+
+    service = _service(factory, handler)
+    redirect = service.start_link(
+        tenant_id="tenant-1", redirect_uri=REDIRECT, scopes=("accesslink.read_all",), now=T0
+    )
+    result = service.complete_link(
+        state=_state_from(redirect.authorize_url), code="c", redirect_uri=REDIRECT, now=T0
+    )
+
+    assert result.ok
+    assert any(path.endswith("/v3/users") for path in seen)
+
+
+def test_already_registered_user_still_links(factory: sessionmaker[Session]) -> None:
+    """Re-consent hits a 409 from AccessLink; the link must still succeed."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path.endswith("/users"):
+            return httpx2.Response(409, json={"error": "already exists"})
+        return httpx2.Response(200, json=TOKEN_BODY)
+
+    service = _service(factory, handler)
+    redirect = service.start_link(
+        tenant_id="tenant-1", redirect_uri=REDIRECT, scopes=("accesslink.read_all",), now=T0
+    )
+    result = service.complete_link(
+        state=_state_from(redirect.authorize_url), code="c", redirect_uri=REDIRECT, now=T0
+    )
+
+    assert result.ok
+    assert result.connection is not None
+    assert result.connection.status is ConnectionStatus.ACTIVE
+
+
+def test_failed_enrollment_stores_no_connection(
+    factory: sessionmaker[Session], link_db: str
+) -> None:
+    """A connection stored despite a failed enrollment would sit `active` while
+    every sync 403s — a link reporting success that can never yield data."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path.endswith("/users"):
+            return httpx2.Response(403, json={"error": "forbidden"})
+        return httpx2.Response(200, json=TOKEN_BODY)
+
+    service = _service(factory, handler)
+    redirect = service.start_link(
+        tenant_id="tenant-1", redirect_uri=REDIRECT, scopes=("accesslink.read_all",), now=T0
+    )
+    result = service.complete_link(
+        state=_state_from(redirect.authorize_url), code="c", redirect_uri=REDIRECT, now=T0
+    )
+
+    assert not result.ok
+    assert result.rejection is LinkRejection.PROVIDER_REJECTED
+
+    engine = create_db_engine(Settings(database_url=link_db))
+    try:
+        with engine.connect() as conn:
+            connections = conn.execute(text("SELECT COUNT(*) FROM connections")).scalar_one()
+            secrets = conn.execute(text("SELECT COUNT(*) FROM connection_secrets")).scalar_one()
+    finally:
+        engine.dispose()
+    assert connections == 0
+    assert secrets == 0
+
+
+def test_unavailable_enrollment_is_retryable(factory: sessionmaker[Session]) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path.endswith("/users"):
+            return httpx2.Response(503, json={"error": "unavailable"})
+        return httpx2.Response(200, json=TOKEN_BODY)
+
+    service = _service(factory, handler)
+    redirect = service.start_link(
+        tenant_id="tenant-1", redirect_uri=REDIRECT, scopes=("accesslink.read_all",), now=T0
+    )
+    result = service.complete_link(
+        state=_state_from(redirect.authorize_url), code="c", redirect_uri=REDIRECT, now=T0
+    )
+
+    assert result.rejection is LinkRejection.PROVIDER_UNAVAILABLE
+    assert result.rejection.retryable
