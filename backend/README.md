@@ -846,6 +846,31 @@ The connection row and its sealed tokens are written in **one transaction**, so 
 
 **HTTP routes are deliberately not implemented yet.** `/v1` endpoints need a `tenant_id` from an authenticated session, and auth/OIDC is not built. `tenant_id` is a service parameter, so the routes become a thin layer once sessions exist.
 
+### Linking a provider locally (dev scripts)
+
+The `/v1/connections/{provider}` routes take the tenant from a session, so driving them needs a configured OIDC provider. `scripts/provider_link.py` skips that by calling the **same** `OAuthLinkingService` directly — the real flow, not a stub: real `state`, real PKCE sealing, single-use callback consumption, and (for Polar) real AccessLink enrollment.
+
+```bash
+# one-shot: opens the browser, catches the redirect on the redirect URI's port
+uv run python scripts/provider_link.py link --provider polar
+
+# or in two steps, when the browser is elsewhere
+uv run python scripts/provider_link.py start --provider google_health
+uv run python scripts/provider_link.py finish --provider google_health \
+    --code <CODE> --state <STATE>
+```
+
+Then run the sync, which drives the production `build_registry` wiring through the real `JobWorker` — fetch → ingest → normalize → score, with real leases and retries:
+
+```bash
+uv run python scripts/provider_sync.py --provider polar --report
+uv run python scripts/provider_sync.py --all --report   # every linked provider
+```
+
+Both scripts request the **same scopes** the HTTP route does (`DEFAULT_SCOPES`), so a dev link exercises the real consent set — asking for more would mask exactly the scope shortfall these scripts are useful for catching, since an under-scoped token returns empty arrays rather than an error. They use the `dev-tenant` tenant, seeding it if absent.
+
+**Provider credentials are a separate registration from a consumer account.** Polar needs a client from `admin.polaraccesslink.com`; Google Health needs a Google Cloud project with the API enabled, and its `googlehealth.*` scopes are **Restricted** (Google security review for production; a testing-mode app with yourself as a test user is enough for local dev).
+
 ### Oura OAuth client
 
 `OuraOAuthClient` builds the authorize URL and performs the PKCE token exchange:
@@ -864,7 +889,22 @@ Failures map to a typed vocabulary rather than raising: `invalid_grant` / `inval
 
 ### Polar OAuth client
 
-`PolarOAuthClient` mirrors the Oura client with Polar AccessLink's differences: the token exchange authenticates via **HTTP Basic** (`client_id`/`client_secret` in the `Authorization` header, never a form field), there is **no PKCE** (`authorize_url` takes only `state`), and there is **no refresh token** — an AccessLink access token is long-lived, so there is no `refresh`. The token body's `x_user_id` is captured as `OAuthTokens.external_user_id` and flows into the connection's `external_user_id`. The same typed failure vocabulary and secret-leak discipline (redacted repr, no body logging) apply. The linking service now handles this non-PKCE flow (via the client port's `uses_pkce` flag), so a full Polar authorize→callback link works end to end; the connector link routes at `/v1/connections/{provider}` now drive it end to end.
+`PolarOAuthClient` mirrors the Oura client with Polar AccessLink's differences: the token exchange authenticates via **HTTP Basic** (`client_id`/`client_secret` in the `Authorization` header, never a form field), there is **no PKCE** (`authorize_url` takes only `state`), there is **no refresh token** — an AccessLink access token is long-lived, so there is no `refresh` — and the linked user must be **enrolled** with the calling client before any data is readable (below). The token body's `x_user_id` is captured as `OAuthTokens.external_user_id` and flows into the connection's `external_user_id`. The same typed failure vocabulary and secret-leak discipline (redacted repr, no body logging) apply. The linking service now handles this non-PKCE flow (via the client port's `uses_pkce` flag), so a full Polar authorize→callback link works end to end; the connector link routes at `/v1/connections/{provider}` now drive it end to end.
+
+### Polar user enrollment (`POST /v3/users`)
+
+AccessLink serves **no** exercise data on the grant alone: the authorized user must be registered to the calling client, or every fetch returns **403**. Without this step a Polar link completes, the connection reads `active`, and each sync fails in a way that looks like bad credentials rather than a missing registration.
+
+`OAuthClientPort` therefore carries a `requires_enrollment` flag beside `uses_pkce`, and `complete_link` runs the enrollment **before** writing the connection:
+
+| Provider response | Outcome |
+|-------------------|---------|
+| `2xx` | Enrolled; the link proceeds |
+| **`409 Conflict`** | **Success** (`already_enrolled`) — this client already has the user, which is the desired end state; failing here would make re-consent impossible |
+| `4xx` | `PROVIDER_REJECTED` — permanent, drives re-consent |
+| `5xx` / transport | `PROVIDER_UNAVAILABLE` — retryable |
+
+Ordering is the point: a connection stored ahead of a failed enrollment would sit `active` while every sync 403s — a link that reports success and can never yield data. On failure **nothing is written**, neither the connection nor its sealed tokens. Oura and Google Health declare `requires_enrollment = False` and are never asked to enroll.
 
 ### Google Health OAuth client
 
