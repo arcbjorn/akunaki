@@ -29,6 +29,15 @@ class FetchFailure(StrEnum):
     MALFORMED_RESPONSE = "malformed_response"
     """Body was not parseable as the declared content type."""
 
+    MALFORMED_REQUEST = "malformed_request"
+    """Vendor 4xx: the request itself is wrong (bad window, bad parameter).
+
+    Deliberately **not** retryable. The same request will be refused every time,
+    so retrying only burns the attempt budget and buries the cause under a
+    generic transient label — a too-wide window or a misspelled field then looks
+    like a flaky vendor instead of the wiring bug it is.
+    """
+
     @property
     def retryable(self) -> bool:
         """Whether retrying the same window could plausibly succeed.
@@ -40,6 +49,12 @@ class FetchFailure(StrEnum):
             FetchFailure.RATE_LIMIT,
             FetchFailure.PROVIDER_ERROR,
             FetchFailure.TRANSPORT_ERROR,
+            # An unparseable *response* is usually an intermediary having a bad
+            # moment — an HTML error page from a gateway where JSON was
+            # promised — so the same request may well succeed shortly. That is
+            # the opposite of ``MALFORMED_REQUEST``, where *our* request is
+            # wrong and will be refused identically every time.
+            FetchFailure.MALFORMED_RESPONSE,
         }
 
 

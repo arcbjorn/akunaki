@@ -160,10 +160,31 @@ _PROVIDER_ALL_STREAMS: dict[str, tuple[tuple[str, str], ...]] = {
     "oura": (
         ("sleep", "oura.v2"),
         ("daily_activity", "oura_activity.v2"),
+        # Retained-only: fetched and kept with full lineage, normalized by
+        # nothing. `oura_raw.` reaches no normalizer branch, so these write raw
+        # revisions and no facts — deliberate, not an oversight. Several carry a
+        # vendor 0-100 score that v0.1.0 does not surface (one score ships, and
+        # a second would imply a formula nobody accepted); the rest have no
+        # canonical detail table yet. Retaining them now means a normalizer
+        # added later re-runs over real history instead of starting empty.
+        ("daily_readiness", "oura_raw.daily_readiness.v2"),
+        ("daily_sleep", "oura_raw.daily_sleep.v2"),
+        ("daily_stress", "oura_raw.daily_stress.v2"),
+        ("daily_cardiovascular_age", "oura_raw.daily_cardiovascular_age.v2"),
+        ("daily_resilience", "oura_raw.daily_resilience.v2"),
+        ("vo2_max", "oura_raw.vo2_max.v2"),
+        ("sleep_time", "oura_raw.sleep_time.v2"),
+        ("session", "oura_raw.session.v2"),
+        ("workout", "oura_raw.workout.v2"),
+        ("heartrate", "oura_raw.heartrate.v2"),
     ),
     "polar": (
         ("workout", "polar.v1"),
         ("daily_activity", "polar_activity.v1"),
+        # Retained-only (see the Oura block above for the rationale).
+        ("sleep", "polar_raw.sleep.v1"),
+        ("nightly_recharge", "polar_raw.nightly_recharge.v1"),
+        ("continuous_heart_rate", "polar_raw.continuous_heart_rate.v1"),
     ),
     "google_health": (
         ("sleep", "google_health.v4"),
@@ -564,6 +585,13 @@ class InitialSyncHandler:
         detail = f"fetch failed: {failure}"
         if retry_after_seconds is not None:
             detail = f"{detail} (retry after {retry_after_seconds}s)"
+        # Honour the failure's own verdict rather than assuming every non-auth
+        # rejection is worth another attempt. A malformed *request* (a vendor
+        # 4xx) is refused identically every time, so retrying buries a wiring
+        # bug — a too-wide window, a misspelled parameter — under a generic
+        # "transient" label until the attempt budget is gone.
+        if failure is not None and not failure.retryable:
+            raise PermanentJobError(detail)
         raise TransientJobError(detail)
 
 
@@ -938,6 +966,20 @@ class NormalizeHandler:
             elif revision.schema_version.startswith("google_health."):
                 written, affected_days = self._normalize_google_sleep(claim, revision, now)
                 sleep_bearing = True
+            elif _is_retained_only(revision.schema_version):
+                # Retained-only: the payload is kept with full lineage and
+                # normalized by nothing. This branch is **explicit** rather than
+                # left to the fallback below, which normalizes anything it does
+                # not recognize as an Oura sleep page — a heart-rate series
+                # reaching it would be parsed as sleep and dead-letter the job.
+                logger.info(
+                    "retained raw revision, no normalizer",
+                    extra={
+                        "raw_revision_id": revision_id,
+                        "schema_version": revision.schema_version,
+                    },
+                )
+                return
             else:
                 sleep_bearing = True
                 sleep_facts = normalize_sleep_payload(revision.payload_text)
@@ -1104,3 +1146,14 @@ def _parse_normalize_payload(payload_json: str) -> dict[str, str]:
         msg = "payload must contain raw_revision_id"
         raise PermanentJobError(msg)
     return {str(k): v for k, v in parsed.items()}
+
+
+# Schema-version prefixes that are deliberately fetched and retained but never
+# normalized. Naming the convention in one place keeps "no normalizer yet" a
+# declared decision rather than something inferred from a missing branch.
+_RETAINED_ONLY_PREFIXES = ("oura_raw.", "polar_raw.", "google_health_raw.")
+
+
+def _is_retained_only(schema_version: str) -> bool:
+    """Whether a schema version is retained raw with no normalizer."""
+    return schema_version.startswith(_RETAINED_ONLY_PREFIXES)

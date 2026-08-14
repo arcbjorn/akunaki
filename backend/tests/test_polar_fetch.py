@@ -126,7 +126,7 @@ def test_unsupported_stream_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported Polar stream"):
         PolarFetchClient().fetch_page(
             access_token="AT",
-            stream="sleep",
+            stream="not_a_polar_stream",
             window_start=WINDOW_START,
             window_end=WINDOW_END,
             page_token=None,

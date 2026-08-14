@@ -71,12 +71,24 @@ STREAM_PATHS = {
     # Daily activity summaries. Unlike `exercises`, this resource **does** take
     # a date window (`from`/`to`), capped by the vendor at 28 days per request.
     "daily_activity": "users/activities",
+    # Retained-only streams: fetched and kept as immutable raw payloads with
+    # full lineage, normalized by nothing yet. Retaining them now means a
+    # normalizer added later can re-run over real history rather than starting
+    # from the day it ships.
+    "sleep": "users/sleep",
+    "nightly_recharge": "users/nightly-recharge",
+    "continuous_heart_rate": "users/continuous-heart-rate",
 }
 
 # Streams whose resource accepts a date window, and the vendor's cap on its
-# width. A stream absent here takes no window (the request sends none).
+# width. A stream absent here takes no window (the request sends none) — which
+# for `exercises` is what makes a stale cursor unable to lose data, since the
+# vendor always returns its whole retention set regardless of what we ask.
 STREAM_WINDOW_DAYS = {
     "daily_activity": 28,
+    "sleep": 28,
+    "nightly_recharge": 28,
+    "continuous_heart_rate": 28,
 }
 
 
@@ -135,23 +147,23 @@ class PolarFetchClient:
             raise ValueError(msg)
 
         url = f"{self._api_base}/{path}"
-        if stream == "workout":
-            # `zones=true` inlines each exercise's HR-zone durations, which is
-            # what the canonical zone-load computation needs; without it the
-            # exercises come back without `heart_rate_zones` and normalize to
-            # nothing. No date filter is sent — see the module docstring: that
-            # absence is what makes a stale cursor unable to lose data.
-            params = {"zones": "true"}
+        max_days = STREAM_WINDOW_DAYS.get(stream)
+        if max_days is None:
+            # No date filter is sent — see the module docstring: that absence is
+            # what makes a stale cursor unable to lose data on this resource.
+            params = {}
+            if stream == "workout":
+                # `zones=true` inlines each exercise's HR-zone durations, which
+                # the canonical zone-load computation needs; without it the
+                # exercises come back with no `heart_rate_zones` and normalize
+                # to nothing.
+                params["zones"] = "true"
         else:
-            # The daily-activity resource *does* window, and the vendor caps the
-            # span. A wider request is refused outright, so the window is
-            # clamped rather than sent as asked; re-read days dedupe on content
-            # hash, so clamping costs vendor calls, never data.
-            max_days = STREAM_WINDOW_DAYS.get(stream)
-            clamped_start = start
-            if max_days is not None:
-                floor = end - timedelta(days=max_days)
-                clamped_start = max(start, floor)
+            # A windowed resource, capped by the vendor. A wider request is
+            # refused outright, so the window is clamped rather than sent as
+            # asked; re-read days dedupe on content hash, so clamping costs
+            # vendor calls, never data.
+            clamped_start = max(start, end - timedelta(days=max_days))
             params = {
                 "from": clamped_start.date().isoformat(),
                 "to": end.date().isoformat(),

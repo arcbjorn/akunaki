@@ -14,6 +14,7 @@ from akunaki.application.sync_handlers import (
     INCREMENTAL_SYNC_JOB_TYPE,
     RECONCILE_SWEEP_JOB_TYPE,
     ReconcileSweepHandler,
+    streams_for_provider,
 )
 from akunaki.domain.jobs import JobClaim, JobRole, to_utc_rfc3339
 
@@ -98,8 +99,9 @@ def test_enqueues_one_incremental_sync_per_stale_connection() -> None:
 
     handler(_claim())
 
-    # One job per (connection, stream): two connections x Polar's two streams.
-    assert len(jobs.calls) == 4
+    # One job per (connection, stream), for every stream Polar serves.
+    expected = 2 * len(streams_for_provider("polar"))
+    assert len(jobs.calls) == expected
     assert {c.job_type for c in jobs.calls} == {INCREMENTAL_SYNC_JOB_TYPE}
     # Each carries its own connection and tenant, keyed for idempotence.
     by_conn = {json.loads(c.payload_json)["connection_id"]: c for c in jobs.calls}
@@ -137,7 +139,9 @@ def test_no_stale_connections_enqueues_nothing() -> None:
 def test_already_queued_connection_is_not_double_scheduled() -> None:
     # The idempotency key already exists (a webhook queued it): enqueue is a
     # no-op (created=False), so the sweep does not pile on.
-    jobs = _FakeJobs(existing_keys={"reconcile:conn-a:workout", "reconcile:conn-a:daily_activity"})
+    jobs = _FakeJobs(
+        existing_keys={f"reconcile:conn-a:{stream}" for stream, _ in streams_for_provider("polar")}
+    )
     handler = ReconcileSweepHandler(
         connections=_FakeConnections([("conn-a", "tenant-1", "polar")]),
         jobs=jobs,
@@ -146,7 +150,7 @@ def test_already_queued_connection_is_not_double_scheduled() -> None:
     )
     handler(_claim())
     # The calls are made (idempotent enqueue), but nothing new was created.
-    assert len(jobs.calls) == 2
+    assert len(jobs.calls) == len(streams_for_provider("polar"))
     assert all(call.created is False for call in jobs.calls)
 
 
@@ -168,7 +172,7 @@ def test_multi_stream_provider_fans_out_one_job_per_stream() -> None:
     handler(_claim())
 
     streams = sorted(json.loads(c.payload_json)["stream"] for c in jobs.calls)
-    assert streams == ["daily_activity", "sleep"]
+    assert streams == sorted(s for s, _ in streams_for_provider("oura"))
     # Distinct idempotency keys, or one stream would suppress the other.
     assert len({c.idempotency_key for c in jobs.calls}) == len(jobs.calls)
 

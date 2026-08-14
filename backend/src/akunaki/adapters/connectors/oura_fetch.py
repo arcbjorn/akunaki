@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx2
 
@@ -32,6 +32,35 @@ STREAM_PATHS = {
     "daily_readiness": "daily_readiness",
     "daily_activity": "daily_activity",
     "workout": "workout",
+    # Retained-only streams: fetched and kept as immutable raw payloads with
+    # full lineage, but not normalized into facts. Several carry a vendor 0-100
+    # score (readiness, sleep) that v0.1.0 deliberately does not surface — the
+    # product ships exactly one score, and publishing a second would imply a
+    # formula nobody accepted. Retaining them now means a normalizer added later
+    # can be re-run over history rather than starting from the day it shipped.
+    "daily_stress": "daily_stress",
+    "daily_cardiovascular_age": "daily_cardiovascular_age",
+    "daily_resilience": "daily_resilience",
+    "vo2_max": "vO2_max",
+    "sleep_time": "sleep_time",
+    "session": "session",
+    "heartrate": "heartrate",
+}
+
+# Streams whose window is expressed as **instants**, not local dates. Oura's
+# collections filter on `start_date`/`end_date`, but the heart-rate series is
+# sampled continuously and takes `start_datetime`/`end_datetime`; sending dates
+# there returns a 422 rather than a day's samples.
+DATETIME_WINDOW_STREAMS = frozenset({"heartrate"})
+
+# Vendor **maximum** window width per request, in days. Oura refuses a
+# heart-rate range wider than 30 days ("Timerange between start and endtime has
+# to be less than or equal to 30 days") — and the default backfill asks for 30
+# days *plus* a 36-hour overlap, which is just over the line. Clamping costs the
+# oldest hours of one call, which the next sync's own window covers; not
+# clamping means the stream never ingests anything at all.
+STREAM_MAX_WINDOW_DAYS = {
+    "heartrate": 30,
 }
 
 
@@ -83,11 +112,25 @@ class OuraFetchClient:
             msg = "window_end must not precede window_start"
             raise ValueError(msg)
 
-        # Oura V2 collections filter on local dates, not instants.
-        params: dict[str, str] = {
-            "start_date": start.date().isoformat(),
-            "end_date": end.date().isoformat(),
-        }
+        # Clamp to the vendor's ceiling for this stream before building the
+        # window, so a too-wide lookback trims rather than being refused whole.
+        max_days = STREAM_MAX_WINDOW_DAYS.get(stream)
+        if max_days is not None:
+            start = max(start, end - timedelta(days=max_days))
+
+        # Oura V2 collections filter on local dates, not instants — except the
+        # continuously-sampled series, which take instants and reject dates.
+        params: dict[str, str] = (
+            {
+                "start_datetime": to_utc_rfc3339(start),
+                "end_datetime": to_utc_rfc3339(end),
+            }
+            if stream in DATETIME_WINDOW_STREAMS
+            else {
+                "start_date": start.date().isoformat(),
+                "end_date": end.date().isoformat(),
+            }
+        )
         if page_token:
             params["next_token"] = page_token
 
@@ -130,11 +173,13 @@ class OuraFetchClient:
                 http_status=response.status_code,
                 content_type=response.headers.get("content-type"),
                 fetched_at=to_utc_rfc3339(require_aware(now, field_name="now")),
-                # Redacted: a path template and date bounds, never the token.
+                # Redacted: a path template and the window bounds actually
+                # sent, never the token. Echoing the real parameter names keeps
+                # the retained record honest about how the window was expressed,
+                # which differs between the date and datetime collections.
                 request_meta={
                     "url_template": f"v2/usercollection/{path}",
-                    "start_date": params["start_date"],
-                    "end_date": params["end_date"],
+                    **{key: value for key, value in params.items() if key != "next_token"},
                 },
                 page_token=page_token,
                 next_page_token=next_token,
@@ -168,10 +213,16 @@ class OuraFetchClient:
             failure = FetchFailure.UNAUTHORIZED
         elif status == 429:
             failure = FetchFailure.RATE_LIMIT
+        elif 400 <= status < 500:
+            # A 4xx is a request-shape bug on our side: the same request will be
+            # refused every time, so retrying only burns the attempt budget and
+            # buries the cause under a generic "transient" label. Reported as
+            # malformed — permanent, and named — so a wrong window or parameter
+            # surfaces on the first attempt instead of after the budget is gone.
+            failure = FetchFailure.MALFORMED_REQUEST
         else:
-            # 5xx is transient; other 4xx is a request-shape bug on our side.
-            # Both are non-auth, so neither should flip the connection to
-            # needs_reauth — the job's retry budget bounds them instead.
+            # 5xx: the vendor is unwell, and a retry may well succeed. Non-auth,
+            # so it must not flip the connection to needs_reauth.
             failure = FetchFailure.PROVIDER_ERROR
 
         logger.warning(

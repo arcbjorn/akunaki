@@ -31,6 +31,7 @@ from akunaki.application.sync_handlers import (
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
     RECONCILE_SWEEP_JOB_TYPE,
+    streams_for_provider,
 )
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import Settings, clear_settings_cache
@@ -139,13 +140,11 @@ def test_reconcile_sweep_enqueues_a_syncable_job(
             select(Job).where(Job.job_type == INCREMENTAL_SYNC_JOB_TYPE)
         ).all()
         sweep = session.get(Job, "sweep-1")
-    # One job per stream the provider serves (Oura: sleep + daily_activity), so
-    # each stream keeps its own cursor and retry budget.
-    assert len(incremental) == 2
-    assert {json.loads(j.payload_json)["stream"] for j in incremental} == {
-        "sleep",
-        "daily_activity",
-    }
+    # One job per stream the provider serves, so each stream keeps its own
+    # cursor and retry budget.
+    expected_streams = {stream for stream, _ in streams_for_provider("oura")}
+    assert len(incremental) == len(expected_streams)
+    assert {json.loads(j.payload_json)["stream"] for j in incremental} == expected_streams
     assert {j.tenant_id for j in incremental} == {"tenant-1"}
     # The sweep job itself completed (it did not dead-letter for a missing handler).
     assert sweep is not None
