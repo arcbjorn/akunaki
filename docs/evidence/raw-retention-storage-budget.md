@@ -63,6 +63,35 @@ Heart rate alone costs 8.3 MB/yr — roughly equal to everything else combined,
 **not** dominant. Sampling it would halve an already trivial number while
 permanently discarding the highest-resolution signal the system receives.
 
+## Correction: the projection held only after a splitting fix (2026-08-14)
+
+The table above measures **vendor bytes**, and on that basis it was right. The
+first full run against all streams nevertheless produced a **10.8 MB** database
+from ~30 days of data — roughly eight times the whole-year projection — because
+of how the raw layer identified records, not how much data arrived.
+
+Per-record splitting exists so a vendor correcting one night revisions only that
+night. Heart-rate samples carry no vendor id, so each fell back to a
+`hash:<body>` identity: one raw object, one revision, and one **no-op normalize
+job per 15-second sample**. One month produced 4,406 revisions and 4,049
+permanently pending jobs, and the `jobs` table grew larger than the data it
+described.
+
+Retained-only streams are now ingested as one slice per page and enqueue no
+normalize job, since neither buys anything where no fact is ever written. Same
+data, same retention, measured again on a clean database:
+
+| | Before | After |
+|---|-------:|------:|
+| Database | 10.8 MB | **4.2 MB** |
+| Raw revisions | 4,629 | **95** |
+| Jobs | 4,725 | **189** |
+| Pending jobs | 4,049 | **0** |
+
+The lesson worth keeping: a storage budget measured in vendor bytes says nothing
+about *identity granularity*, and it is granularity that multiplies rows. The
+byte projection was necessary but not sufficient.
+
 ## Why this matters beyond the number
 
 Raw retention is not a cache. Facts are versioned and re-derivable, so a
