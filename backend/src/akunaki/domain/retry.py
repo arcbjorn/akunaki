@@ -54,8 +54,27 @@ def classify_exception(exc: BaseException) -> FailureKind:
     if isinstance(exc, TransientJobError):
         return FailureKind.TRANSIENT
     if isinstance(exc, ValueError | TypeError | KeyError | NotImplementedError):
+        # One exception to the exception: the libSQL driver signals write
+        # contention as a bare ``ValueError("database is locked")``. That is the
+        # most transient failure there is — the row is simply busy — but it
+        # would be dead-lettered on the first hit as a deployment bug, silently
+        # losing that job's work while a retry moments later would succeed.
+        # Matched on the message because the driver raises no dedicated type.
+        if _is_lock_contention(exc):
+            return FailureKind.TRANSIENT
         return FailureKind.PERMANENT
     return FailureKind.TRANSIENT
+
+
+def _is_lock_contention(exc: BaseException) -> bool:
+    """Whether an exception is a database busy/locked signal.
+
+    Deliberately narrow: only the driver's own contention wording counts, so a
+    real ``ValueError`` from a genuine bug still dead-letters immediately rather
+    than retrying until the attempt budget is gone.
+    """
+    text = str(exc).lower()
+    return "database is locked" in text or "database table is locked" in text
 
 
 def error_class_of(exc: BaseException) -> str:

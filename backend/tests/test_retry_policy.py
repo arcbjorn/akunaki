@@ -88,3 +88,28 @@ def test_error_class_and_message_are_capped_and_phi_free() -> None:
     long = redact_error_message(_BoomError("y" * 900))
     assert long is not None
     assert len(long) == 500
+
+
+def test_lock_contention_is_transient_not_permanent() -> None:
+    """The libSQL driver signals write contention as a bare ``ValueError``.
+
+    Classified as permanent it dead-letters on the first hit — silently losing
+    that job's work — when a retry moments later would simply succeed. It is the
+    most transient failure there is: the row was busy.
+    """
+    assert classify_exception(ValueError("database is locked")) is FailureKind.TRANSIENT
+    assert classify_exception(ValueError("database table is locked")) is FailureKind.TRANSIENT
+    # Case-insensitive: the wording reaches us straight from the driver.
+    assert classify_exception(ValueError("Database Is Locked")) is FailureKind.TRANSIENT
+
+
+def test_ordinary_value_errors_still_dead_letter() -> None:
+    """The lock carve-out must stay narrow.
+
+    A genuine bug raising ``ValueError`` should still fail immediately rather
+    than retry until the attempt budget is gone.
+    """
+    assert classify_exception(ValueError("payload must contain connection_id")) is (
+        FailureKind.PERMANENT
+    )
+    assert classify_exception(ValueError("locked out of account")) is FailureKind.PERMANENT
