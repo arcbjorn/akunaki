@@ -135,6 +135,11 @@ jobs:
         run: |
           set -euo pipefail
           export AKUNAKI_DATABASE_URL="sqlite+libsql:///$(mktemp -d)/boot.db"
+          # The worker seals/unseals connector secrets, so a KEK is core
+          # configuration (not model configuration) and boot fails fast
+          # without one. An ephemeral throwaway key keeps that fail-fast
+          # honest while the model boundary stays credential-free.
+          export AKUNAKI_SECRET_KEKS="v1:$(openssl rand -base64 32)"
           uv run alembic upgrade head
           uv run python - <<'PY'
           import os, threading
