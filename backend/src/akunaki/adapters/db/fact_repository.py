@@ -31,7 +31,9 @@ from akunaki.domain.activity_normalizer import (
 )
 from akunaki.domain.activity_normalizer import (
     ActivityFact,
+    merged_activity_fact,
 )
+from akunaki.domain.connections import provider_for_schema_version
 from akunaki.domain.jobs import parse_utc_rfc3339, require_aware, to_utc_rfc3339
 from akunaki.domain.sleep_consistency import midpoint_local_minutes
 from akunaki.domain.sleep_normalizer import ENTITY_TYPE, NORMALIZER_VERSION, SleepFact
@@ -438,6 +440,14 @@ class FactRepository:
             raise ValueError(msg)
 
         now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
+        # An unattributable fact must not be written: the column is NOT NULL, so
+        # the only alternatives are a guessed provider (which would silently
+        # mis-rank it in source selection) or failing here. A schema version with
+        # no provider is a wiring gap in the connector, not a data condition.
+        provider = provider_for_schema_version(schema_version)
+        if provider is None:
+            msg = f"no provider for schema version {schema_version!r}"
+            raise ValueError(msg)
 
         with self._session_factory() as session, session.begin():
             current = session.execute(
@@ -447,6 +457,18 @@ class FactRepository:
                     FactRecord.is_current == 1,
                 )
             ).scalar_one_or_none()
+
+            # A day's signals can arrive on **separate streams**: Google Health
+            # reports steps and active minutes as different v4 data types, so
+            # each sync writes a fact carrying one signal and a null other. Left
+            # alone, the second write supersedes the first and the day ends up
+            # holding whichever stream synced last, with the other reading null
+            # — both measured, only one kept. Carry the absent signal forward
+            # from the version being superseded so the day accumulates instead.
+            #
+            # Only a *null* is filled in; a present value is never overwritten by
+            # an older one, so this cannot resurrect a stale reading.
+            fact = _merge_activity_signals(fact, current, session)
 
             if current is not None and current.content_hash == fact.content_hash:
                 return FactWriteOutcome(
@@ -476,7 +498,12 @@ class FactRepository:
                     id=fact_record_id,
                     tenant_id=tenant_id,
                     connection_id=connection_id,
-                    provider="google_health",
+                    # Derived from the revision's schema version, never fixed to
+                    # one connector: all three providers write daily activity,
+                    # and the source policy groups candidates by this column, so
+                    # a hardcoded provider would make every activity fact look
+                    # like it came from one source and no contest could resolve.
+                    provider=provider,
                     entity_type=ACTIVITY_ENTITY_TYPE,
                     vendor_record_id=fact.vendor_record_id,
                     origin=None,
@@ -1078,3 +1105,27 @@ def _authoritative_per_day(by_day: dict[str, dict[str, float]]) -> dict[str, flo
         if chosen is not None:
             result[day] = per_provider[chosen]
     return result
+
+
+def _merge_activity_signals(
+    fact: ActivityFact,
+    current: FactRecord | None,
+    session: Session,
+) -> ActivityFact:
+    """Fill a fact's absent activity signals from the version it supersedes.
+
+    Returns ``fact`` unchanged when there is no prior version or nothing to
+    carry forward, so a first write and a full-signal write are untouched.
+    """
+    if current is None:
+        return fact
+    if fact.steps is not None and fact.active_minutes is not None:
+        return fact
+    detail = session.get(DailyActivity, current.id)
+    if detail is None:
+        return fact
+    return merged_activity_fact(
+        fact,
+        steps=detail.steps,
+        active_minutes=detail.active_minutes,
+    )
