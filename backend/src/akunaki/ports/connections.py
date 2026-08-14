@@ -51,6 +51,22 @@ class ConnectionRepositoryPort(Protocol):
         """Transition a connection's status. False when the connection is unknown."""
         ...
 
+    def replace_sealed_secret(
+        self,
+        *,
+        connection_id: str,
+        sealed_secret: SealedSecret,
+        now: datetime,
+    ) -> bool:
+        """Replace a connection's stored credentials in place.
+
+        Used when a refreshed access token supersedes the stored one. The
+        connection's identity is untouched, so the envelope's AAD binding stays
+        valid and every foreign key elsewhere keeps pointing at the same row.
+        Returns False when the connection has no secret to replace.
+        """
+        ...
+
     def get_sealed_secret(self, *, connection_id: str) -> SealedSecret | None:
         """Return the stored sealed tokens for a connection, if any."""
         ...

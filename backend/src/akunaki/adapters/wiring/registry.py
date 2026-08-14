@@ -22,6 +22,7 @@ from collections.abc import Callable
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.connectors.google_health_fetch import GoogleHealthFetchClient
+from akunaki.adapters.connectors.oauth_client_factory import build_oauth_client
 from akunaki.adapters.connectors.oura_fetch import OuraFetchClient
 from akunaki.adapters.connectors.polar_fetch import PolarFetchClient
 from akunaki.adapters.crypto.config import build_sealer
@@ -102,6 +103,12 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
     initial: dict[tuple[str, str], Callable[..., None]] = {}
     incremental: dict[tuple[str, str], Callable[..., None]] = {}
     for provider, make_client in _FETCH_CLIENTS.items():
+        # The OAuth client lets a sync renew an expiring access token before
+        # spending a request on it. A provider whose credentials are not
+        # configured gets None, and simply never refreshes — the connection then
+        # behaves exactly as it did before refresh existed.
+        oauth_config = settings.connector_oauth(provider)
+        oauth_client = build_oauth_client(provider, oauth_config) if oauth_config else None
         for stream, _schema in streams_for_provider(provider):
             config = sync_config_for_provider(provider, stream=stream)
             backfill = InitialSyncHandler(
@@ -112,6 +119,7 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
                 new_id=_new_id,
                 config=config,
                 sync_runs=sync_runs,
+                oauth_client=oauth_client,
             )
             initial[provider, stream] = backfill
             incremental[provider, stream] = IncrementalSyncHandler(

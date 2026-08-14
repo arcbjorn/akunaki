@@ -315,6 +315,35 @@ class ConnectionRepository:
             ciphertext, key_version = row
             return SealedSecret(ciphertext=ciphertext, key_version=key_version)
 
+    def replace_sealed_secret(
+        self,
+        *,
+        connection_id: str,
+        sealed_secret: SealedSecret,
+        now: datetime,
+    ) -> bool:
+        """Replace a connection's stored credentials in place.
+
+        Updates rather than deletes-and-inserts, so the row (and the AAD binding
+        its ciphertext carries) is never briefly absent: a crash mid-write leaves
+        the previous credentials intact rather than a connection with none.
+        """
+        if not connection_id:
+            msg = "connection_id must be non-empty"
+            raise ValueError(msg)
+        now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
+        with self._session_factory() as session, session.begin():
+            result = session.execute(
+                update(ConnectionSecret)
+                .where(ConnectionSecret.connection_id == connection_id)
+                .values(
+                    ciphertext=sealed_secret.ciphertext,
+                    key_version=sealed_secret.key_version,
+                    rotated_at=now_s,
+                )
+            )
+            return bool(result.rowcount)  # type: ignore[attr-defined]
+
     def revoke(self, *, tenant_id: str, connection_id: str, now: datetime) -> bool:
         """Disconnect: drop the stored secret and mark the connection revoked.
 

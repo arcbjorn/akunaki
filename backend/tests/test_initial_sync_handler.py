@@ -41,6 +41,12 @@ from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.connections import ConnectionStatus, Provider
 from akunaki.domain.jobs import JobStatus, to_utc_rfc3339
 from akunaki.domain.secrets import SealedSecret
+from akunaki.domain.tokens import (
+    EnrollmentResult,
+    OAuthTokens,
+    TokenExchangeFailure,
+    TokenExchangeResult,
+)
 
 T0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -702,3 +708,186 @@ def test_a_failed_run_records_a_zero_count(factory: sessionmaker[Session]) -> No
 
     assert run.status == "failed"
     assert run.new_revisions == 0
+
+
+# ---------------------------------------------------------------------------
+# Proactive token refresh
+# ---------------------------------------------------------------------------
+
+
+class _StubOAuthClient:
+    """Records refresh calls and returns a canned result."""
+
+    def __init__(self, result: TokenExchangeResult) -> None:
+        self._result = result
+        self.refreshed_with: list[str] = []
+
+    @property
+    def provider(self) -> str:
+        return "oura"
+
+    @property
+    def uses_pkce(self) -> bool:
+        return True
+
+    @property
+    def requires_enrollment(self) -> bool:
+        return False
+
+    def authorize_url(
+        self,
+        *,
+        state: str,
+        code_challenge: str | None,
+        redirect_uri: str,
+        scopes: tuple[str, ...],
+    ) -> str:  # pragma: no cover - unused
+        return ""
+
+    def exchange_code(
+        self,
+        *,
+        code: str,
+        code_verifier: str | None,
+        redirect_uri: str,
+        now: datetime,
+    ) -> TokenExchangeResult:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    def enroll_user(
+        self,
+        *,
+        access_token: str,
+        external_user_id: str | None,
+    ) -> EnrollmentResult:  # pragma: no cover - unused
+        return EnrollmentResult()
+
+    def refresh(self, *, refresh_token: str, now: datetime) -> TokenExchangeResult:
+        self.refreshed_with.append(refresh_token)
+        return self._result
+
+
+def _seed_expiring_connection(factory: sessionmaker[Session], expires_at: str | None) -> None:
+    sealer = EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1")
+    ConnectionRepository(factory).replace_sealed_secret(
+        connection_id="conn-1",
+        sealed_secret=sealer.seal(
+            json.dumps(
+                {
+                    "access_token": "stale-access",
+                    "refresh_token": "the-refresh-token",
+                    "expires_at": expires_at,
+                }
+            ).encode(),
+            aad=b"conn-1",
+        ),
+        now=T0,
+    )
+
+
+def _stored_tokens(factory: sessionmaker[Session]) -> dict[str, object]:
+    sealer = EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1")
+    sealed = ConnectionRepository(factory).get_sealed_secret(connection_id="conn-1")
+    assert sealed is not None
+    return dict(json.loads(sealer.open(sealed, aad=b"conn-1")))
+
+
+def _refreshing_handler(
+    factory: sessionmaker[Session],
+    responder: Callable[[httpx2.Request], httpx2.Response],
+    oauth: _StubOAuthClient,
+) -> InitialSyncHandler:
+    ids = (f"id-{n}" for n in _ID_COUNTER)
+    return InitialSyncHandler(
+        fetch_client=OuraFetchClient(
+            transport=httpx2.Client(transport=httpx2.MockTransport(responder))
+        ),
+        ingestion=IngestionRepository(factory),
+        connections=ConnectionRepository(factory),
+        sealer=EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1"),
+        new_id=lambda: next(ids),
+        config=SyncConfig(max_pages=5),
+        clock=lambda: T0,
+        oauth_client=oauth,
+    )
+
+
+def test_expired_token_is_refreshed_and_persisted(factory: sessionmaker[Session]) -> None:
+    """An expiring token is renewed before the fetch, not after a 401.
+
+    Reacting to the 401 would flip the connection to `needs_reauth` — demanding
+    manual re-consent — for a condition the stored refresh token resolves.
+    """
+    _seed_expiring_connection(factory, expires_at="2026-07-18T00:00:00Z")  # before T0
+    oauth = _StubOAuthClient(
+        TokenExchangeResult(
+            tokens=OAuthTokens(
+                access_token="fresh-access",
+                refresh_token=None,
+                expires_at="2026-07-19T00:00:00Z",
+                scopes=(),
+                token_type="bearer",
+            )
+        )
+    )
+    seen: list[str] = []
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.headers.get("authorization", ""))
+        return httpx2.Response(200, json={"data": []})
+
+    _run_job(factory, _refreshing_handler(factory, responder, oauth))
+
+    # The refresh used the stored token, and the fetch used the new one.
+    assert oauth.refreshed_with == ["the-refresh-token"]
+    assert seen == ["Bearer fresh-access"]
+    # The new token is persisted, so the next sync starts from it.
+    stored = _stored_tokens(factory)
+    assert stored["access_token"] == "fresh-access"
+    # Google omits `refresh_token` on refresh; dropping it would strand the
+    # connection at the next expiry.
+    assert stored["refresh_token"] == "the-refresh-token"
+
+
+def test_valid_token_is_not_refreshed(factory: sessionmaker[Session]) -> None:
+    """A token with time left must not spend a refresh call."""
+    _seed_expiring_connection(factory, expires_at="2026-08-01T00:00:00Z")  # long after T0
+    oauth = _StubOAuthClient(TokenExchangeResult(failure=TokenExchangeFailure.PROVIDER_ERROR))
+
+    _run_job(factory, _refreshing_handler(factory, _ok(json.dumps({"data": []})), oauth))
+
+    assert oauth.refreshed_with == []
+    assert _stored_tokens(factory)["access_token"] == "stale-access"
+
+
+def test_token_without_an_expiry_is_not_refreshed(factory: sessionmaker[Session]) -> None:
+    """Polar issues long-lived tokens with no expiry; never burn the grant."""
+    _seed_expiring_connection(factory, expires_at=None)
+    oauth = _StubOAuthClient(TokenExchangeResult(failure=TokenExchangeFailure.PROVIDER_ERROR))
+
+    _run_job(factory, _refreshing_handler(factory, _ok(json.dumps({"data": []})), oauth))
+
+    assert oauth.refreshed_with == []
+
+
+def test_failed_refresh_falls_back_to_the_stored_token(
+    factory: sessionmaker[Session],
+) -> None:
+    """A broken refresh must never be worse than no refresh at all.
+
+    The stored token is used as before, and the fetch's own 401 handling takes
+    over if it really was dead.
+    """
+    _seed_expiring_connection(factory, expires_at="2026-07-18T00:00:00Z")
+    oauth = _StubOAuthClient(TokenExchangeResult(failure=TokenExchangeFailure.PROVIDER_ERROR))
+    seen: list[str] = []
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.headers.get("authorization", ""))
+        return httpx2.Response(200, json={"data": []})
+
+    _run_job(factory, _refreshing_handler(factory, responder, oauth))
+
+    assert seen == ["Bearer stale-access"]
+    # Nothing was overwritten by a failed refresh.
+    assert _stored_tokens(factory)["access_token"] == "stale-access"

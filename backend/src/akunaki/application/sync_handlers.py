@@ -56,6 +56,7 @@ from akunaki.domain.source_policy import (
     decide_selection,
 )
 from akunaki.domain.sync_runs import SyncRunStatus, SyncRunTrigger
+from akunaki.domain.tokens import merge_refreshed_tokens, needs_refresh
 from akunaki.domain.vitals_normalizer import normalize_vitals_payload
 from akunaki.domain.workout_normalizer import normalize_workout_payload
 from akunaki.ports.connections import ConnectionRepositoryPort
@@ -68,6 +69,7 @@ from akunaki.ports.facts import (
 )
 from akunaki.ports.fetch import ConnectorFetchPort, IngestionRepositoryPort
 from akunaki.ports.jobs import JobRepositoryPort
+from akunaki.ports.oauth_client import OAuthClientPort
 from akunaki.ports.secrets import SecretSealerPort
 from akunaki.ports.sync_runs import SyncRunRecorderPort
 
@@ -277,6 +279,7 @@ class InitialSyncHandler:
         config: SyncConfig | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         sync_runs: SyncRunRecorderPort | None = None,
+        oauth_client: OAuthClientPort | None = None,
     ) -> None:
         self._fetch = fetch_client
         self._ingestion = ingestion
@@ -289,6 +292,10 @@ class InitialSyncHandler:
         # the worker wires it, and an unwired handler syncs exactly as before
         # rather than failing.
         self._sync_runs = sync_runs
+        # Optional for the same reason: without it an expiring token simply is
+        # not refreshed (the pre-existing behaviour), rather than the handler
+        # refusing to construct.
+        self._oauth_client = oauth_client
 
     def __call__(self, claim: JobClaim) -> None:
         """Execute one initial-sync job."""
@@ -536,7 +543,7 @@ class InitialSyncHandler:
         return min(window_start, window_end - min_window)
 
     def _open_access_token(self, connection_id: str) -> str:
-        """Open the sealed tokens for a connection, or fail permanently."""
+        """Open the sealed tokens for a connection, refreshing if due."""
         sealed = self._connections.get_sealed_secret(connection_id=connection_id)
         if sealed is None:
             msg = "connection has no stored credentials"
@@ -547,11 +554,69 @@ class InitialSyncHandler:
             # A KEK gap will not fix itself by retrying.
             msg = "stored credentials could not be opened"
             raise PermanentJobError(msg) from exc
-        token = json.loads(opened).get("access_token")
+
+        stored = json.loads(opened)
+        stored = self._refresh_if_due(connection_id, stored)
+
+        token = stored.get("access_token")
         if not token:
             msg = "stored credentials contain no access token"
             raise PermanentJobError(msg)
         return str(token)
+
+    def _refresh_if_due(
+        self,
+        connection_id: str,
+        stored: dict[str, object],
+    ) -> dict[str, object]:
+        """Refresh an expiring access token and persist the result.
+
+        Proactive rather than reactive: an access token is renewed from its
+        stored expiry, not after a 401 has already failed a request. Reacting to
+        the 401 would flip the connection to ``needs_reauth`` — the path that
+        demands manual re-consent — for a condition a refresh resolves silently.
+
+        Every failure here is **non-fatal**: the stored token is returned
+        unchanged and the fetch proceeds. If it really was expired the fetch's
+        own 401 handling takes over, which is exactly the behaviour before
+        refresh existed, so a broken refresh can never be worse than no refresh.
+        """
+        if self._oauth_client is None:
+            return stored
+        refresh_token = stored.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            # Nothing to refresh with: a provider issuing long-lived tokens
+            # (Polar) supplies none, which is not an error.
+            return stored
+        expires_at = stored.get("expires_at")
+        if not isinstance(expires_at, str):
+            expires_at = None
+        if not needs_refresh(expires_at, now=self._clock()):
+            return stored
+
+        result = self._oauth_client.refresh(refresh_token=refresh_token, now=self._clock())
+        if not result.ok or result.tokens is None:
+            logger.warning(
+                "token refresh failed; using the stored token",
+                extra={
+                    "connection_id": connection_id,
+                    # A fixed vocabulary, never a provider message.
+                    "failure": str(result.failure),
+                },
+            )
+            return stored
+
+        merged = merge_refreshed_tokens(stored, result.tokens)
+        self._connections.replace_sealed_secret(
+            connection_id=connection_id,
+            sealed_secret=self._sealer.seal(
+                json.dumps(merged).encode(),
+                aad=connection_id.encode(),
+            ),
+            now=self._clock(),
+        )
+        logger.info("access token refreshed", extra={"connection_id": connection_id})
+        return merged
 
     def _handle_fetch_failure(
         self,
