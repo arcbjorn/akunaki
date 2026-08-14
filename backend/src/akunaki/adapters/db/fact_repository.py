@@ -37,7 +37,12 @@ from akunaki.domain.connections import provider_for_schema_version
 from akunaki.domain.jobs import parse_utc_rfc3339, require_aware, to_utc_rfc3339
 from akunaki.domain.sleep_consistency import midpoint_local_minutes
 from akunaki.domain.sleep_normalizer import ENTITY_TYPE, NORMALIZER_VERSION, SleepFact
-from akunaki.domain.source_policy import authoritative_sleep_provider
+from akunaki.domain.source_policy import (
+    ACTIVITY_METRIC_FAMILY,
+    authoritative_sleep_provider,
+    highest_precedence,
+    precedence_for,
+)
 from akunaki.domain.vitals_normalizer import (
     ENTITY_TYPE as VITALS_ENTITY_TYPE,
 )
@@ -557,17 +562,43 @@ class FactRepository:
     def daily_activity_steps(
         self, *, tenant_id: str, local_health_days: list[str]
     ) -> dict[str, float]:
-        """Daily step counts per local day where known; omit days with no steps.
+        """Daily step counts per local day, from the authoritative provider.
 
-        Only current, active facts count. A day with an activity fact that
-        recorded active-minutes but no steps is omitted here (steps is the
-        low-activity anomaly's primary series), never imputed as zero.
+        Every provider writes daily activity, so a day routinely carries three
+        competing facts. Selecting **one** by the activity precedence is the
+        point: without it this returned every provider's row and kept whichever
+        the planner happened to emit last — a real day read 2,739 steps or 0
+        depending purely on which connector synced most recently, and a 0 would
+        fire the low-activity anomaly on a perfectly normal day.
+
+        A day with an activity fact recording active-minutes but no steps is
+        omitted (steps is the low-activity anomaly's primary series), never
+        imputed as zero.
+        """
+        return self._authoritative_activity_metric(
+            column=DailyActivity.steps,
+            tenant_id=tenant_id,
+            local_health_days=local_health_days,
+        )
+
+    def _authoritative_activity_metric(
+        self,
+        *,
+        column: InstrumentedAttribute[float | None] | InstrumentedAttribute[int | None],
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, float]:
+        """One activity value per day, from the highest-precedence provider.
+
+        Mirrors the sleep path: read ``(day, provider)`` pairs, then let the
+        policy collapse each day to a single provider. A provider outside the
+        activity precedence contributes nothing rather than being blended in.
         """
         if not local_health_days:
             return {}
         with self._session_factory() as session:
             rows = session.execute(
-                select(FactRecord.local_health_day, DailyActivity.steps)
+                select(FactRecord.local_health_day, FactRecord.provider, column)
                 .join(DailyActivity, DailyActivity.fact_record_id == FactRecord.id)
                 .where(
                     FactRecord.tenant_id == tenant_id,
@@ -575,10 +606,25 @@ class FactRepository:
                     FactRecord.local_health_day.in_(local_health_days),
                     FactRecord.is_current == 1,
                     FactRecord.deletion_state == "active",
-                    DailyActivity.steps.is_not(None),
+                    column.is_not(None),
                 )
             ).all()
-        return {day: float(steps) for day, steps in rows if day is not None and steps is not None}
+
+        by_day: dict[str, dict[str, float]] = {}
+        for day, provider, value in rows:
+            if day is None or provider is None or value is None:
+                continue
+            by_day.setdefault(day, {})[provider] = float(value)
+
+        result: dict[str, float] = {}
+        for day, per_provider in by_day.items():
+            chosen = highest_precedence(
+                per_provider.keys(),
+                precedence=precedence_for(ACTIVITY_METRIC_FAMILY),
+            )
+            if chosen is not None:
+                result[day] = per_provider[chosen]
+        return result
 
     def current_sleep_facts(self, *, tenant_id: str, local_health_day: str) -> list[str]:
         """Return current sleep fact ids for a local day (newest schema first)."""

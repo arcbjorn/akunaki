@@ -245,7 +245,7 @@ def _decide(
     and a re-record dedupes instead of writing a new version.
     """
     present = {provider: facts for provider, facts in facts_by_provider.items() if facts}
-    chosen = _highest_precedence(present.keys(), precedence=precedence)
+    chosen = highest_precedence(present.keys(), precedence=precedence)
 
     ranked: list[SelectionCandidate] = []
     rank = 1
@@ -303,10 +303,10 @@ def authoritative_sleep_provider(providers_present: Iterable[str]) -> str | None
     (the day has no authoritative sleep — the caller must treat it as unknown,
     never blend the unrecognized sources).
     """
-    return _highest_precedence(providers_present, precedence=_SLEEP_PRECEDENCE)
+    return highest_precedence(providers_present, precedence=_SLEEP_PRECEDENCE)
 
 
-def _highest_precedence(
+def highest_precedence(
     providers_present: Iterable[str],
     *,
     precedence: tuple[str, ...],

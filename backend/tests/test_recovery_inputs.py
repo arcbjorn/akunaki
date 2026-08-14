@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import delete
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
@@ -817,14 +818,21 @@ def test_symptom_burden_for_day_is_none_without_a_source() -> None:
     assert service.symptom_burden_for_day(tenant_id="tenant-1", local_health_day=TARGET_DAY) is None
 
 
-def _seed_activity(factory: sessionmaker[Session], *, day: str, fact_id: str, steps: int) -> None:
+def _seed_activity(
+    factory: sessionmaker[Session],
+    *,
+    day: str,
+    fact_id: str,
+    steps: int,
+    provider: str = "google_health",
+) -> None:
     with factory() as session, session.begin():
         session.add(
             FactRecord(
                 id=fact_id,
                 tenant_id="tenant-1",
                 connection_id=None,
-                provider="google_health",
+                provider=provider,
                 entity_type="daily_activity",
                 vendor_record_id=fact_id,
                 origin=None,
@@ -899,3 +907,72 @@ def test_normal_activity_opens_no_anomaly(factory: sessionmaker[Session]) -> Non
     by_code = {s.feature_code: s for s in signals}
     # A signal may exist but must not be open for a normal day.
     assert "low_activity" not in by_code or not by_code["low_activity"].open_today
+
+
+def test_activity_steps_follow_the_source_policy_not_row_order(
+    factory: sessionmaker[Session],
+) -> None:
+    """Every provider writes activity, so a day carries competing facts.
+
+    Without selecting one by the precedence, the query returned all three rows
+    and kept whichever the planner emitted last — a real day read 2,739 steps or
+    0 depending purely on which connector synced most recently, and the 0 would
+    fire the low-activity anomaly on a perfectly normal day.
+    """
+    # Insertion order must not decide the winner, so assert it both ways: an
+    # unordered query keeps whichever row the planner emits last, which is
+    # favourable in one of these orderings and wrong in the other.
+    for ids in (("p1", "o1", "g1"), ("g1", "o1", "p1")):
+        with factory() as session, session.begin():
+            session.execute(delete(DailyActivity))
+            session.execute(delete(FactRecord).where(FactRecord.entity_type == "daily_activity"))
+        by_provider = {"p1": ("polar", 0), "o1": ("oura", 9), "g1": ("google_health", 2739)}
+        for fact_id in ids:
+            provider, steps_value = by_provider[fact_id]
+            _seed_activity(
+                factory,
+                day=TARGET_DAY,
+                fact_id=fact_id,
+                steps=steps_value,
+                provider=provider,
+            )
+
+        steps = FactRepository(factory).daily_activity_steps(
+            tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+        )
+
+        # The always-on tracker leads the activity precedence, either way round.
+        assert steps[TARGET_DAY] == pytest.approx(2739.0)
+
+
+def test_activity_steps_fall_back_when_the_leader_is_absent(
+    factory: sessionmaker[Session],
+) -> None:
+    """A day the leader did not cover goes to the next provider in order."""
+    _seed_activity(factory, day=TARGET_DAY, fact_id="o1", steps=9, provider="oura")
+    _seed_activity(factory, day=TARGET_DAY, fact_id="p1", steps=1200, provider="polar")
+
+    steps = FactRepository(factory).daily_activity_steps(
+        tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+    )
+
+    assert steps[TARGET_DAY] == pytest.approx(1200.0)
+
+
+def test_activity_steps_ignore_a_provider_outside_the_policy(
+    factory: sessionmaker[Session],
+) -> None:
+    """A provider the activity policy does not rank cannot supply the day.
+
+    ``manual`` and ``derived`` are valid fact providers (the schema allows them)
+    but are absent from the activity precedence, so neither can become a day's
+    authority. Selecting one would let an unranked source silently answer for a
+    metric the policy never sanctioned it for.
+    """
+    _seed_activity(factory, day=TARGET_DAY, fact_id="m1", steps=5000, provider="manual")
+
+    steps = FactRepository(factory).daily_activity_steps(
+        tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+    )
+
+    assert TARGET_DAY not in steps
