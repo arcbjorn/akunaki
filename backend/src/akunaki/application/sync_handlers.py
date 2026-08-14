@@ -49,7 +49,12 @@ from akunaki.domain.record_split import split_page
 from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.secrets import SecretDecryptionError
 from akunaki.domain.sleep_normalizer import NormalizationError, normalize_sleep_payload
-from akunaki.domain.source_policy import SOURCE_POLICY_VERSION, decide_sleep_selection
+from akunaki.domain.source_policy import (
+    NAP_METRIC_FAMILY,
+    SLEEP_METRIC_FAMILY,
+    SOURCE_POLICY_VERSION,
+    decide_selection,
+)
 from akunaki.domain.sync_runs import SyncRunStatus, SyncRunTrigger
 from akunaki.domain.vitals_normalizer import normalize_vitals_payload
 from akunaki.domain.workout_normalizer import normalize_workout_payload
@@ -828,7 +833,11 @@ class NormalizeHandler:
         self._clock = clock
 
     def _record_sleep_selection(self, *, tenant_id: str, day: str, now: datetime) -> None:
-        """Persist which provider is authoritative for the day's sleep.
+        """Persist which provider is authoritative for the day's sleep and naps.
+
+        Two decisions, one per family: a device worn only overnight and one worn
+        all day are authoritative for different things, so each is ranked among
+        its own kind.
 
         Recorded here because this is where the day's provider set changes: a
         second connector landing facts for a night already covered is exactly
@@ -842,24 +851,36 @@ class NormalizeHandler:
         """
         if self._sleep_providers is None or self._selections is None:
             return
-        by_provider = self._sleep_providers.sleep_facts_by_provider(
-            tenant_id=tenant_id,
-            local_health_day=day,
-        )
-        if not by_provider:
-            # No sleep facts at all for the day: nothing to decide between. The
-            # absence is already visible as an unknown day downstream, so a
-            # ``missing_authoritative`` row here would add no information.
-            return
-        decision = decide_sleep_selection(by_provider)
-        self._selections.record_daily_selection(
-            selection_id=self._new_id(),
-            tenant_id=tenant_id,
-            policy_version=SOURCE_POLICY_VERSION,
-            spec=decision.to_spec(local_health_day=day),
-            new_candidate_id=self._new_id,
-            now=now,
-        )
+        # Overnight sleep and naps are separate families with different
+        # authoritative providers, so each is ranked among its own kind. Ranking
+        # them together would let the overnight winner take a day it never
+        # measured and suppress a real daytime record as `lower_precedence`.
+        for is_nap, metric_family in (
+            (False, SLEEP_METRIC_FAMILY),
+            (True, NAP_METRIC_FAMILY),
+        ):
+            by_provider = self._sleep_providers.sleep_facts_by_provider(
+                tenant_id=tenant_id,
+                local_health_day=day,
+                is_nap=is_nap,
+            )
+            if not by_provider:
+                # Nothing of this kind on the day: nothing to decide between.
+                # The absence is already visible as an unknown day downstream,
+                # so a ``missing_authoritative`` row would add no information.
+                continue
+            decision = decide_selection(by_provider, metric_family=metric_family)
+            self._selections.record_daily_selection(
+                selection_id=self._new_id(),
+                tenant_id=tenant_id,
+                policy_version=SOURCE_POLICY_VERSION,
+                spec=decision.to_spec(
+                    local_health_day=day,
+                    metric_family=metric_family,
+                ),
+                new_candidate_id=self._new_id,
+                now=now,
+            )
 
     def __call__(self, claim: JobClaim) -> None:
         """Execute one normalization job."""

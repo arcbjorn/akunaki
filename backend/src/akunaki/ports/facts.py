@@ -42,9 +42,14 @@ class SleepProviderFactsPort(Protocol):
     """Read the competing sleep facts for a day, grouped by provider."""
 
     def sleep_facts_by_provider(
-        self, *, tenant_id: str, local_health_day: str
+        self, *, tenant_id: str, local_health_day: str, is_nap: bool = False
     ) -> dict[str, list[str]]:
-        """Current sleep fact ids on the day, keyed by the provider that supplied them."""
+        """Current sleep fact ids on the day, keyed by the provider that supplied them.
+
+        ``is_nap`` picks overnight sleep or daytime naps: they are separate
+        metric families with different authoritative providers, so they are
+        ranked separately.
+        """
         ...
 
 

@@ -1021,7 +1021,7 @@ class FactRepository:
         return by_entity
 
     def sleep_facts_by_provider(
-        self, *, tenant_id: str, local_health_day: str
+        self, *, tenant_id: str, local_health_day: str, is_nap: bool = False
     ) -> dict[str, list[str]]:
         """Current sleep fact ids on one local day, grouped by provider.
 
@@ -1029,10 +1029,17 @@ class FactRepository:
         recording a source selection needs the alternatives (the "Why"), not
         just the winner. Ordered by id so a re-recorded decision is byte-stable
         and dedupes instead of writing a new version.
+
+        ``is_nap`` selects which kind of sleep to rank, because the two have
+        different authoritative sources: a ring worn only between bedtime and
+        waking owns the night but cannot have recorded a nap it slept through.
+        Ranking both together would let the overnight winner take a day it never
+        measured and suppress the real daytime record as ``lower_precedence``.
         """
         with self._session_factory() as session:
             rows = session.execute(
                 select(FactRecord.provider, FactRecord.id)
+                .join(SleepSession, SleepSession.fact_record_id == FactRecord.id)
                 .where(
                     FactRecord.tenant_id == tenant_id,
                     FactRecord.entity_type == ENTITY_TYPE,
@@ -1040,6 +1047,7 @@ class FactRepository:
                     FactRecord.is_current == 1,
                     FactRecord.deletion_state == "active",
                     FactRecord.exclude_from_load == 0,
+                    SleepSession.is_nap == (1 if is_nap else 0),
                 )
                 .order_by(FactRecord.id)
             ).all()
