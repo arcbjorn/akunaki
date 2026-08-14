@@ -192,7 +192,9 @@ def test_cursor_walks_every_workout_exactly_once(
     seen: list[str] = []
     cursor: str | None = None
     for _ in range(10):  # bounded: 5 rows at 2 per page needs 3 requests
-        params = {"limit": 2} if cursor is None else {"limit": 2, "cursor": cursor}
+        params: dict[str, str | int] = (
+            {"limit": 2} if cursor is None else {"limit": 2, "cursor": cursor}
+        )
         body = client.get("/v1/workouts", params=params).json()
         seen.extend(i["workout_id"] for i in body["items"])
         cursor = body["next_cursor"]
@@ -297,7 +299,9 @@ def test_cursor_handles_workouts_starting_at_the_same_instant(
     seen: list[str] = []
     cursor: str | None = None
     for _ in range(10):
-        params = {"limit": 1} if cursor is None else {"limit": 1, "cursor": cursor}
+        params: dict[str, str | int] = (
+            {"limit": 1} if cursor is None else {"limit": 1, "cursor": cursor}
+        )
         body = client.get("/v1/workouts", params=params).json()
         seen.extend(i["workout_id"] for i in body["items"])
         cursor = body["next_cursor"]

@@ -138,7 +138,8 @@ def _record(
 
 
 def _runs(client: TestClient) -> list[dict[str, object]]:
-    return client.get("/v1/sync/status").json()["runs"]
+    runs: list[dict[str, object]] = client.get("/v1/sync/status").json()["runs"]
+    return runs
 
 
 def test_requires_a_session() -> None:

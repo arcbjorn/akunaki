@@ -16,7 +16,7 @@ import httpx2
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from jwt import PyJWKClient
+from jwt import PyJWK, PyJWKClient
 
 from akunaki.adapters.crypto.oauth import hash_state
 from akunaki.adapters.oidc.client import (
@@ -38,7 +38,7 @@ _SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _WRONG_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-def _jwks() -> dict[str, object]:
+def _jwks() -> dict[str, list[dict[str, str]]]:
     """A JWKS document containing this test's public key."""
     public_numbers = _SIGNING_KEY.public_key().public_numbers()
 
@@ -128,10 +128,8 @@ def _client(
 class _StaticJWKClient(PyJWKClient):
     """PyJWKClient that returns this test's key without a network fetch."""
 
-    def get_signing_key_from_jwt(self, token: str):  # type: ignore[no-untyped-def]
-        from jwt import PyJWK
-
-        [jwk] = _jwks()["keys"]  # type: ignore[index]
+    def get_signing_key_from_jwt(self, token: str | bytes) -> PyJWK:
+        [jwk] = _jwks()["keys"]
         return PyJWK.from_dict(jwk)
 
 
@@ -396,7 +394,7 @@ def test_error_logs_carry_no_token_body(caplog: pytest.LogCaptureFixture) -> Non
     logger = logging.getLogger("akunaki.oidc")
     records: list[logging.LogRecord] = []
     handler_obj = logging.Handler()
-    handler_obj.emit = records.append  # type: ignore[method-assign]
+    handler_obj.emit = records.append  # type: ignore[method-assign, assignment]
     logger.addHandler(handler_obj)
     try:
         with pytest.raises(OIDCExchangeError):

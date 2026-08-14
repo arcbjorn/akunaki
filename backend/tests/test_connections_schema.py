@@ -80,7 +80,7 @@ def _connection(**overrides: object) -> Connection:
         "updated_at": NOW_S,
     }
     values.update(overrides)
-    return Connection(**values)  # type: ignore[arg-type]
+    return Connection(**values)
 
 
 def _add(factory: sessionmaker[Session], *rows: object) -> None:
@@ -281,7 +281,7 @@ def test_libsql_driver_still_lacks_dbapi_binary() -> None:
     processor raises before executing. If a future driver release adds it,
     this test fails on purpose so ``Blob`` can be reconsidered.
     """
-    import libsql_experimental
+    import libsql_experimental  # type: ignore[import-untyped]
 
     assert not hasattr(libsql_experimental, "Binary")
 

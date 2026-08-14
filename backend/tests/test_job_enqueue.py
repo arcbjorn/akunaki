@@ -309,7 +309,7 @@ def test_enqueue_validates_arguments(repository: JobRepository) -> None:
 
     with pytest.raises(ValueError, match="must be timezone-aware"):
         repository.enqueue_job(
-            **{**base, "now": datetime(2026, 7, 18, 12, 0, 0)},
+            **{**base, "now": datetime(2026, 7, 18, 12, 0, 0)},  # type: ignore[arg-type]
         )
 
 

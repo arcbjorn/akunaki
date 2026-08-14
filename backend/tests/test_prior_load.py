@@ -10,6 +10,7 @@ import pytest
 
 from akunaki.domain.prior_load import (
     ALL_ZERO_REST,
+    AcwrResult,
     compute_acwr,
     prior_load_balance,
 )
@@ -102,7 +103,7 @@ def test_zero_chronic_nonzero_acute_is_undefined() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _acwr_of(a: float):
+def _acwr_of(a: float) -> AcwrResult:
     # Build known windows whose ratio is exactly ``a``: chronic weekly 100,
     # acute 100*a.
     return compute_acwr(

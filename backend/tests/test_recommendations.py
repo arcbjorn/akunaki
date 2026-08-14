@@ -157,6 +157,6 @@ def test_exactly_one_primary() -> None:
     primaries = [
         r
         for r in (result.primary, *result.supporting, *result.suppressed)
-        if r.role is Role.PRIMARY
+        if r is not None and r.role is Role.PRIMARY
     ]
     assert len(primaries) == 1

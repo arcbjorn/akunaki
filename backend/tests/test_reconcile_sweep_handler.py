@@ -16,7 +16,7 @@ from akunaki.application.sync_handlers import (
     ReconcileSweepHandler,
     streams_for_provider,
 )
-from akunaki.domain.jobs import JobClaim, JobRole, to_utc_rfc3339
+from akunaki.domain.jobs import EnqueuedJob, JobClaim, JobRole, to_utc_rfc3339
 
 T0 = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
 
@@ -43,20 +43,26 @@ class _FakeJobs:
         job_type: str,
         payload_json: str,
         now: datetime,
+        role: JobRole = JobRole.CORE,
+        priority: int = 100,
+        run_after: datetime | None = None,
+        max_attempts: int = 5,
         idempotency_key: str | None = None,
-        **kwargs: object,
-    ) -> _Enqueued:
+    ) -> EnqueuedJob:
         # An already-present key returns created=False and inserts nothing.
         created = idempotency_key not in self._existing
-        record = _Enqueued(
-            job_type=job_type,
-            tenant_id=tenant_id,
-            payload_json=payload_json,
-            idempotency_key=idempotency_key,
-            created=created,
+        self.calls.append(
+            _Enqueued(
+                job_type=job_type,
+                tenant_id=tenant_id,
+                payload_json=payload_json,
+                idempotency_key=idempotency_key,
+                created=created,
+            )
         )
-        self.calls.append(record)
-        return record
+        return EnqueuedJob(
+            job_id=job_id, tenant_id=tenant_id, job_type=job_type, role=role, created=created
+        )
 
 
 class _FakeConnections:
@@ -106,7 +112,8 @@ def test_enqueues_one_incremental_sync_per_stale_connection() -> None:
     # Each carries its own connection and tenant, keyed for idempotence.
     by_conn = {json.loads(c.payload_json)["connection_id"]: c for c in jobs.calls}
     assert by_conn["conn-a"].tenant_id == "tenant-1"
-    assert by_conn["conn-a"].idempotency_key.startswith("reconcile:conn-a:")
+    key_a = by_conn["conn-a"].idempotency_key
+    assert key_a is not None and key_a.startswith("reconcile:conn-a:")
     assert by_conn["conn-b"].tenant_id == "tenant-2"
 
 

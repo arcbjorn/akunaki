@@ -54,7 +54,7 @@ _SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _IDS = itertools.count(1)
 
 
-def _jwks() -> dict[str, object]:
+def _jwks() -> dict[str, list[dict[str, str]]]:
     pn = _SIGNING_KEY.public_key().public_numbers()
 
     def b64(v: int) -> str:
@@ -69,8 +69,8 @@ def _jwks() -> dict[str, object]:
 
 
 class _StaticJWKClient(PyJWKClient):
-    def get_signing_key_from_jwt(self, token: str):  # type: ignore[no-untyped-def]
-        [jwk] = _jwks()["keys"]  # type: ignore[index]
+    def get_signing_key_from_jwt(self, token: str | bytes) -> PyJWK:
+        [jwk] = _jwks()["keys"]
         return PyJWK.from_dict(jwk)
 
 

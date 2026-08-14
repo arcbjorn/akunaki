@@ -540,7 +540,8 @@ def test_disconnect_deletes_the_stored_secret(
     assert response.json() == {"connection_id": connection_id, "status": "revoked"}
     with factory() as session:
         assert session.get(ConnectionSecret, connection_id) is None
-        assert session.get(Connection, connection_id).status == "revoked"
+        revoked = session.get(Connection, connection_id)
+        assert revoked is not None and revoked.status == "revoked"
 
 
 def test_disconnect_preserves_history(client: TestClient, factory: sessionmaker[Session]) -> None:
@@ -659,7 +660,8 @@ def test_disconnecting_another_tenants_connection_is_404(
     assert theirs.status_code == unknown.status_code == 404
     assert theirs.json() == unknown.json()
     with factory() as session:
-        assert session.get(Connection, "conn-theirs").status == "active"
+        theirs_row = session.get(Connection, "conn-theirs")
+        assert theirs_row is not None and theirs_row.status == "active"
 
 
 def test_disconnect_is_audited(client: TestClient, factory: sessionmaker[Session]) -> None:

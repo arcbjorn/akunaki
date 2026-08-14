@@ -574,30 +574,54 @@ def test_prior_load_present_when_load_is_fully_covered() -> None:
     from akunaki.application.recovery_inputs import FeatureSource
 
     class _LoadOnly:
-        def daily_sleep_durations(self, *, tenant_id: str, local_health_days: list[str]):
+        def daily_sleep_durations(
+            self, *, tenant_id: str, local_health_days: list[str]
+        ) -> dict[str, float]:
             return {}
 
-        def daily_sleep_efficiency(self, *, tenant_id: str, local_health_days: list[str]):
+        def daily_sleep_efficiency(
+            self, *, tenant_id: str, local_health_days: list[str]
+        ) -> dict[str, float]:
             return {}
 
-        def daily_hrv(self, *, tenant_id: str, local_health_days: list[str]):
+        def daily_hrv(self, *, tenant_id: str, local_health_days: list[str]) -> dict[str, float]:
             return {}
 
-        def daily_resting_hr(self, *, tenant_id: str, local_health_days: list[str]):
+        def daily_resting_hr(
+            self, *, tenant_id: str, local_health_days: list[str]
+        ) -> dict[str, float]:
             return {}
 
-        def daily_temperature_deviation(self, *, tenant_id: str, local_health_days: list[str]):
+        def daily_temperature_deviation(
+            self, *, tenant_id: str, local_health_days: list[str]
+        ) -> dict[str, float]:
             return {}
 
-        def daily_respiratory_rate(self, *, tenant_id: str, local_health_days: list[str]):
+        def daily_respiratory_rate(
+            self, *, tenant_id: str, local_health_days: list[str]
+        ) -> dict[str, float]:
             return {}
 
-        def daily_principal_sleep_midpoint(self, *, tenant_id: str, local_health_days: list[str]):
+        def daily_principal_sleep_midpoint(
+            self, *, tenant_id: str, local_health_days: list[str]
+        ) -> dict[str, float]:
             return {}
 
-        def daily_strain_load(self, *, tenant_id: str, local_health_days: list[str]):
+        def daily_strain_load(
+            self, *, tenant_id: str, local_health_days: list[str]
+        ) -> dict[str, float]:
             # Every day in the 28-day window a known load of 100 -> balanced ACWR.
             return dict.fromkeys(local_health_days, 100.0)
+
+        def daily_activity_steps(
+            self, *, tenant_id: str, local_health_days: list[str]
+        ) -> dict[str, float]:
+            return {}
+
+        def fact_ids_for_day(
+            self, *, tenant_id: str, local_health_day: str
+        ) -> dict[str, list[str]]:
+            return {}
 
     source: FeatureSource = _LoadOnly()
     components = RecoveryInputService(features=source).recovery_components(
@@ -760,28 +784,48 @@ def test_acwr_for_day_is_none_without_coverage(factory: sessionmaker[Session]) -
 class _EmptyFeatures:
     """A feature source with nothing known — the symptom path ignores it."""
 
-    def daily_sleep_durations(self, *, tenant_id: str, local_health_days: list[str]):
+    def daily_sleep_durations(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
         return {}
 
-    def daily_sleep_efficiency(self, *, tenant_id: str, local_health_days: list[str]):
+    def daily_sleep_efficiency(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
         return {}
 
-    def daily_hrv(self, *, tenant_id: str, local_health_days: list[str]):
+    def daily_hrv(self, *, tenant_id: str, local_health_days: list[str]) -> dict[str, float]:
         return {}
 
-    def daily_resting_hr(self, *, tenant_id: str, local_health_days: list[str]):
+    def daily_resting_hr(self, *, tenant_id: str, local_health_days: list[str]) -> dict[str, float]:
         return {}
 
-    def daily_temperature_deviation(self, *, tenant_id: str, local_health_days: list[str]):
+    def daily_temperature_deviation(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
         return {}
 
-    def daily_respiratory_rate(self, *, tenant_id: str, local_health_days: list[str]):
+    def daily_respiratory_rate(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
         return {}
 
-    def daily_principal_sleep_midpoint(self, *, tenant_id: str, local_health_days: list[str]):
+    def daily_principal_sleep_midpoint(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
         return {}
 
-    def daily_strain_load(self, *, tenant_id: str, local_health_days: list[str]):
+    def daily_strain_load(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
+        return {}
+
+    def daily_activity_steps(
+        self, *, tenant_id: str, local_health_days: list[str]
+    ) -> dict[str, float]:
+        return {}
+
+    def fact_ids_for_day(self, *, tenant_id: str, local_health_day: str) -> dict[str, list[str]]:
         return {}
 
 

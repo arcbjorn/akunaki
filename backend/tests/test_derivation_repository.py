@@ -198,7 +198,7 @@ def test_typed_fact_inputs_are_persisted_and_disclosed(
     # The row is durable with its typed FK — the run is traceable to the fact.
     with factory() as session:
         rows = session.execute(select(DerivationInput.role, DerivationInput.fact_record_id)).all()
-    assert rows == [("hrv", "fact-hrv")]
+    assert [tuple(row) for row in rows] == [("hrv", "fact-hrv")]
 
     lineage = repo.resolve_token(tenant_id="tenant-1", token=token)
     assert lineage is not None

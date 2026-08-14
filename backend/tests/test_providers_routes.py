@@ -132,8 +132,8 @@ def _add_connection(
 
 
 def _providers(client: TestClient) -> list[dict[str, object]]:
-    body = client.get("/v1/providers").json()
-    return body["providers"]
+    providers: list[dict[str, object]] = client.get("/v1/providers").json()["providers"]
+    return providers
 
 
 def test_requires_a_session(route_db: str) -> None:

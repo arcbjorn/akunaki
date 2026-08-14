@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from akunaki.application.sync_handlers import NORMALIZE_JOB_TYPE, NormalizeHandler
-from akunaki.domain.jobs import JobClaim, JobRole
+from akunaki.domain.jobs import EnqueuedJob, JobClaim, JobRole
 from akunaki.ports.facts import RevisionBody
 
 T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
@@ -66,9 +66,24 @@ class _FakeJobs:
     def __init__(self) -> None:
         self.enqueued: list[str] = []
 
-    def enqueue_job(self, *, payload_json: str, **kwargs: object) -> object:
+    def enqueue_job(
+        self,
+        *,
+        job_id: str,
+        tenant_id: str,
+        job_type: str,
+        payload_json: str,
+        now: datetime,
+        role: JobRole = JobRole.CORE,
+        priority: int = 100,
+        run_after: datetime | None = None,
+        max_attempts: int = 5,
+        idempotency_key: str | None = None,
+    ) -> EnqueuedJob:
         self.enqueued.append(payload_json)
-        return object()
+        return EnqueuedJob(
+            job_id=job_id, tenant_id=tenant_id, job_type=job_type, role=role, created=True
+        )
 
 
 def _claim() -> JobClaim:
@@ -99,8 +114,8 @@ def test_activity_revision_writes_activity_facts() -> None:
     jobs = _FakeJobs()
     handler = NormalizeHandler(
         revisions=_FakeRevisions(revision),
-        facts=facts,  # type: ignore[arg-type]
-        jobs=jobs,  # type: ignore[arg-type]
+        facts=facts,
+        jobs=jobs,
         new_id=lambda: "id-1",
         clock=lambda: T0,
     )

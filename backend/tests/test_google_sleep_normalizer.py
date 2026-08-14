@@ -115,6 +115,7 @@ def test_restless_is_in_bed_not_asleep() -> None:
     assert fact.awake_min == pytest.approx(300.0)  # ...but it is accounted for
     assert fact.time_in_bed_min == pytest.approx(360.0)
     # Sleep + awake reconcile with the session span; no minutes go missing.
+    assert fact.awake_min is not None
     assert fact.duration_min + fact.awake_min == pytest.approx(fact.time_in_bed_min)
 
 
@@ -160,7 +161,7 @@ def test_content_hash_changes_with_the_values() -> None:
 def test_bad_segments_are_skipped_not_fatal() -> None:
     page = _page(
         _seg("2026-07-22T05:00:00+02:00", "2026-07-22T01:00:00+02:00", "LIGHT"),  # reversed
-        {"startTime": "not-a-time", "endTime": "also-bad", "type": "DEEP"},  # type: ignore[arg-type]
+        {"startTime": "not-a-time", "endTime": "also-bad", "type": "DEEP"},
         _seg("2026-07-22T01:00:00+02:00", "2026-07-22T05:00:00+02:00", "REM"),
     )
     facts = normalize_google_sleep_payload(page)

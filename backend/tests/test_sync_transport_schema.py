@@ -113,7 +113,7 @@ def _payload(**overrides: object) -> RawPayload:
         "request_meta_json": json.dumps({"url_template": "v2/sleep"}),
     }
     values.update(overrides)
-    return RawPayload(**values)  # type: ignore[arg-type]
+    return RawPayload(**values)
 
 
 def _run(**overrides: object) -> SyncRun:
@@ -127,7 +127,7 @@ def _run(**overrides: object) -> SyncRun:
         "started_at": NOW_S,
     }
     values.update(overrides)
-    return SyncRun(**values)  # type: ignore[arg-type]
+    return SyncRun(**values)
 
 
 def _revision(**overrides: object) -> RawRevision:
@@ -149,7 +149,7 @@ def _revision(**overrides: object) -> RawRevision:
         "tombstone_reason": None,
     }
     values.update(overrides)
-    return RawRevision(**values)  # type: ignore[arg-type]
+    return RawRevision(**values)
 
 
 def _object(**overrides: object) -> RawObject:
@@ -164,7 +164,7 @@ def _object(**overrides: object) -> RawObject:
         "created_at": NOW_S,
     }
     values.update(overrides)
-    return RawObject(**values)  # type: ignore[arg-type]
+    return RawObject(**values)
 
 
 # ---------------------------------------------------------------------------

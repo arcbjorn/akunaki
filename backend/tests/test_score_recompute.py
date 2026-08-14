@@ -372,7 +372,7 @@ def test_recompute_records_the_facts_it_derived_from(
             )
         ).all()
 
-    by_role = dict(rows)
+    by_role: dict[str, str | None] = dict(tuple(row) for row in rows)
     # HRV and resting HR both read the day's overnight-vitals fact...
     assert by_role["hrv"] == "tv"
     assert by_role["resting_hr"] == "tv"

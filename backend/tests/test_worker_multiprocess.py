@@ -219,7 +219,8 @@ def test_only_one_worker_holds_the_reaper_lease(fleet_db: str) -> None:
         rows = session.scalars(select(LeaderLease)).all()
         assert len(rows) == 1
         assert rows[0].lease_name == "core-reaper"
-        assert rows[0].lease_owner.startswith("worker-")
+        owner = rows[0].lease_owner
+        assert owner is not None and owner.startswith("worker-")
 
     _read(fleet_db, check)
 

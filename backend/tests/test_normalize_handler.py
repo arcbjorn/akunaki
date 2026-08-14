@@ -155,7 +155,10 @@ def _registry(
     responder: Callable[[httpx2.Request], httpx2.Response],
 ) -> HandlerRegistry:
     """Both handlers, wired to the same real repositories."""
-    new_id = lambda: f"id-{next(_IDS)}"  # noqa: E731
+
+    def new_id() -> str:
+        return f"id-{next(_IDS)}"
+
     sync = InitialSyncHandler(
         fetch_client=OuraFetchClient(
             transport=httpx2.Client(transport=httpx2.MockTransport(responder))

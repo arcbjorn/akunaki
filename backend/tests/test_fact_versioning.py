@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
-from akunaki.adapters.db.fact_repository import FactRepository
+from akunaki.adapters.db.fact_repository import FactRepository, FactWriteOutcome
 from akunaki.adapters.db.models import (
     Connection,
     DailyActivity,
@@ -408,7 +408,7 @@ def _write_activity(
     fact: ActivityFact,
     *,
     now: datetime = T0,
-) -> object:
+) -> FactWriteOutcome:
     return FactRepository(factory).write_activity_fact(
         fact_record_id=f"act-{next(_IDS)}",
         tenant_id="tenant-1",

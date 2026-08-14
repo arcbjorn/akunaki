@@ -418,7 +418,7 @@ def test_trends_require_at_least_one_metric(
 def test_trends_bound_the_metric_count(client: TestClient, factory: sessionmaker[Session]) -> None:
     """The payload is metrics x window, so the metric count is the real bound."""
     _login(client, factory)
-    params = [("day", DAY), *[("metric", "hrv") for _ in range(20)]]
+    params = (("day", DAY), *(("metric", "hrv") for _ in range(20)))
 
     response = client.get("/v1/trends", params=params)
 

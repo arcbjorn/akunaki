@@ -38,7 +38,7 @@ from akunaki.adapters.db.source_selection_repository import (
 )
 from akunaki.application.sync_handlers import NORMALIZE_JOB_TYPE, NormalizeHandler
 from akunaki.config import Settings, clear_settings_cache
-from akunaki.domain.jobs import JobClaim, JobRole, to_utc_rfc3339
+from akunaki.domain.jobs import EnqueuedJob, JobClaim, JobRole, to_utc_rfc3339
 from akunaki.domain.source_policy import SOURCE_POLICY_VERSION, DailySelectionSpec
 from akunaki.ports.facts import RevisionBody
 
@@ -336,9 +336,24 @@ class _StubJobs:
     def __init__(self) -> None:
         self.enqueued: list[str] = []
 
-    def enqueue_job(self, *, payload_json: str, **kwargs: object) -> object:
+    def enqueue_job(
+        self,
+        *,
+        job_id: str,
+        tenant_id: str,
+        job_type: str,
+        payload_json: str,
+        now: datetime,
+        role: JobRole = JobRole.CORE,
+        priority: int = 100,
+        run_after: datetime | None = None,
+        max_attempts: int = 5,
+        idempotency_key: str | None = None,
+    ) -> EnqueuedJob:
         self.enqueued.append(payload_json)
-        return object()
+        return EnqueuedJob(
+            job_id=job_id, tenant_id=tenant_id, job_type=job_type, role=role, created=True
+        )
 
 
 def _claim() -> JobClaim:

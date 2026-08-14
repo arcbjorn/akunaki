@@ -10,10 +10,12 @@ from __future__ import annotations
 from collections.abc import Generator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -276,11 +278,12 @@ def test_suppressed_recommendations_are_disclosed(
     carries the field, off real conflict resolution.
     """
     _login(client, factory)
-    client.app.dependency_overrides[today_service] = lambda: _SuppressingToday()
+    app = cast("FastAPI", client.app)
+    app.dependency_overrides[today_service] = lambda: _SuppressingToday()
     try:
         body = client.get("/v1/recommendations", params={"day": TARGET_DAY}).json()
     finally:
-        client.app.dependency_overrides.clear()
+        app.dependency_overrides.clear()
 
     assert body["primary"]["rule_id"] == "rest_day"
     [entry] = body["suppressed"]

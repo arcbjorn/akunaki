@@ -24,6 +24,7 @@ from akunaki.adapters.db.models import FactRecord, SourceSelection, SourceSelect
 from akunaki.adapters.db.source_selection_repository import (
     CandidateSpec,
     SelectionSpec,
+    SelectionWritten,
     SourceSelectionRepository,
 )
 from akunaki.config import Settings, clear_settings_cache
@@ -118,7 +119,9 @@ def _new_id() -> str:
     return f"cand-{next(_IDS)}"
 
 
-def _record(repo: SourceSelectionRepository, spec: SelectionSpec, *, sel_id: str):
+def _record(
+    repo: SourceSelectionRepository, spec: SelectionSpec, *, sel_id: str
+) -> SelectionWritten:
     return repo.record_daily_selection(
         selection_id=sel_id,
         tenant_id="tenant-1",
