@@ -89,7 +89,7 @@ result = repository.enqueue_job(
     job_type="connection.initial_sync",
     payload_json='{"connection_id":"c1"}',
     now=datetime.now(UTC),
-    idempotency_key="tenant-1:c1:initial",   # optional
+    idempotency_key="tenant-1:c1:initial",  # optional
 )
 result.created  # False when an existing job for this key was returned
 ```
@@ -172,10 +172,12 @@ The first product job handler. Enqueue it after a successful link:
 
 ```python
 repository.enqueue_job(
-    job_id=new_id(), tenant_id=tenant_id,
+    job_id=new_id(),
+    tenant_id=tenant_id,
     job_type=INITIAL_SYNC_JOB_TYPE,
     payload_json=json.dumps({"connection_id": connection_id}),
-    now=now, idempotency_key=f"{tenant_id}:{connection_id}:initial",
+    now=now,
+    idempotency_key=f"{tenant_id}:{connection_id}:initial",
 )
 ```
 
@@ -324,7 +326,7 @@ Backend-issued opaque sessions. The raw cookie token is generated at issue time,
 ```python
 issued = sessions.issue(session_id=new_id(), user_id=user_id, now=now)
 # issued.token -> cookie;  issued.csrf_secret -> client
-result = sessions.validate(token=cookie_token, now=now)   # typed rejection, not an exception
+result = sessions.validate(token=cookie_token, now=now)  # typed rejection, not an exception
 sessions.rotate(old_token=..., new_session_id=..., now=now)  # revokes the predecessor
 ```
 
@@ -791,7 +793,7 @@ All settings use the **`AKUNAKI_`** prefix (pydantic-settings).
 Provider tokens are stored only as envelope-encrypted ciphertext:
 
 ```python
-sealer = build_sealer(get_settings())          # fails fast if no KEK configured
+sealer = build_sealer(get_settings())  # fails fast if no KEK configured
 sealed = sealer.seal(token_bytes, aad=b"conn-1")
 # persist sealed.ciphertext + sealed.key_version
 plaintext = sealer.open(sealed, aad=b"conn-1")
@@ -813,11 +815,16 @@ Production KEKs belong in the platform secret store or a KMS; see [phase-zero-en
 
 ```python
 state, verifier = generate_state(), generate_code_verifier()
-challenge = code_challenge_s256(verifier)          # goes on the authorize URL
+challenge = code_challenge_s256(verifier)  # goes on the authorize URL
 repo.create(
-    state_id="s1", tenant_id="t1", provider="oura", state=state,
+    state_id="s1",
+    tenant_id="t1",
+    provider="oura",
+    state=state,
     sealed_verifier=sealer.seal(verifier.encode(), aad=b"s1"),
-    redirect_uri=REDIRECT, now=now, ttl=timedelta(minutes=10),
+    redirect_uri=REDIRECT,
+    now=now,
+    ttl=timedelta(minutes=10),
 )
 # ... user returns ...
 result = repo.consume(state=state, redirect_uri=REDIRECT, now=now)
@@ -834,12 +841,12 @@ PKCE is **S256** only; `plain` is deliberately unsupported.
 `OAuthLinkingService` wires the client, state repository, and sealer into one flow:
 
 ```python
-redirect = service.start_link(tenant_id=..., redirect_uri=REDIRECT,
-                              scopes=("daily", "personal"), now=now)
+redirect = service.start_link(
+    tenant_id=..., redirect_uri=REDIRECT, scopes=("daily", "personal"), now=now
+)
 # send the user to redirect.authorize_url ...
-result = service.complete_link(state=state, code=code,
-                               redirect_uri=REDIRECT, now=now)
-result.ok            # LinkedConnection, or a typed LinkRejection
+result = service.complete_link(state=state, code=code, redirect_uri=REDIRECT, now=now)
+result.ok  # LinkedConnection, or a typed LinkRejection
 ```
 
 The connection row and its sealed tokens are written in **one transaction**, so an `active` connection always has usable token material — a failed exchange leaves nothing behind. Re-consent reuses the existing `(tenant_id, provider)` row rather than creating a duplicate. `LinkRejection.PROVIDER_REJECTED` (from `invalid_grant`) is **not** retryable and should drive `needs_reauth`; `PROVIDER_UNAVAILABLE` is.
@@ -877,10 +884,10 @@ Both scripts request the **same scopes** the HTTP route does (`DEFAULT_SCOPES`),
 
 ```python
 client = OuraOAuthClient(client_id=..., client_secret=...)
-url = client.authorize_url(state=state, code_challenge=challenge,
-                           redirect_uri=REDIRECT, scopes=("daily", "personal"))
-result = client.exchange_code(code=code, code_verifier=verifier,
-                              redirect_uri=REDIRECT, now=now)
+url = client.authorize_url(
+    state=state, code_challenge=challenge, redirect_uri=REDIRECT, scopes=("daily", "personal")
+)
+result = client.exchange_code(code=code, code_verifier=verifier, redirect_uri=REDIRECT, now=now)
 if result.ok:
     sealer.seal(result.tokens.access_token.encode(), aad=connection_id.encode())
 ```
