@@ -199,6 +199,49 @@ def _to_z(value: datetime) -> str:
     return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def merged_activity_fact(
+    fact: ActivityFact,
+    *,
+    steps: int | None,
+    active_minutes: float | None,
+) -> ActivityFact:
+    """Return ``fact`` with absent signals filled in, and a matching hash.
+
+    A day's signals can arrive on separate streams (Google Health reports steps
+    and active minutes as different v4 data types), so a newly normalized fact
+    may carry one signal and a null other. Filling the null from the version
+    being superseded keeps both measurements instead of the later stream
+    replacing the earlier one.
+
+    A **present** value is never replaced, so an older reading cannot overwrite
+    a newer one. The content hash is recomputed over the merged values, since
+    the caller's change detection compares against it — reusing the pre-merge
+    hash would make a genuinely changed fact look unchanged.
+    """
+    merged_steps = fact.steps if fact.steps is not None else steps
+    merged_minutes = fact.active_minutes if fact.active_minutes is not None else active_minutes
+    if merged_steps == fact.steps and merged_minutes == fact.active_minutes:
+        # Nothing was carried forward; leave the fact (and its hash) untouched.
+        return fact
+    # Grade the merged pair, not the incoming half: a day holding both signals
+    # really is better evidenced than one holding either alone.
+    quality, confidence = _quality_for(steps=merged_steps, active_minutes=merged_minutes)
+    return _with_content_hash(
+        ActivityFact(
+            vendor_record_id=fact.vendor_record_id,
+            start_utc=fact.start_utc,
+            end_utc=fact.end_utc,
+            local_health_day=fact.local_health_day,
+            source_offset_minutes=fact.source_offset_minutes,
+            steps=merged_steps,
+            active_minutes=merged_minutes,
+            quality=quality,
+            confidence=confidence,
+            content_hash="",
+        )
+    )
+
+
 def _with_content_hash(fact: ActivityFact) -> ActivityFact:
     """Attach a hash over the normalized values, for change detection."""
     material = json.dumps(

@@ -555,3 +555,114 @@ def test_an_empty_tenant_id_is_rejected(factory: sessionmaker[Session]) -> None:
             schema_version="google_activity.v1",
             now=T0,
         )
+
+
+def test_activity_provider_comes_from_the_schema_version(
+    factory: sessionmaker[Session],
+) -> None:
+    """Every provider writes daily activity, so one hardcoded value is wrong.
+
+    The source policy groups candidates by ``provider``; attributing all three
+    connectors' activity to one provider would make a day look like it had a
+    single source and no contest could ever resolve.
+    """
+    repository = FactRepository(factory)
+    for schema_version, day in (
+        ("oura_activity.v2", "2026-07-18"),
+        ("polar_activity.v1", "2026-07-19"),
+        ("google_health_activity.v4", "2026-07-20"),
+    ):
+        repository.write_activity_fact(
+            fact_record_id=f"act-{next(_IDS)}",
+            tenant_id="tenant-1",
+            connection_id="conn-1",
+            fact=_activity_fact(
+                startTime=f"{day}T00:00:00+00:00",
+                endTime=f"{day}T23:59:00+00:00",
+            ),
+            raw_revision_id=None,
+            raw_payload_id=None,
+            schema_version=schema_version,
+            now=T0,
+        )
+
+    with factory() as session:
+        rows = session.execute(
+            select(FactRecord.local_health_day, FactRecord.provider).where(
+                FactRecord.entity_type == "daily_activity"
+            )
+        ).all()
+    by_day: dict[str, str] = {}
+    for day, provider in rows:
+        by_day[str(day)] = str(provider)
+    assert by_day["2026-07-18"] == "oura"
+    assert by_day["2026-07-19"] == "polar"
+    assert by_day["2026-07-20"] == "google_health"
+
+
+def test_unattributable_activity_schema_is_rejected(
+    factory: sessionmaker[Session],
+) -> None:
+    """A guessed provider would be silently mis-ranked; fail instead."""
+    with pytest.raises(ValueError, match="no provider for schema version"):
+        FactRepository(factory).write_activity_fact(
+            fact_record_id="act-bad",
+            tenant_id="tenant-1",
+            connection_id="conn-1",
+            fact=_activity_fact(),
+            raw_revision_id=None,
+            raw_payload_id=None,
+            schema_version="fitbit_legacy.v1",
+            now=T0,
+        )
+
+
+def test_activity_signals_from_separate_streams_accumulate(
+    factory: sessionmaker[Session],
+) -> None:
+    """Steps and active minutes arrive on different streams for one day.
+
+    Superseding rather than merging left the day holding whichever stream synced
+    last, with the other reading null — both measured, only one kept.
+    """
+    steps_only = _activity_fact(activeMinutes=None, steps=8500)
+    minutes_only = _activity_fact(steps=None, activeMinutes=42.5)
+
+    _write_activity(factory, steps_only)
+    _write_activity(factory, minutes_only)
+
+    with factory() as session:
+        current = session.execute(
+            select(FactRecord).where(
+                FactRecord.entity_type == "daily_activity",
+                FactRecord.is_current == 1,
+            )
+        ).scalar_one()
+        detail = session.get(DailyActivity, current.id)
+
+    assert detail is not None
+    # Both signals survive the second write.
+    assert detail.steps == 8500
+    assert detail.active_minutes == 42.5
+    # Both present is better evidenced than either alone.
+    assert current.quality == "high"
+
+
+def test_a_present_activity_signal_is_not_overwritten_by_an_older_one(
+    factory: sessionmaker[Session],
+) -> None:
+    """Merging fills nulls only; it must not resurrect a stale reading."""
+    _write_activity(factory, _activity_fact(steps=8500, activeMinutes=None))
+    _write_activity(factory, _activity_fact(steps=9000, activeMinutes=None))
+
+    with factory() as session:
+        current = session.execute(
+            select(FactRecord).where(
+                FactRecord.entity_type == "daily_activity",
+                FactRecord.is_current == 1,
+            )
+        ).scalar_one()
+        detail = session.get(DailyActivity, current.id)
+
+    assert detail is not None
+    assert detail.steps == 9000

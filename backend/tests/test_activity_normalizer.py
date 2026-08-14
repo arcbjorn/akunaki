@@ -8,7 +8,9 @@ import pytest
 
 from akunaki.domain.activity_normalizer import (
     NORMALIZER_VERSION,
+    merged_activity_fact,
     normalize_activity_payload,
+    normalize_google_v4_activity_payload,
     normalize_oura_activity_payload,
     normalize_polar_activity_payload,
 )
@@ -291,3 +293,109 @@ def test_providers_share_a_day_but_never_a_fact_key() -> None:
     assert oura[0].fact_key != polar[0].fact_key
     assert "oura" in oura[0].fact_key
     assert "polar" in polar[0].fact_key
+
+
+# ---------------------------------------------------------------------------
+# Merging signals that arrive on separate streams
+# ---------------------------------------------------------------------------
+
+
+def test_merge_fills_an_absent_signal() -> None:
+    """Steps and active minutes can arrive on different streams.
+
+    Google Health reports them as separate v4 data types, so each sync writes a
+    fact carrying one signal and a null other; without merging, the second write
+    supersedes the first and one measurement is lost.
+    """
+    steps_only = normalize_google_v4_activity_payload(
+        json.dumps(
+            {
+                "rollupDataPoints": [
+                    {
+                        "civilStartTime": {"date": {"year": 2026, "month": 8, "day": 12}},
+                        "steps": {"countSum": "2739"},
+                    }
+                ]
+            }
+        )
+    )[0]
+
+    merged = merged_activity_fact(steps_only, steps=None, active_minutes=22.0)
+
+    assert merged.steps == 2739
+    assert merged.active_minutes == 22.0
+    # Both signals present is better evidenced than either alone.
+    assert merged.quality == "high"
+    # The hash must track the merged values, or change detection would see an
+    # actually-changed fact as unchanged.
+    assert merged.content_hash != steps_only.content_hash
+
+
+def test_merge_never_overwrites_a_present_value() -> None:
+    """An older reading must not replace a newer one."""
+    fact = normalize_google_v4_activity_payload(
+        json.dumps(
+            {
+                "rollupDataPoints": [
+                    {
+                        "civilStartTime": {"date": {"year": 2026, "month": 8, "day": 12}},
+                        "steps": {"countSum": "500"},
+                    }
+                ]
+            }
+        )
+    )[0]
+
+    merged = merged_activity_fact(fact, steps=999, active_minutes=None)
+
+    assert merged.steps == 500
+
+
+def test_merge_with_nothing_to_carry_is_identity() -> None:
+    """A first write, or a full-signal write, is left untouched."""
+    fact = normalize_google_v4_activity_payload(
+        json.dumps(
+            {
+                "rollupDataPoints": [
+                    {
+                        "civilStartTime": {"date": {"year": 2026, "month": 8, "day": 12}},
+                        "steps": {"countSum": "500"},
+                    }
+                ]
+            }
+        )
+    )[0]
+
+    assert merged_activity_fact(fact, steps=None, active_minutes=None) is fact
+
+
+def test_rollup_reads_the_daily_total_not_a_page_fragment() -> None:
+    """One roll-up point is one complete day.
+
+    The per-minute `dataPoints.list` shape spread a day over several pages, and
+    each page became its own version of that day's fact — the last page written
+    replacing the day's total rather than adding to it.
+    """
+    payload = json.dumps(
+        {
+            "rollupDataPoints": [
+                {
+                    "civilStartTime": {"date": {"year": 2026, "month": 8, "day": 12}},
+                    "activeMinutes": {
+                        "activeMinutesRollupByActivityLevel": [
+                            {"activityLevel": "LIGHT", "activeMinutesSum": "80"},
+                            {"activityLevel": "MODERATE", "activeMinutesSum": "8"},
+                            {"activityLevel": "VIGOROUS", "activeMinutesSum": "14"},
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+
+    [fact] = normalize_google_v4_activity_payload(payload)
+
+    # Moderate + vigorous only; LIGHT is excluded so this provider's days stay
+    # comparable with Oura's and Polar's moderate+ semantics.
+    assert fact.active_minutes == 22.0
+    assert fact.local_health_day == "2026-08-12"
