@@ -70,7 +70,7 @@ from akunaki.ports.facts import (
     SourceSelectionWriterPort,
 )
 from akunaki.ports.fetch import ConnectorFetchPort, IngestionRepositoryPort
-from akunaki.ports.jobs import JobRepositoryPort
+from akunaki.ports.jobs import JobEnqueuePort
 from akunaki.ports.oauth_client import OAuthClientPort
 from akunaki.ports.secrets import SecretSealerPort
 from akunaki.ports.sync_runs import SyncRunRecorderPort
@@ -868,7 +868,7 @@ class ReconcileSweepHandler:
         self,
         *,
         connections: StaleConnectionSource,
-        jobs: JobRepositoryPort,
+        jobs: JobEnqueuePort,
         new_id: Callable[[], str],
         staleness: timedelta = timedelta(hours=6),
         batch_limit: int = 100,
@@ -956,7 +956,7 @@ class NormalizeHandler:
         *,
         revisions: RevisionReaderPort,
         facts: FactWriterPort,
-        jobs: JobRepositoryPort,
+        jobs: JobEnqueuePort,
         new_id: Callable[[], str],
         sleep_providers: SleepProviderFactsPort | None = None,
         selections: SourceSelectionWriterPort | None = None,

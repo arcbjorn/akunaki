@@ -26,7 +26,7 @@ from typing import Protocol
 
 from akunaki.domain.connections import ConnectionStatus, LinkedConnection
 from akunaki.domain.jobs import INCREMENTAL_SYNC_JOB_TYPE
-from akunaki.ports.jobs import JobRepositoryPort
+from akunaki.ports.jobs import JobEnqueuePort
 
 __all__ = [
     "ConnectionLookupPort",
@@ -74,7 +74,7 @@ class SyncRequestService:
         self,
         *,
         connections: ConnectionLookupPort,
-        jobs: JobRepositoryPort,
+        jobs: JobEnqueuePort,
         new_id: Callable[[], str],
     ) -> None:
         self._connections = connections

@@ -19,8 +19,12 @@ from akunaki.domain.jobs import (
 )
 
 
-class JobRepositoryPort(Protocol):
-    """Typed operations for job enqueue, CAS claim, lease lifecycle, and leader fencing."""
+class JobEnqueuePort(Protocol):
+    """The enqueue-only slice of the job port.
+
+    Application handlers that merely schedule follow-up work depend on this
+    narrow port, not on claim/lease/fencing machinery they never touch.
+    """
 
     def enqueue_job(
         self,
@@ -44,6 +48,10 @@ class JobRepositoryPort(Protocol):
         ``now`` (immediately due).
         """
         ...
+
+
+class JobRepositoryPort(JobEnqueuePort, Protocol):
+    """Typed operations for job enqueue, CAS claim, lease lifecycle, and leader fencing."""
 
     def discover_due_candidates(
         self,
