@@ -891,6 +891,29 @@ Failures map to a typed vocabulary rather than raising: `invalid_grant` / `inval
 
 `PolarOAuthClient` mirrors the Oura client with Polar AccessLink's differences: the token exchange authenticates via **HTTP Basic** (`client_id`/`client_secret` in the `Authorization` header, never a form field), there is **no PKCE** (`authorize_url` takes only `state`), there is **no refresh token** — an AccessLink access token is long-lived, so there is no `refresh` — and the linked user must be **enrolled** with the calling client before any data is readable (below). The token body's `x_user_id` is captured as `OAuthTokens.external_user_id` and flows into the connection's `external_user_id`. The same typed failure vocabulary and secret-leak discipline (redacted repr, no body logging) apply. The linking service now handles this non-PKCE flow (via the client port's `uses_pkce` flag), so a full Polar authorize→callback link works end to end; the connector link routes at `/v1/connections/{provider}` now drive it end to end.
 
+### Proactive token refresh
+
+An access token is renewed from its **stored expiry**, before the request that
+would have failed — not reactively after a 401. That ordering is the point: a
+401 flips the connection to `needs_reauth`, the path that demands the user
+manually re-consent, for a condition the stored refresh token resolves silently.
+Without this every Google connection died about an hour after linking.
+
+| Condition | Behaviour |
+|-----------|-----------|
+| Expiry within 5 minutes (or past) | Refresh, persist, use the new token |
+| Expiry further out | No refresh; the stored token is used |
+| **No** stored expiry | No refresh — Polar issues long-lived tokens and omits it; refreshing every sync would burn a grant that never needed one |
+| Unparseable expiry | Treated as due: a value that cannot be read is not a guarantee |
+| No refresh token stored | No refresh (not an error) |
+| Refresh **fails** | Logged, stored token used, sync proceeds — the fetch's own 401 handling takes over, so a broken refresh is never worse than no refresh |
+
+The refresh response is **merged** over the stored tokens rather than replacing
+them. Google returns no `refresh_token` on a refresh — that means "keep the one
+you have" — so writing the response's `None` straight through would destroy the
+only means of refreshing again, stranding the connection at the next expiry. A
+provider that *does* rotate its refresh token still replaces the spent one.
+
 ### Polar user enrollment (`POST /v3/users`)
 
 AccessLink serves **no** exercise data on the grant alone: the authorized user must be registered to the calling client, or every fetch returns **403**. Without this step a Polar link completes, the connection reads `active`, and each sync fails in a way that looks like bad credentials rather than a missing registration.
