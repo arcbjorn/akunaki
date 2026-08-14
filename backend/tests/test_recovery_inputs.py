@@ -274,6 +274,7 @@ def _seed_vitals(
     resting_hr_bpm: float | None = 50.0,
     temperature_deviation_c: float | None = None,
     respiratory_rate_bpm: float | None = None,
+    provider: str = "oura",
 ) -> None:
     with factory() as session, session.begin():
         session.add(
@@ -281,7 +282,7 @@ def _seed_vitals(
                 id=fact_id,
                 tenant_id="tenant-1",
                 connection_id=None,
-                provider="oura",
+                provider=provider,
                 entity_type="overnight_vitals",
                 vendor_record_id=fact_id,
                 origin=None,
@@ -614,6 +615,7 @@ def _seed_workout(
     day: str,
     fact_id: str,
     session_load: float = 100.0,
+    provider: str = "polar",
 ) -> None:
     with factory() as session, session.begin():
         session.add(
@@ -621,7 +623,7 @@ def _seed_workout(
                 id=fact_id,
                 tenant_id="tenant-1",
                 connection_id=None,
-                provider="polar",
+                provider=provider,
                 entity_type="workout_session",
                 vendor_record_id=fact_id,
                 origin=None,
@@ -976,3 +978,65 @@ def test_activity_steps_ignore_a_provider_outside_the_policy(
     )
 
     assert TARGET_DAY not in steps
+
+
+def test_strain_load_never_sums_across_providers(
+    factory: sessionmaker[Session],
+) -> None:
+    """Sessions sum **within** a provider, never across them.
+
+    Summing across would blend two sources into one number, which the design
+    forbids: two connectors recording the same session would double the day's
+    training load, inflating ACWR and downshifting the training label on an
+    ordinary day. Only the authoritative provider's total is served.
+    """
+    _seed_workout(factory, day=TARGET_DAY, fact_id="p1", session_load=100.0, provider="polar")
+    _seed_workout(factory, day=TARGET_DAY, fact_id="p2", session_load=50.0, provider="polar")
+    # The same session, also recorded by a second connector.
+    _seed_workout(
+        factory, day=TARGET_DAY, fact_id="g1", session_load=140.0, provider="google_health"
+    )
+
+    loads = FactRepository(factory).daily_strain_load(
+        tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+    )
+
+    # Polar's two sessions sum to 150; Google's 140 is not added on top.
+    assert loads[TARGET_DAY] == pytest.approx(150.0)
+
+
+def test_strain_load_ignores_a_provider_outside_the_workout_policy(
+    factory: sessionmaker[Session],
+) -> None:
+    """Only the sports watch is authoritative for training.
+
+    A step counter's idea of a "workout" must not become the day's load, or a
+    walk would register as training the user never did.
+    """
+    _seed_workout(
+        factory, day=TARGET_DAY, fact_id="g1", session_load=140.0, provider="google_health"
+    )
+
+    loads = FactRepository(factory).daily_strain_load(
+        tenant_id="tenant-1", local_health_days=[TARGET_DAY]
+    )
+
+    assert TARGET_DAY not in loads
+
+
+def test_vitals_follow_the_sleep_precedence(factory: sessionmaker[Session]) -> None:
+    """Vitals ride on the sleep payload, so they follow the sleep authority.
+
+    Only Oura writes vitals today, so this is latent rather than live — but
+    reading them without a precedence would silently return whichever row the
+    planner emitted last the moment a second connector supplied HRV. That is
+    exactly how the activity path shipped a day reading 2,739 steps or 0
+    depending on sync order.
+    """
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="g1", hrv_ms=99.0, provider="google_health")
+    _seed_vitals(factory, day=TARGET_DAY, fact_id="o1", hrv_ms=42.0, provider="oura")
+
+    hrv = FactRepository(factory).daily_hrv(tenant_id="tenant-1", local_health_days=[TARGET_DAY])
+
+    # Oura leads the sleep precedence, so its reading is the day's HRV.
+    assert hrv[TARGET_DAY] == pytest.approx(42.0)

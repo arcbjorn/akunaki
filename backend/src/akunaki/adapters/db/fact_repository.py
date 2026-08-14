@@ -39,6 +39,7 @@ from akunaki.domain.sleep_consistency import midpoint_local_minutes
 from akunaki.domain.sleep_normalizer import ENTITY_TYPE, NORMALIZER_VERSION, SleepFact
 from akunaki.domain.source_policy import (
     ACTIVITY_METRIC_FAMILY,
+    WORKOUT_METRIC_FAMILY,
     authoritative_sleep_provider,
     highest_precedence,
     precedence_for,
@@ -960,7 +961,15 @@ class FactRepository:
         tenant_id: str,
         local_health_days: list[str],
     ) -> dict[str, float]:
-        """Daily strain-load per local day: the sum of included session loads.
+        """Daily strain-load per local day, from the authoritative provider.
+
+        Sessions are summed **within** one provider — a day really can hold
+        several workouts — but never *across* providers. Summing across them
+        would blend two sources into one number, which the design forbids
+        outright: two connectors recording the same session would double the
+        day's training load, inflating ACWR and downshifting the training label
+        on an ordinary day. Selecting one provider keeps a day's load equal to
+        what that provider actually measured.
 
         Only current, load-eligible (``exclude_from_load = 0``), active workout
         facts count. A day with **no** workout fact is absent from the result —
@@ -974,6 +983,7 @@ class FactRepository:
             rows = session.execute(
                 select(
                     FactRecord.local_health_day,
+                    FactRecord.provider,
                     func.sum(WorkoutSession.session_load),
                 )
                 .join(WorkoutSession, WorkoutSession.fact_record_id == FactRecord.id)
@@ -985,9 +995,24 @@ class FactRepository:
                     FactRecord.deletion_state == "active",
                     FactRecord.exclude_from_load == 0,
                 )
-                .group_by(FactRecord.local_health_day)
+                .group_by(FactRecord.local_health_day, FactRecord.provider)
             ).all()
-        return {day: float(total) for day, total in rows if day is not None}
+
+        by_day: dict[str, dict[str, float]] = {}
+        for day, provider, total in rows:
+            if day is None or provider is None or total is None:
+                continue
+            by_day.setdefault(day, {})[provider] = float(total)
+
+        result: dict[str, float] = {}
+        for day, per_provider in by_day.items():
+            chosen = highest_precedence(
+                per_provider.keys(),
+                precedence=precedence_for(WORKOUT_METRIC_FAMILY),
+            )
+            if chosen is not None:
+                result[day] = per_provider[chosen]
+        return result
 
     def _daily_vital(
         self,
@@ -996,17 +1021,25 @@ class FactRepository:
         local_health_days: list[str],
         column: InstrumentedAttribute[float | None],
     ) -> dict[str, float]:
-        """One overnight-vitals scalar per local day, skipping null readings.
+        """One overnight-vitals scalar per local day, from the sleep authority.
 
-        There is one main-sleep vitals fact per wake-date, so no aggregation is
-        needed; a day whose current fact has a null value for the requested
-        metric is omitted (absent, not imputed).
+        Only Oura writes vitals today, so a day currently holds exactly one
+        fact — but reading them without a precedence would silently return
+        whichever row the planner emitted last the moment a second connector
+        started supplying HRV. That is precisely how the activity path shipped
+        a day reading 2,739 steps or 0 depending on sync order, so this applies
+        the rule now rather than waiting to be surprised by it.
+
+        Vitals ride on the sleep payload, so they follow the **sleep**
+        precedence: the provider authoritative for the night is authoritative
+        for the HRV measured during it. A day whose current fact has a null
+        value for the requested metric is omitted (absent, not imputed).
         """
         if not local_health_days:
             return {}
         with self._session_factory() as session:
             rows = session.execute(
-                select(FactRecord.local_health_day, column)
+                select(FactRecord.local_health_day, FactRecord.provider, column)
                 .join(OvernightVitals, OvernightVitals.fact_record_id == FactRecord.id)
                 .where(
                     FactRecord.tenant_id == tenant_id,
@@ -1018,7 +1051,13 @@ class FactRepository:
                     column.is_not(None),
                 )
             ).all()
-        return {day: float(value) for day, value in rows if day is not None and value is not None}
+
+        by_day: dict[str, dict[str, float]] = {}
+        for day, provider, value in rows:
+            if day is None or provider is None or value is None:
+                continue
+            by_day.setdefault(day, {})[provider] = float(value)
+        return _authoritative_per_day(by_day)
 
     def fact_ids_for_day(self, *, tenant_id: str, local_health_day: str) -> dict[str, list[str]]:
         """Current fact-record ids on one local day, grouped by entity type.
