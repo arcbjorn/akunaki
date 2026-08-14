@@ -85,6 +85,17 @@ _DEFAULT_PRECEDENCE: dict[str, tuple[str, ...]] = {
 _SLEEP_PRECEDENCE: tuple[str, ...] = _DEFAULT_PRECEDENCE[SLEEP_METRIC_FAMILY]
 
 
+def known_metric_families() -> frozenset[str]:
+    """Every metric family the policy ranks providers for.
+
+    Derived from the precedence table rather than listed separately, so a family
+    added there is immediately answerable by every surface that validates a
+    family name — a hand-kept copy would drift and start rejecting a family the
+    engine really does decide.
+    """
+    return frozenset(_DEFAULT_PRECEDENCE)
+
+
 def precedence_for(metric_family: str) -> tuple[str, ...]:
     """Return the provider precedence for ``metric_family``.
 

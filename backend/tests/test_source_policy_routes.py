@@ -329,3 +329,63 @@ def test_malformed_day_is_422(client: TestClient, factory: sessionmaker[Session]
     response = client.get("/v1/source-policies/decisions", params={"day": "04-08-2026"})
 
     assert response.status_code == 422
+
+
+def test_an_unknown_family_is_named_not_folded_into_no_decision(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A typo and "nothing recorded" mean opposite things.
+
+    `no_decision` says the engine recorded nothing for a day it understands. An
+    unrecognized family means the question was never askable — and a client that
+    cannot tell them apart reads a misspelling as "this family has no data" and
+    stops looking.
+    """
+    _login(client, factory)
+
+    body = client.get(
+        "/v1/source-policies/decisions",
+        params={"day": "2026-08-04", "metric_family": "sleep_sesion"},
+    )
+
+    assert body.status_code == 404
+    assert body.json()["detail"]["code"] == "unknown_metric_family"
+    # The rejected name is echoed so the client can see its own typo.
+    assert body.json()["detail"]["metric_family"] == "sleep_sesion"
+
+
+def test_a_known_family_with_no_data_still_reads_no_decision(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The other half of the distinction: a real family, genuinely empty."""
+    _login(client, factory)
+
+    body = client.get(
+        "/v1/source-policies/decisions",
+        params={"day": "2026-08-04", "metric_family": "workout"},
+    )
+
+    assert body.status_code == 404
+    assert body.json()["detail"]["code"] == "no_decision"
+
+
+def test_every_advertised_family_is_answerable(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A family the policy surface advertises must be a valid question.
+
+    Validating against a hand-kept list would drift from the precedence table
+    and start rejecting a family the engine really does decide.
+    """
+    _login(client, factory)
+
+    families = [
+        f["metric_family"] for f in client.get("/v1/source-policies/effective").json()["families"]
+    ]
+
+    for family in families:
+        body = client.get(
+            "/v1/source-policies/decisions",
+            params={"day": "2026-08-04", "metric_family": family},
+        )
+        assert body.json()["detail"]["code"] != "unknown_metric_family", family

@@ -33,7 +33,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from akunaki.adapters.db.source_selection_repository import SourceSelectionReader
 from akunaki.api.app import get_session_factory
 from akunaki.api.security import CurrentSession
-from akunaki.domain.source_policy import SLEEP_METRIC_FAMILY, effective_policy
+from akunaki.domain.source_policy import (
+    SLEEP_METRIC_FAMILY,
+    effective_policy,
+    known_metric_families,
+)
 
 router = APIRouter(prefix="/v1/source-policies", tags=["source-policies"])
 
@@ -125,6 +129,17 @@ def read_decision(
             status_code=422,
             detail={"code": "invalid_day", "message": "day must be YYYY-MM-DD"},
         ) from exc
+
+    # An unrecognized family is named as such, not folded into "no decision".
+    # The two mean opposite things: `no_decision` says the engine recorded
+    # nothing for a day it understands, while a typo means the question itself
+    # was never askable — and a client that cannot tell them apart will read a
+    # misspelling as "this family has no data" and stop looking.
+    if metric_family not in known_metric_families():
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "unknown_metric_family", "metric_family": metric_family},
+        )
 
     decision = SourceSelectionReader(session_factory).disclosed_selection(
         tenant_id=session.tenant_id,
