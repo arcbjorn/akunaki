@@ -45,7 +45,8 @@ from akunaki.domain.jobs import (
     parse_utc_rfc3339,
     to_utc_rfc3339,
 )
-from akunaki.domain.record_split import split_page
+from akunaki.domain.raw_schemas import is_retained_only_schema
+from akunaki.domain.record_split import split_page, whole_page_slice
 from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.secrets import SecretDecryptionError
 from akunaki.domain.sleep_normalizer import NormalizationError, normalize_sleep_payload
@@ -506,7 +507,21 @@ class InitialSyncHandler:
                 )
             # Split the page into per-record slices: raw identity is per
             # record, not per response page.
-            records = split_page(envelope.stream, envelope.payload_text)
+            #
+            # A **retained-only** stream is deliberately not split. Splitting
+            # buys per-record revisioning — a vendor correcting one night
+            # revisions only that night — which is worth it precisely because a
+            # fact hangs off each record. Nothing normalizes these streams, so
+            # there is no such fact and no such benefit, while the cost is
+            # extreme for a sampled series: Oura's heart rate is one reading
+            # every ~15 seconds, and splitting produced a raw object, a
+            # revision, and a no-op normalize job **per sample** — 4,400
+            # revisions and 4,000 pending jobs from one month, inflating the
+            # database roughly eightfold over the whole rest of the data.
+            if is_retained_only_schema(self._config.schema_version):
+                records = [whole_page_slice(envelope.stream, envelope.payload_text)]
+            else:
+                records = split_page(envelope.stream, envelope.payload_text)
             outcome = self._ingestion.commit_page(
                 payload_id=self._new_id(),
                 records=records,
@@ -1031,7 +1046,7 @@ class NormalizeHandler:
             elif revision.schema_version.startswith("google_health."):
                 written, affected_days = self._normalize_google_sleep(claim, revision, now)
                 sleep_bearing = True
-            elif _is_retained_only(revision.schema_version):
+            elif is_retained_only_schema(revision.schema_version):
                 # Retained-only: the payload is kept with full lineage and
                 # normalized by nothing. This branch is **explicit** rather than
                 # left to the fallback below, which normalizes anything it does
@@ -1211,14 +1226,3 @@ def _parse_normalize_payload(payload_json: str) -> dict[str, str]:
         msg = "payload must contain raw_revision_id"
         raise PermanentJobError(msg)
     return {str(k): v for k, v in parsed.items()}
-
-
-# Schema-version prefixes that are deliberately fetched and retained but never
-# normalized. Naming the convention in one place keeps "no normalizer yet" a
-# declared decision rather than something inferred from a missing branch.
-_RETAINED_ONLY_PREFIXES = ("oura_raw.", "polar_raw.", "google_health_raw.")
-
-
-def _is_retained_only(schema_version: str) -> bool:
-    """Whether a schema version is retained raw with no normalizer."""
-    return schema_version.startswith(_RETAINED_ONLY_PREFIXES)

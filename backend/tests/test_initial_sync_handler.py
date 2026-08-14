@@ -39,7 +39,7 @@ from akunaki.application.sync_handlers import (
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.connections import ConnectionStatus, Provider
-from akunaki.domain.jobs import JobStatus, to_utc_rfc3339
+from akunaki.domain.jobs import JobClaim, JobRole, JobStatus, to_utc_rfc3339
 from akunaki.domain.secrets import SealedSecret
 from akunaki.domain.tokens import (
     EnrollmentResult,
@@ -891,3 +891,103 @@ def test_failed_refresh_falls_back_to_the_stored_token(
     assert seen == ["Bearer stale-access"]
     # Nothing was overwritten by a failed refresh.
     assert _stored_tokens(factory)["access_token"] == "stale-access"
+
+
+# ---------------------------------------------------------------------------
+# Retained-only streams
+# ---------------------------------------------------------------------------
+
+
+def test_retained_only_stream_queues_no_normalize_job(
+    factory: sessionmaker[Session],
+) -> None:
+    """Nothing normalizes these streams, so the job would only read and return.
+
+    That is not free: the sampled heart-rate stream queued thousands of no-op
+    jobs per sync, and none of them could ever write a fact.
+    """
+    samples = json.dumps(
+        {
+            "data": [
+                {"bpm": 74, "timestamp": "2026-07-15T04:29:00.000Z"},
+                {"bpm": 71, "timestamp": "2026-07-15T04:29:15.000Z"},
+                {"bpm": 69, "timestamp": "2026-07-15T04:29:30.000Z"},
+            ]
+        }
+    )
+    handler = _handler(
+        factory,
+        _ok(samples),
+        config=SyncConfig(
+            max_pages=5,
+            stream="heartrate",
+            schema_version="oura_raw.heartrate.v2",
+        ),
+    )
+
+    _run_job(factory, handler)
+
+    with factory() as session:
+        from akunaki.adapters.db.models import Job
+
+        revisions = session.scalars(select(RawRevision)).all()
+        normalize_jobs = session.scalars(
+            select(Job).where(Job.job_type == NORMALIZE_JOB_TYPE)
+        ).all()
+
+    # One revision for the whole page, not one per sample.
+    assert len(revisions) == 1
+    assert revisions[0].schema_version == "oura_raw.heartrate.v2"
+    # The page is retained verbatim — retention is the entire point.
+    assert revisions[0].slice_json == samples
+    assert normalize_jobs == []
+
+
+def test_a_normalized_stream_still_splits_and_queues(
+    factory: sessionmaker[Session],
+) -> None:
+    """The carve-out must not touch a stream that does write facts."""
+    page = json.dumps({"data": [{"id": "s1"}, {"id": "s2"}]})
+
+    _run_job(factory, _handler(factory, _ok(page)))
+
+    with factory() as session:
+        from akunaki.adapters.db.models import Job
+
+        revisions = session.scalars(select(RawRevision)).all()
+        normalize_jobs = session.scalars(
+            select(Job).where(Job.job_type == NORMALIZE_JOB_TYPE)
+        ).all()
+
+    # One revision *per record*, each with its own normalize job.
+    assert len(revisions) == 2
+    assert len(normalize_jobs) == 2
+
+
+def test_refetching_an_unchanged_retained_page_adds_nothing(
+    factory: sessionmaker[Session],
+) -> None:
+    """Whole-page identity must still dedupe, or every sync would revision."""
+    samples = json.dumps({"data": [{"bpm": 74, "timestamp": "2026-07-15T04:29:00.000Z"}]})
+    config = SyncConfig(max_pages=5, stream="heartrate", schema_version="oura_raw.heartrate.v2")
+
+    _run_job(factory, _handler(factory, _ok(samples), config=config))
+    # A second sync of the same window, as the reconcile sweep would do.
+    handler = _handler(factory, _ok(samples), config=config)
+    handler(
+        JobClaim(
+            job_id="job-2",
+            tenant_id="tenant-1",
+            role=JobRole.CORE,
+            job_type=INITIAL_SYNC_JOB_TYPE,
+            owner="worker-1",
+            fence_token=1,
+            leased_until=to_utc_rfc3339(T0 + timedelta(minutes=1)),
+            attempts=1,
+            max_attempts=3,
+            payload_json='{"connection_id":"conn-1"}',
+        )
+    )
+
+    with factory() as session:
+        assert len(session.scalars(select(RawRevision)).all()) == 1

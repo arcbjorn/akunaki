@@ -32,6 +32,7 @@ from akunaki.domain.jobs import (
     require_aware,
     to_utc_rfc3339,
 )
+from akunaki.domain.raw_schemas import is_retained_only_schema
 from akunaki.domain.record_split import RecordSlice
 from akunaki.ports.facts import RevisionBody
 
@@ -183,6 +184,16 @@ class IngestionRepository:
 
                 # Normalization job in the same transaction as its revision, so
                 # a revision can never exist without its normalize job.
+                #
+                # A **retained-only** schema is the exception: nothing
+                # normalizes it, so the job is guaranteed to do nothing but
+                # read the revision and return. That is not free — the sampled
+                # heart-rate stream alone queued thousands of no-op jobs per
+                # sync — and the invariant it protects (no revision without its
+                # fact) has no meaning where no fact is ever written.
+                if is_retained_only_schema(schema_version):
+                    continue
+
                 job_id = next(ids)
                 session.add(
                     Job(

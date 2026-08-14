@@ -60,7 +60,7 @@ def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
     try:
         parsed = json.loads(payload_text)
     except ValueError:
-        return [_whole_page_slice(stream, payload_text)]
+        return [whole_page_slice(stream, payload_text)]
 
     # Polar's `GET /v3/exercises` answers with a bare JSON array; Oura
     # collection pages wrap their records under "data". Google Health's
@@ -84,7 +84,7 @@ def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
         # provider must not be the one that breaks the chain.
         if _is_empty_page(parsed):
             return []
-        return [_whole_page_slice(stream, payload_text)]
+        return [whole_page_slice(stream, payload_text)]
 
     slices: list[RecordSlice] = []
     seen: set[str] = set()
@@ -104,7 +104,7 @@ def split_page(stream: str, payload_text: str) -> list[RecordSlice]:
         # Degrade to a whole-page slice rather than silently discarding a body
         # the vendor did send. An *empty* collection is different: it really
         # carries no records, and yields no slices.
-        return [_whole_page_slice(stream, payload_text)]
+        return [whole_page_slice(stream, payload_text)]
     return slices
 
 
@@ -170,8 +170,13 @@ def _slice_for(stream: str, record: dict[str, Any]) -> RecordSlice:
     )
 
 
-def _whole_page_slice(stream: str, payload_text: str) -> RecordSlice:
-    """Fallback identity for an unrecognized page shape."""
+def whole_page_slice(stream: str, payload_text: str) -> RecordSlice:
+    """One slice covering an entire page, keyed by the page's own hash.
+
+    Used both as the fallback for an unrecognized page shape and deliberately
+    for retained-only streams, where per-record splitting would buy nothing (no
+    fact hangs off the records) at extreme cost for a sampled series.
+    """
     digest = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
     return RecordSlice(
         vendor_record_id=f"{stream}:page:{digest}",
