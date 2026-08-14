@@ -120,3 +120,26 @@ def test_merge_preserves_unrelated_stored_fields() -> None:
     merged = merge_refreshed_tokens(stored, fresh)
 
     assert merged["external_user_id"] == "12345"
+
+
+def test_expiry_is_compared_as_an_instant_not_as_text() -> None:
+    """A non-Z offset must be converted, not read as wall-clock time.
+
+    ``13:00+01:00`` is noon UTC. Comparing the text would make it look an hour
+    away when it is due right now — refreshing an hour late every time, which on
+    a one-hour token means never refreshing before it dies.
+    """
+    # Same instant as NOW: due, because it falls inside the leeway.
+    assert needs_refresh("2026-08-14T13:00:00+01:00", now=NOW) is True
+    # An hour past NOW once converted: not yet due.
+    assert needs_refresh("2026-08-14T14:00:00+01:00", now=NOW) is False
+
+
+def test_a_naive_expiry_is_treated_as_due() -> None:
+    """An expiry with no timezone cannot be placed on the clock.
+
+    Guessing a zone would refresh at the wrong moment in either direction, so it
+    is treated as unreadable — and unreadable means due.
+    """
+    assert needs_refresh("2026-08-14T13:00:00", now=NOW) is True
+    assert needs_refresh("", now=NOW) is True

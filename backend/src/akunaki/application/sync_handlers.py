@@ -610,7 +610,23 @@ class InitialSyncHandler:
         if not needs_refresh(expires_at, now=self._clock()):
             return stored
 
-        result = self._oauth_client.refresh(refresh_token=refresh_token, now=self._clock())
+        try:
+            result = self._oauth_client.refresh(refresh_token=refresh_token, now=self._clock())
+        except Exception:
+            # The clients map expected failures onto a typed result, so reaching
+            # here means something unforeseen — a transport bug, a malformed
+            # body. Refresh is an *optimisation*: the stored token may well
+            # still work, and if it does not the fetch's own 401 handling is the
+            # right place to say so. Letting this escape would make a broken
+            # refresh strictly worse than no refresh, which is the one thing
+            # this path must never be.
+            logger.warning(
+                "token refresh raised; using the stored token",
+                extra={"connection_id": connection_id},
+                exc_info=True,
+            )
+            return stored
+
         if not result.ok or result.tokens is None:
             logger.warning(
                 "token refresh failed; using the stored token",
@@ -623,14 +639,27 @@ class InitialSyncHandler:
             return stored
 
         merged = merge_refreshed_tokens(stored, result.tokens)
-        self._connections.replace_sealed_secret(
-            connection_id=connection_id,
-            sealed_secret=self._sealer.seal(
-                json.dumps(merged).encode(),
-                aad=connection_id.encode(),
-            ),
-            now=self._clock(),
-        )
+        try:
+            self._connections.replace_sealed_secret(
+                connection_id=connection_id,
+                sealed_secret=self._sealer.seal(
+                    json.dumps(merged).encode(),
+                    aad=connection_id.encode(),
+                ),
+                now=self._clock(),
+            )
+        except Exception:
+            # The token in hand is valid whether or not it reached the database,
+            # so this sync proceeds with it; only the *saving* failed. The next
+            # sync re-reads the stored (older) token and refreshes again, which
+            # costs one extra call rather than a lost sync.
+            logger.warning(
+                "refreshed token could not be persisted; using it for this sync",
+                extra={"connection_id": connection_id},
+                exc_info=True,
+            )
+            return merged
+
         logger.info("access token refreshed", extra={"connection_id": connection_id})
         return merged
 
@@ -941,6 +970,31 @@ class NormalizeHandler:
         self._selections = selections
         self._clock = clock
 
+    def _record_selection_safely(
+        self,
+        record: Callable[..., None],
+        *,
+        tenant_id: str,
+        day: str,
+        now: datetime,
+    ) -> None:
+        """Record a source decision without letting its failure fail the job.
+
+        Mirrors how sync-run history is recorded: an audit of what happened must
+        never be able to undo the thing it describes. By this point the day's
+        facts are committed, so raising would retry writes that already
+        succeeded and — after enough attempts — dead-letter a job whose real
+        work was done, leaving the day with no score recompute either.
+        """
+        try:
+            record(tenant_id=tenant_id, day=day, now=now)
+        except Exception:
+            logger.warning(
+                "failed to record the day's source selection",
+                extra={"tenant_id": tenant_id, "local_health_day": day},
+                exc_info=True,
+            )
+
     def _record_activity_selection(self, *, tenant_id: str, day: str, now: datetime) -> None:
         """Persist which provider is authoritative for the day's activity.
 
@@ -1148,15 +1202,22 @@ class NormalizeHandler:
         # only changes the provider set for the family it writes facts into, so
         # each kind of page records its own: a sleep page cannot change which
         # provider owns the day's activity, and vice versa.
+        # A failure here must not fail the job: the facts are already committed,
+        # so raising would retry a normalize whose writes have all succeeded,
+        # and a dead-letter would strand the day with no recompute at all. The
+        # decision is derived from stored facts, so the next normalize for this
+        # day re-derives it — a missing row is recoverable, a lost job is not.
         for day in sorted(affected_days):
             if sleep_bearing:
-                self._record_sleep_selection(
+                self._record_selection_safely(
+                    self._record_sleep_selection,
                     tenant_id=claim.tenant_id,
                     day=day,
                     now=now,
                 )
             if activity_bearing:
-                self._record_activity_selection(
+                self._record_selection_safely(
+                    self._record_activity_selection,
                     tenant_id=claim.tenant_id,
                     day=day,
                     now=now,

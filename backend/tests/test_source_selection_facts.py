@@ -9,7 +9,7 @@ against a migrated database.
 from __future__ import annotations
 
 import json
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -32,11 +32,14 @@ from akunaki.adapters.db.models import (
     SourceSelectionCandidate,
     Tenant,
 )
-from akunaki.adapters.db.source_selection_repository import SourceSelectionRepository
+from akunaki.adapters.db.source_selection_repository import (
+    SelectionWritten,
+    SourceSelectionRepository,
+)
 from akunaki.application.sync_handlers import NORMALIZE_JOB_TYPE, NormalizeHandler
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import JobClaim, JobRole, to_utc_rfc3339
-from akunaki.domain.source_policy import SOURCE_POLICY_VERSION
+from akunaki.domain.source_policy import SOURCE_POLICY_VERSION, DailySelectionSpec
 from akunaki.ports.facts import RevisionBody
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
@@ -525,3 +528,40 @@ def test_single_provider_records_only_source(factory: sessionmaker[Session]) -> 
     )
     assert current is not None
     assert current.selection_reason == "only_source"
+
+
+def test_a_failing_selection_write_does_not_fail_the_job(
+    factory: sessionmaker[Session],
+) -> None:
+    """The day's facts are already committed when the decision is recorded.
+
+    Raising would retry a normalize whose writes all succeeded and, after enough
+    attempts, dead-letter a job whose real work was done — leaving the day with
+    no score recompute either. The decision is derived from stored facts, so the
+    next normalize for the day re-derives it: a missing row is recoverable, a
+    lost job is not.
+    """
+
+    class _BrokenSelections(SourceSelectionRepository):
+        def record_daily_selection(
+            self,
+            *,
+            selection_id: str,
+            tenant_id: str,
+            policy_version: str,
+            spec: DailySelectionSpec,
+            new_candidate_id: Callable[[], str],
+            now: datetime,
+        ) -> SelectionWritten:
+            raise RuntimeError("selection store unavailable")
+
+    _seed_sleep(factory, provider="oura", fact_id="o", duration_min=420.0, time_in_bed_min=460.0)
+    handler = _handler(factory, _BrokenSelections(factory))
+
+    # Must not raise: the facts are written, and the job is done.
+    handler._record_selection_safely(
+        handler._record_sleep_selection,
+        tenant_id="tenant-1",
+        day=DAY,
+        now=T0,
+    )

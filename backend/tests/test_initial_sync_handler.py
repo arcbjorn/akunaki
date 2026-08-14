@@ -991,3 +991,86 @@ def test_refetching_an_unchanged_retained_page_adds_nothing(
 
     with factory() as session:
         assert len(session.scalars(select(RawRevision)).all()) == 1
+
+
+def test_a_raising_refresh_does_not_fail_the_sync(
+    factory: sessionmaker[Session],
+) -> None:
+    """Refresh is an optimisation, never a new way for a sync to die.
+
+    The clients map expected failures onto a typed result, so an exception here
+    is something unforeseen — and the stored token may well still work. Letting
+    it escape would make a broken refresh strictly worse than no refresh.
+    """
+    _seed_expiring_connection(factory, expires_at="2026-07-18T00:00:00Z")
+
+    class _Exploding(_StubOAuthClient):
+        def refresh(self, *, refresh_token: str, now: datetime) -> TokenExchangeResult:
+            raise RuntimeError("transport exploded")
+
+    oauth = _Exploding(TokenExchangeResult(failure=TokenExchangeFailure.PROVIDER_ERROR))
+    seen: list[str] = []
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.headers.get("authorization", ""))
+        return httpx2.Response(200, json={"data": []})
+
+    worker = _run_job(factory, _refreshing_handler(factory, responder, oauth))
+
+    assert worker.stats.succeeded == 1
+    assert seen == ["Bearer stale-access"]
+
+
+def test_an_unpersistable_refresh_still_uses_the_fresh_token(
+    factory: sessionmaker[Session],
+) -> None:
+    """The token in hand is valid whether or not it reached the database.
+
+    Only the *saving* failed, so this sync proceeds with it; the next sync
+    re-reads the older stored token and refreshes again — one extra call rather
+    than a lost sync.
+    """
+    _seed_expiring_connection(factory, expires_at="2026-07-18T00:00:00Z")
+    oauth = _StubOAuthClient(
+        TokenExchangeResult(
+            tokens=OAuthTokens(
+                access_token="fresh-access",
+                refresh_token=None,
+                expires_at="2026-07-19T00:00:00Z",
+                scopes=(),
+                token_type="bearer",
+            )
+        )
+    )
+
+    class _UnwritableConnections(ConnectionRepository):
+        def replace_sealed_secret(self, **kwargs: object) -> bool:
+            raise RuntimeError("database down")
+
+    ids = (f"id-{n}" for n in _ID_COUNTER)
+    seen: list[str] = []
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.headers.get("authorization", ""))
+        return httpx2.Response(200, json={"data": []})
+
+    handler = InitialSyncHandler(
+        fetch_client=OuraFetchClient(
+            transport=httpx2.Client(transport=httpx2.MockTransport(responder))
+        ),
+        ingestion=IngestionRepository(factory),
+        connections=_UnwritableConnections(factory),
+        sealer=EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1"),
+        new_id=lambda: next(ids),
+        config=SyncConfig(max_pages=5),
+        clock=lambda: T0,
+        oauth_client=oauth,
+    )
+
+    worker = _run_job(factory, handler)
+
+    assert worker.stats.succeeded == 1
+    # The fresh token is used even though it could not be stored.
+    assert seen == ["Bearer fresh-access"]
+    # The stored token is untouched, so the next sync simply refreshes again.
+    assert _stored_tokens(factory)["access_token"] == "stale-access"
