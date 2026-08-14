@@ -468,3 +468,154 @@ def _day_bounds(local_day: str, offset_minutes: int | None) -> tuple[str, str]:
     shift = timedelta(minutes=offset_minutes or 0)
     start = day.replace(tzinfo=UTC) - shift
     return _to_z(start), _to_z(start + timedelta(days=1))
+
+
+# ---------------------------------------------------------------------------
+# Google Health v4 activity (`google_health_activity.v4`)
+# ---------------------------------------------------------------------------
+
+GOOGLE_V4_NORMALIZER_VERSION = "google_health_activity_v0.1.0"
+
+# Activity levels counted as moderate-and-above. `LIGHT` is deliberately
+# excluded: the canonical `active_minutes` field means moderate+ everywhere, and
+# folding light minutes in would make this provider's days read far higher than
+# Oura's or Polar's for the same behaviour.
+_MODERATE_PLUS_LEVELS = frozenset({"MODERATE", "VIGOROUS"})
+
+
+def normalize_google_v4_activity_payload(payload_text: str) -> list[ActivityFact]:
+    """Normalize a Google Health v4 **daily roll-up** page into canonical facts.
+
+    Reads ``dataPoints:dailyRollUp`` output, which returns one already-aggregated
+    point per local day. The raw ``dataPoints.list`` alternative reports
+    **per-minute** intervals instead, and normalizing those was actively wrong:
+    a day spans several pages, each page became its own version of that day's
+    fact, and the last page written silently replaced the day's total rather
+    than adding to it. Rolling up vendor-side keeps one payload equal to one
+    complete day, which is the unit the versioned fact write assumes.
+
+    The local day comes from ``civilStartTime`` — the vendor has already
+    resolved the offset there, so no timezone arithmetic is re-done here.
+    """
+    points = _google_v4_points(payload_text)
+
+    steps_by_day: dict[str, int] = {}
+    minutes_by_day: dict[str, float] = {}
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        day = _civil_day(point)
+        if day is None:
+            continue
+        steps = _int_like(_dig(point, "steps", "countSum"))
+        if steps is not None:
+            steps_by_day[day] = steps
+        minutes = _rollup_moderate_plus_minutes(point)
+        if minutes is not None:
+            minutes_by_day[day] = minutes
+
+    facts: list[ActivityFact] = []
+    for day in sorted(set(steps_by_day) | set(minutes_by_day)):
+        steps = _clean_steps(steps_by_day.get(day))
+        active_minutes = _clean_active_minutes(minutes_by_day.get(day))
+        if steps is None and active_minutes is None:
+            continue
+        start_utc, end_utc = _day_bounds(day, None)
+        quality, confidence = _quality_for(steps=steps, active_minutes=active_minutes)
+        facts.append(
+            _with_content_hash(
+                ActivityFact(
+                    vendor_record_id=f"activity:google_health:{day}",
+                    start_utc=start_utc,
+                    end_utc=end_utc,
+                    local_health_day=day,
+                    source_offset_minutes=None,
+                    steps=steps,
+                    active_minutes=active_minutes,
+                    quality=quality,
+                    confidence=confidence,
+                    content_hash="",
+                )
+            )
+        )
+    return facts
+
+
+def _google_v4_points(payload_text: str) -> list[Any]:
+    try:
+        parsed = json.loads(payload_text)
+    except ValueError as exc:
+        msg = "payload is not valid json"
+        raise NormalizationError(msg) from exc
+    if not isinstance(parsed, dict):
+        msg = "payload root must be an object"
+        raise NormalizationError(msg)
+    raw = parsed.get("rollupDataPoints")
+    if isinstance(raw, list):
+        return raw
+    if "civilStartTime" in parsed:
+        # A per-record slice from the raw layer.
+        return [parsed]
+    # An empty page is a valid answer, not a malformed one.
+    if not parsed:
+        return []
+    msg = "payload has no rollupDataPoints array"
+    raise NormalizationError(msg)
+
+
+def _rollup_moderate_plus_minutes(point: dict[str, Any]) -> float | None:
+    """Sum only the moderate-and-above minutes of one rolled-up day."""
+    entries = _dig(point, "activeMinutes", "activeMinutesRollupByActivityLevel")
+    if not isinstance(entries, list):
+        return None
+    total = 0.0
+    seen = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("activityLevel") not in _MODERATE_PLUS_LEVELS:
+            continue
+        minutes = _int_like(entry.get("activeMinutesSum"))
+        if minutes is None:
+            continue
+        total += float(minutes)
+        seen = True
+    return total if seen else None
+
+
+def _civil_day(point: dict[str, Any]) -> str | None:
+    """Local date from a roll-up point's ``civilStartTime``."""
+    civil = point.get("civilStartTime")
+    if not isinstance(civil, dict):
+        return None
+    date = civil.get("date")
+    if not isinstance(date, dict):
+        return None
+    year, month, day = date.get("year"), date.get("month"), date.get("day")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (year, month, day)):
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _dig(point: dict[str, Any], *path: str) -> object:
+    """Walk a nested mapping, returning None if any hop is missing."""
+    node: object = point
+    for key in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
+def _int_like(value: object) -> int | None:
+    """Read v4's string-encoded integers (``"countSum": "1947"``)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None

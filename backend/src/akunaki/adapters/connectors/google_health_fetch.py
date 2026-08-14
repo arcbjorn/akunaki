@@ -6,21 +6,27 @@ Oura and Polar clients' secrets discipline: the access token rides in the
 Authorization header and is never logged, and response bodies never reach log
 records or exceptions.
 
-Google Health v4 reads history through ``users.dataTypes.dataPoints.list``
-(a **GET**), like the Oura/Polar collection GETs. The window is expressed as an
-AIP-160 ``filter`` on the data type's interval, and the response paginates via
-``nextPageToken``; the request carries the prior ``pageToken`` to advance.
+Two read shapes, chosen per stream by how the vendor reports that data type:
 
-Only the ``sleep`` stream is supported in v0.1.0 — the Fitbit-origin cloud sleep
-path. Google Health is the daytime / Fitbit-origin source the design pairs
-against Polar workouts for overlap exclusion.
+- ``users.dataTypes.dataPoints.list`` (a **GET**) for ``sleep``, windowed by an
+  AIP-160 ``filter`` over the data type's interval and paginated by
+  ``nextPageToken``.
+- ``dataPoints:dailyRollUp`` (a **POST**) for ``steps`` and ``active-minutes``,
+  which v4 reports per **minute**. Listing those would spread a single day over
+  several pages, and each page would become its own version of that day's fact —
+  the last one written replacing the day's total instead of adding to it. The
+  roll-up returns one aggregated point per local day, so one payload is one
+  complete day, which is what the versioned fact write assumes.
+
+Google Health is the Fitbit-origin source: cloud sleep plus the daytime activity
+the design pairs against Polar workouts for overlap exclusion.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx2
 
@@ -45,6 +51,8 @@ SLEEP_PAGE_SIZE = 25
 # It is *not* the legacy Google Fit `com.google.*` namespace, which v4 rejects.
 STREAM_DATA_TYPES = {
     "sleep": "sleep",
+    "steps": "steps",
+    "active_minutes": "active-minutes",
 }
 # The filterable member for each stream's window.
 #
@@ -57,8 +65,33 @@ STREAM_DATA_TYPES = {
 # It also happens to be the correct semantic choice: a night is assigned to the
 # local date it **ended** (the wake-date rule the sleep normalizer applies), so
 # windowing on end time selects exactly the nights that belong to the window.
+# Sessions and intervals filter on **opposite** ends, and v4 rejects the wrong
+# one outright, so each stream's member is verified against the live API rather
+# than inferred: `sleep` (a session) accepts only `end_time`, while `steps` and
+# `active-minutes` (intervals) accept only `start_time`. Verified 2026-08-13.
 STREAM_FILTER_FIELDS = {
     "sleep": "sleep.interval.end_time",
+    "steps": "steps.interval.start_time",
+    "active_minutes": "active_minutes.interval.start_time",
+}
+
+# Streams read through `dataPoints:dailyRollUp` (a POST) rather than the
+# `dataPoints` list GET. These data types are reported per **minute**, so the
+# list form spreads one day across many pages; the roll-up returns one
+# aggregated point per local day, which is the unit a daily fact represents.
+ROLLUP_STREAMS = frozenset({"steps", "active_minutes"})
+
+# Vendor **maximum** window per request, in days. v4 caps the range for
+# `active-minutes` (with heart-rate, total-calories, and
+# calories-in-heart-rate-zone) at 14 days and everything else at 90; a wider
+# request is refused outright with a bare "Invalid argument in request", which
+# the transport classifies as transient and would retry forever. A stream absent
+# here has no cap beyond the caller's window.
+#
+# Note this is the *opposite* constraint to `GOOGLE_HEALTH_MIN_WINDOW` (a 14-day
+# **floor** on the sleep list call): for `active-minutes`, 14 days is the ceiling.
+STREAM_MAX_WINDOW_DAYS = {
+    "active_minutes": 14,
 }
 
 
@@ -128,8 +161,28 @@ class GoogleHealthFetchClient:
             params["pageToken"] = page_token
 
         url = f"{self._api_base}/users/me/dataTypes/{data_type}/dataPoints"
+        rollup = stream in ROLLUP_STREAMS
+        if rollup:
+            # Daily roll-up: one already-aggregated point per local day. The
+            # `dataPoints.list` alternative returns **per-minute** intervals, so
+            # a day arrives spread over several pages — and since each page
+            # becomes its own version of that day's fact, the last page written
+            # would replace the day's total instead of adding to it. Rolling up
+            # vendor-side keeps one payload equal to one complete day.
+            url = f"{url}:dailyRollUp"
+            # Clamp to the vendor's ceiling for this data type. Trimming the
+            # window costs older days on one call — which the next sync's own
+            # window covers — whereas exceeding it has the whole request
+            # refused, so the stream would ingest nothing at all.
+            max_days = STREAM_MAX_WINDOW_DAYS.get(stream)
+            if max_days is not None:
+                start = max(start, end - timedelta(days=max_days))
         try:
-            response = self._send(url, params, access_token)
+            response = (
+                self._post(url, _rollup_body(start, end, page_token), access_token)
+                if rollup
+                else self._send(url, params, access_token)
+            )
         except httpx2.HTTPError:
             # The exception text can echo the request, which carries the token.
             logger.warning("google_health fetch transport error", extra={"stream": stream})
@@ -165,7 +218,10 @@ class GoogleHealthFetchClient:
                 fetched_at=to_utc_rfc3339(require_aware(now, field_name="now")),
                 # Redacted: a path template and window bounds, never the token.
                 request_meta={
-                    "url_template": f"v4/users/me/dataTypes/{data_type}/dataPoints",
+                    "url_template": (
+                        f"v4/users/me/dataTypes/{data_type}/dataPoints"
+                        + (":dailyRollUp" if rollup else "")
+                    ),
                     "start_time": start_s,
                     "end_time": end_s,
                 },
@@ -173,6 +229,23 @@ class GoogleHealthFetchClient:
                 next_page_token=next_token,
             )
         )
+
+    def _post(
+        self,
+        url: str,
+        body: dict[str, object],
+        access_token: str,
+    ) -> httpx2.Response:
+        """POST a roll-up request (the aggregate methods are POST, not GET)."""
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if self._transport is not None:
+            return self._transport.post(url, json=body, headers=headers, timeout=self._timeout)
+        with httpx2.Client(timeout=self._timeout) as client:
+            return client.post(url, json=body, headers=headers)
 
     def _send(self, url: str, params: dict[str, str], access_token: str) -> httpx2.Response:
         headers = {
@@ -217,3 +290,29 @@ def _parse_retry_after(value: str | None) -> int | None:
     except ValueError:
         return None
     return max(seconds, 0)
+
+
+def _rollup_body(
+    start: datetime,
+    end: datetime,
+    page_token: str | None,
+) -> dict[str, object]:
+    """Build a ``dataPoints:dailyRollUp`` request body.
+
+    The range is a **civil** (timezone-free) date interval: the vendor resolves
+    the day boundary in the user's own timezone, which is exactly the boundary
+    the resulting facts are keyed by, so no offset is applied here.
+    """
+    body: dict[str, object] = {
+        "range": {
+            "start": {"date": _civil_date(start)},
+            "end": {"date": _civil_date(end)},
+        }
+    }
+    if page_token:
+        body["pageToken"] = page_token
+    return body
+
+
+def _civil_date(value: datetime) -> dict[str, int]:
+    return {"year": value.year, "month": value.month, "day": value.day}

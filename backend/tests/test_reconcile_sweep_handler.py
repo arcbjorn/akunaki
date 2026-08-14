@@ -86,7 +86,7 @@ def _claim() -> JobClaim:
 def test_enqueues_one_incremental_sync_per_stale_connection() -> None:
     jobs = _FakeJobs()
     connections = _FakeConnections(
-        [("conn-a", "tenant-1", "google_health"), ("conn-b", "tenant-2", "google_health")]
+        [("conn-a", "tenant-1", "polar"), ("conn-b", "tenant-2", "polar")]
     )
     handler = ReconcileSweepHandler(
         connections=connections,
@@ -98,12 +98,13 @@ def test_enqueues_one_incremental_sync_per_stale_connection() -> None:
 
     handler(_claim())
 
-    assert len(jobs.calls) == 2
+    # One job per (connection, stream): two connections x Polar's two streams.
+    assert len(jobs.calls) == 4
     assert {c.job_type for c in jobs.calls} == {INCREMENTAL_SYNC_JOB_TYPE}
     # Each carries its own connection and tenant, keyed for idempotence.
     by_conn = {json.loads(c.payload_json)["connection_id"]: c for c in jobs.calls}
     assert by_conn["conn-a"].tenant_id == "tenant-1"
-    assert by_conn["conn-a"].idempotency_key == "reconcile:conn-a:sleep"
+    assert by_conn["conn-a"].idempotency_key.startswith("reconcile:conn-a:")
     assert by_conn["conn-b"].tenant_id == "tenant-2"
 
 
@@ -136,17 +137,17 @@ def test_no_stale_connections_enqueues_nothing() -> None:
 def test_already_queued_connection_is_not_double_scheduled() -> None:
     # The idempotency key already exists (a webhook queued it): enqueue is a
     # no-op (created=False), so the sweep does not pile on.
-    jobs = _FakeJobs(existing_keys={"reconcile:conn-a:sleep"})
+    jobs = _FakeJobs(existing_keys={"reconcile:conn-a:workout", "reconcile:conn-a:daily_activity"})
     handler = ReconcileSweepHandler(
-        connections=_FakeConnections([("conn-a", "tenant-1", "google_health")]),
+        connections=_FakeConnections([("conn-a", "tenant-1", "polar")]),
         jobs=jobs,
         new_id=lambda: "id",
         clock=lambda: T0,
     )
     handler(_claim())
-    # The call is made (idempotent enqueue), but nothing new was created.
-    assert len(jobs.calls) == 1
-    assert jobs.calls[0].created is False
+    # The calls are made (idempotent enqueue), but nothing new was created.
+    assert len(jobs.calls) == 2
+    assert all(call.created is False for call in jobs.calls)
 
 
 def test_multi_stream_provider_fans_out_one_job_per_stream() -> None:
@@ -177,7 +178,7 @@ def test_unwired_provider_does_not_abort_the_sweep() -> None:
     jobs = _FakeJobs()
     handler = ReconcileSweepHandler(
         connections=_FakeConnections(
-            [("conn-bad", "tenant-1", "nonesuch"), ("conn-ok", "tenant-2", "google_health")]
+            [("conn-bad", "tenant-1", "nonesuch"), ("conn-ok", "tenant-2", "polar")]
         ),
         jobs=jobs,
         new_id=lambda: "id",
@@ -186,4 +187,4 @@ def test_unwired_provider_does_not_abort_the_sweep() -> None:
 
     handler(_claim())
 
-    assert [json.loads(c.payload_json)["connection_id"] for c in jobs.calls] == ["conn-ok"]
+    assert {json.loads(c.payload_json)["connection_id"] for c in jobs.calls} == {"conn-ok"}

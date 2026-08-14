@@ -28,6 +28,7 @@ from akunaki.application.metrics import CONNECTOR_FETCH
 from akunaki.domain.activity_normalizer import (
     ActivityFact,
     normalize_activity_payload,
+    normalize_google_v4_activity_payload,
     normalize_oura_activity_payload,
     normalize_polar_activity_payload,
 )
@@ -159,7 +160,14 @@ _PROVIDER_ALL_STREAMS: dict[str, tuple[tuple[str, str], ...]] = {
         ("workout", "polar.v1"),
         ("daily_activity", "polar_activity.v1"),
     ),
-    "google_health": (("sleep", "google_health.v4"),),
+    "google_health": (
+        ("sleep", "google_health.v4"),
+        # Steps and active minutes are separate v4 data types, so they are
+        # separate streams; both normalize into the same daily-activity fact,
+        # which the versioned write merges as each lands.
+        ("steps", "google_health_activity.v4"),
+        ("active_minutes", "google_health_activity.v4"),
+    ),
 }
 
 
@@ -900,6 +908,10 @@ class NormalizeHandler:
                 )
             elif revision.schema_version.startswith("polar."):
                 affected_days = self._normalize_workouts(claim, revision, now)
+            elif revision.schema_version.startswith("google_health_activity."):
+                written, affected_days = self._normalize_activity(
+                    claim, revision, now, parse=normalize_google_v4_activity_payload
+                )
             elif revision.schema_version.startswith("google_activity."):
                 written, affected_days = self._normalize_activity(claim, revision, now)
             elif revision.schema_version.startswith("google_health."):
