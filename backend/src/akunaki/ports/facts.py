@@ -39,7 +39,18 @@ class RevisionReaderPort(Protocol):
 
 
 class SleepProviderFactsPort(Protocol):
-    """Read the competing sleep facts for a day, grouped by provider."""
+    """Read a day's competing facts, grouped by the provider that supplied them.
+
+    One port per *decision site* rather than per family: the source policy ranks
+    sleep, naps, and daily activity by the same rules, differing only in which
+    facts compete and which precedence applies.
+    """
+
+    def activity_facts_by_provider(
+        self, *, tenant_id: str, local_health_day: str
+    ) -> dict[str, list[str]]:
+        """Current daily-activity fact ids on the day, keyed by provider."""
+        ...
 
     def sleep_facts_by_provider(
         self, *, tenant_id: str, local_health_day: str, is_nap: bool = False

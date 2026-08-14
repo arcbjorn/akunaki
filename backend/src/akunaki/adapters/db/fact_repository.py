@@ -1020,6 +1020,37 @@ class FactRepository:
             by_entity[ENTITY_TYPE] = sleep_by_provider[chosen]
         return by_entity
 
+    def activity_facts_by_provider(
+        self, *, tenant_id: str, local_health_day: str
+    ) -> dict[str, list[str]]:
+        """Current daily-activity fact ids on one local day, by provider.
+
+        The activity counterpart of :meth:`sleep_facts_by_provider`: every
+        provider writes daily activity, so a day routinely has three competing
+        facts and the precedence has a real contest to resolve. Losers are kept
+        as candidates, since the decision is only auditable with its
+        alternatives.
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(FactRecord.provider, FactRecord.id)
+                .where(
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.entity_type == ACTIVITY_ENTITY_TYPE,
+                    FactRecord.local_health_day == local_health_day,
+                    FactRecord.is_current == 1,
+                    FactRecord.deletion_state == "active",
+                    FactRecord.exclude_from_load == 0,
+                )
+                .order_by(FactRecord.id)
+            ).all()
+
+        by_provider: dict[str, list[str]] = {}
+        for provider, fact_id in rows:
+            if provider is not None:
+                by_provider.setdefault(provider, []).append(fact_id)
+        return by_provider
+
     def sleep_facts_by_provider(
         self, *, tenant_id: str, local_health_day: str, is_nap: bool = False
     ) -> dict[str, list[str]]:

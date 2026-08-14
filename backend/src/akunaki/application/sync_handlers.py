@@ -51,6 +51,7 @@ from akunaki.domain.retry import PermanentJobError, TransientJobError
 from akunaki.domain.secrets import SecretDecryptionError
 from akunaki.domain.sleep_normalizer import NormalizationError, normalize_sleep_payload
 from akunaki.domain.source_policy import (
+    ACTIVITY_METRIC_FAMILY,
     NAP_METRIC_FAMILY,
     SLEEP_METRIC_FAMILY,
     SOURCE_POLICY_VERSION,
@@ -940,6 +941,36 @@ class NormalizeHandler:
         self._selections = selections
         self._clock = clock
 
+    def _record_activity_selection(self, *, tenant_id: str, day: str, now: datetime) -> None:
+        """Persist which provider is authoritative for the day's activity.
+
+        Every provider writes daily activity, so this family routinely has three
+        competing facts for one day — the first case where the precedence has a
+        real contest to resolve rather than a single source to rubber-stamp.
+        Without it the effective-policy surface advertises an activity ordering
+        that nothing ever applies.
+        """
+        if self._sleep_providers is None or self._selections is None:
+            return
+        by_provider = self._sleep_providers.activity_facts_by_provider(
+            tenant_id=tenant_id,
+            local_health_day=day,
+        )
+        if not by_provider:
+            return
+        decision = decide_selection(by_provider, metric_family=ACTIVITY_METRIC_FAMILY)
+        self._selections.record_daily_selection(
+            selection_id=self._new_id(),
+            tenant_id=tenant_id,
+            policy_version=SOURCE_POLICY_VERSION,
+            spec=decision.to_spec(
+                local_health_day=day,
+                metric_family=ACTIVITY_METRIC_FAMILY,
+            ),
+            new_candidate_id=self._new_id,
+            now=now,
+        )
+
     def _record_sleep_selection(self, *, tenant_id: str, day: str, now: datetime) -> None:
         """Persist which provider is authoritative for the day's sleep and naps.
 
@@ -1019,9 +1050,10 @@ class NormalizeHandler:
         # nothing and write nothing.
         written = 0
         affected_days: set[str] = set()
-        # Only a revision that can write sleep facts changes the day's sleep
-        # provider set, and so the source-selection decision.
+        # A revision only changes the provider set for the family it writes
+        # facts into, so each kind tracks its own.
         sleep_bearing = False
+        activity_bearing = False
         try:
             # Activity prefixes are matched **before** their provider's default
             # branch: `polar_activity.v1` also starts with `polar`, so checking
@@ -1031,18 +1063,22 @@ class NormalizeHandler:
                 written, affected_days = self._normalize_activity(
                     claim, revision, now, parse=normalize_oura_activity_payload
                 )
+                activity_bearing = True
             elif revision.schema_version.startswith("polar_activity."):
                 written, affected_days = self._normalize_activity(
                     claim, revision, now, parse=normalize_polar_activity_payload
                 )
+                activity_bearing = True
             elif revision.schema_version.startswith("polar."):
                 affected_days = self._normalize_workouts(claim, revision, now)
             elif revision.schema_version.startswith("google_health_activity."):
                 written, affected_days = self._normalize_activity(
                     claim, revision, now, parse=normalize_google_v4_activity_payload
                 )
+                activity_bearing = True
             elif revision.schema_version.startswith("google_activity."):
                 written, affected_days = self._normalize_activity(claim, revision, now)
+                activity_bearing = True
             elif revision.schema_version.startswith("google_health."):
                 written, affected_days = self._normalize_google_sleep(claim, revision, now)
                 sleep_bearing = True
@@ -1107,13 +1143,20 @@ class NormalizeHandler:
         # fresh recompute. Enqueued regardless of ``written``: a re-normalization
         # that produced no new fact version still safely dedupes at the score
         # layer, and enqueuing is cheap and idempotent.
-        # Record the day's authoritative sleep source before recomputing, so the
-        # score is derived against a decision that is already auditable. Only
-        # sleep-bearing revisions can change the sleep provider set; a workout
-        # or activity page leaves it untouched.
-        if sleep_bearing:
-            for day in sorted(affected_days):
+        # Record the day's authoritative source before recomputing, so the score
+        # is derived against a decision that is already auditable. A revision
+        # only changes the provider set for the family it writes facts into, so
+        # each kind of page records its own: a sleep page cannot change which
+        # provider owns the day's activity, and vice versa.
+        for day in sorted(affected_days):
+            if sleep_bearing:
                 self._record_sleep_selection(
+                    tenant_id=claim.tenant_id,
+                    day=day,
+                    now=now,
+                )
+            if activity_bearing:
+                self._record_activity_selection(
                     tenant_id=claim.tenant_id,
                     day=day,
                     now=now,

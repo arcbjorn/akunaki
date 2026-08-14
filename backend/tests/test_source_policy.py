@@ -194,3 +194,32 @@ def test_spec_carries_its_metric_family() -> None:
 
     assert spec.metric_family == NAP_METRIC_FAMILY
     assert spec.selected_fact_record_id == "g1"
+
+
+def test_activity_contest_ranks_all_three_providers() -> None:
+    """Daily activity is the family where a contest actually happens.
+
+    Every provider writes it, so one day routinely has three competing facts —
+    unlike sleep, where a single source usually rubber-stamps the decision. The
+    losers must be retained: a decision is only auditable with its alternatives.
+    """
+    decision = decide_selection(
+        {"oura": ["o1"], "polar": ["p1"], "google_health": ["g1"]},
+        metric_family=ACTIVITY_METRIC_FAMILY,
+    )
+
+    assert decision.selected_fact_record_id == "g1"
+    assert decision.selection_reason == "policy_match"
+    assert [(c.provider, c.reason) for c in decision.candidates] == [
+        ("google_health", "selected"),
+        ("polar", "lower_precedence"),
+        ("oura", "lower_precedence"),
+    ]
+
+
+def test_a_single_activity_provider_is_only_source_not_a_match() -> None:
+    """One provider is not a contest, and must not read as one."""
+    decision = decide_selection({"oura": ["o1"]}, metric_family=ACTIVITY_METRIC_FAMILY)
+
+    assert decision.selected_fact_record_id == "o1"
+    assert decision.selection_reason == "only_source"
