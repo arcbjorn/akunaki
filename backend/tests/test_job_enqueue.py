@@ -13,8 +13,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,6 +27,7 @@ from akunaki.domain.jobs import (
     JobStatus,
     to_utc_rfc3339,
 )
+from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -38,11 +37,8 @@ def _backend_root() -> Path:
 
 
 def _migrate(database_url: str) -> None:
-    cfg = Config(str(_backend_root() / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", database_url)
-    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
     clear_settings_cache()
-    command.upgrade(cfg, "head")
+    upgrade_to_head(database_url)
 
 
 @pytest.fixture

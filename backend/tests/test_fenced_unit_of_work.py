@@ -15,7 +15,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -27,6 +26,7 @@ from akunaki.adapters.db.unit_of_work import FencedUnitOfWork
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import JobRole, to_utc_rfc3339
 from akunaki.ports.unit_of_work import LeaseLostError
+from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
 LEASE_TTL = timedelta(seconds=30)
@@ -49,7 +49,7 @@ def uow_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    command.upgrade(_alembic_config(url), "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 

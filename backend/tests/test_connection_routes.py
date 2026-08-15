@@ -17,8 +17,6 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx2
 import pytest
-from alembic import command
-from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -40,6 +38,7 @@ from akunaki.api.app import create_app
 from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
 from akunaki.config import ConnectorOAuthConfig, Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
+from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 23, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -52,10 +51,6 @@ POLAR_TOKEN_BODY = {
     "expires_in": 86400,
     "x_user_id": 555,
 }
-
-
-def _backend_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def _settings(url: str) -> Settings:
@@ -75,10 +70,7 @@ def route_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    cfg = Config(str(_backend_root() / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
-    command.upgrade(cfg, "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 

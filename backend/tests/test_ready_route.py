@@ -27,6 +27,7 @@ from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE, AuditVerif
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.audit import ActorType, AuditAction
 from akunaki.domain.jobs import JobClaim, JobRole, to_utc_rfc3339
+from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -74,7 +75,7 @@ def route_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    command.upgrade(_cfg(url), "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 

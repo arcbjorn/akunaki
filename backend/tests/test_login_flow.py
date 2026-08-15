@@ -17,8 +17,6 @@ from pathlib import Path
 import httpx2
 import jwt
 import pytest
-from alembic import command
-from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from jwt import PyJWK, PyJWKClient
@@ -41,6 +39,7 @@ from akunaki.adapters.oidc.client import OIDCClient
 from akunaki.application.login import LoginRejection, LoginService
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.tenants import SYSTEM_TENANT_ID
+from conftest import upgrade_to_head
 
 NOW = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
 ISSUER = "https://auth.example.com"
@@ -89,20 +88,13 @@ def _id_token(nonce: str, **overrides: object) -> str:
     return jwt.encode(claims, _SIGNING_KEY, algorithm="RS256", headers={"kid": KID})
 
 
-def _backend_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 @pytest.fixture
 def login_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     db_path = tmp_path / "login.db"
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    cfg = Config(str(_backend_root() / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
-    command.upgrade(cfg, "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 

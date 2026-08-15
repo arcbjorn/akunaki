@@ -7,8 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -17,13 +15,10 @@ from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.models import SubjectiveCheckIn, Tenant
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.subjective import SubjectiveInputs
+from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
 DAY = "2026-07-22"
-
-
-def _backend_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -32,10 +27,7 @@ def db_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    cfg = Config(str(_backend_root() / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
-    command.upgrade(cfg, "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 

@@ -3,23 +3,17 @@
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 
 import pytest
 
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.worker.__main__ import build_owner, run_worker
+from conftest import upgrade_to_head
 
 
 def _migrate(settings: Settings) -> None:
-    from alembic import command
-    from alembic.config import Config
 
-    backend_root = Path(__file__).resolve().parents[1]
-    cfg = Config(str(backend_root / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", settings.database_url)
-    cfg.set_main_option("script_location", str(backend_root / "src" / "akunaki" / "migrations"))
-    command.upgrade(cfg, "head")
+    upgrade_to_head(settings.database_url)
 
 
 def test_worker_runs_and_shuts_down_cleanly(

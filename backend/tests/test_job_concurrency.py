@@ -39,7 +39,7 @@ from akunaki.domain.jobs import (
     require_aware,
     to_utc_rfc3339,
 )
-from conftest import head_revision
+from conftest import head_revision, upgrade_to_head
 
 T0 = datetime(2026, 7, 13, 12, 0, 0, tzinfo=UTC)
 LEASE_TTL = timedelta(seconds=30)
@@ -61,7 +61,7 @@ def _alembic_config(database_url: str) -> Config:
 
 def _migrate(database_url: str) -> None:
     clear_settings_cache()
-    command.upgrade(_alembic_config(database_url), "head")
+    upgrade_to_head(database_url)
 
 
 def _client_pair(

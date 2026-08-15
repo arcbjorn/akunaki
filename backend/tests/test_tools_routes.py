@@ -13,8 +13,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -53,15 +51,12 @@ from akunaki.domain.anomalies import AnomalySeverity
 from akunaki.domain.confirmations import ConfirmationBinding, canonical_args_hash
 from akunaki.domain.jobs import to_utc_rfc3339
 from akunaki.domain.workout_normalizer import WorkoutFact
+from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
 DAY = "2026-07-22"
 RUN_ID = "run-1"
-
-
-def _backend_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -70,10 +65,7 @@ def route_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    cfg = Config(str(_backend_root() / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
-    command.upgrade(cfg, "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 

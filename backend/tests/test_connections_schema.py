@@ -12,8 +12,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -22,6 +20,7 @@ from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.models import Connection, ConnectionHealth, ConnectionSecret, Tenant
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
+from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -30,20 +29,13 @@ NOW_S = to_utc_rfc3339(T0)
 ConstraintError = (IntegrityError, ValueError)
 
 
-def _backend_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 @pytest.fixture
 def connections_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     db_path = tmp_path / "connections.db"
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    cfg = Config(str(_backend_root() / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
-    command.upgrade(cfg, "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 

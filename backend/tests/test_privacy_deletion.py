@@ -13,8 +13,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -49,6 +47,7 @@ from akunaki.domain.deletion import (
 )
 from akunaki.domain.jobs import JobStatus, to_utc_rfc3339
 from akunaki.domain.sleep_normalizer import normalize_sleep_payload
+from conftest import upgrade_to_head
 
 _AUDIT_IDS = itertools.count(1)
 
@@ -72,20 +71,13 @@ SLEEP_RECORD = json.dumps(
 )
 
 
-def _backend_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 @pytest.fixture
 def del_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     db_path = tmp_path / "deletion.db"
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    cfg = Config(str(_backend_root() / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
-    command.upgrade(cfg, "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 

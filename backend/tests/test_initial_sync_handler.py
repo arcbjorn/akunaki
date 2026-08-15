@@ -16,8 +16,6 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx2
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -47,6 +45,7 @@ from akunaki.domain.tokens import (
     TokenExchangeFailure,
     TokenExchangeResult,
 )
+from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -57,20 +56,13 @@ PAGE_ONE = json.dumps({"data": [{"id": "s1", "score": 82}], "next_token": None})
 PAGE_TWO = json.dumps({"data": [{"id": "s2", "score": 77}], "next_token": None})
 
 
-def _backend_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 @pytest.fixture
 def sync_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     db_path = tmp_path / "handler.db"
     url = f"sqlite+libsql:///{db_path.resolve()}"
     monkeypatch.setenv("AKUNAKI_DATABASE_URL", url)
     clear_settings_cache()
-    cfg = Config(str(_backend_root() / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option("script_location", str(_backend_root() / "src" / "akunaki" / "migrations"))
-    command.upgrade(cfg, "head")
+    upgrade_to_head(url)
     yield url
     clear_settings_cache()
 
