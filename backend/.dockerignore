@@ -1,0 +1,9 @@
+# Only pyproject.toml, uv.lock, alembic.ini, src/, and scripts/ enter the image.
+*
+!pyproject.toml
+!uv.lock
+!alembic.ini
+!src
+!scripts
+src/**/__pycache__
+scripts/**/__pycache__
