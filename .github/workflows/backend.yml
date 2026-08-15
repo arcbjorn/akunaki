@@ -164,6 +164,49 @@ jobs:
           print("api + worker boot core-only with no model config")
           PY
 
+  image-build:
+    name: image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build only — publishing stays in the image workflow, which runs after
+      # this whole workflow is green. This job exists because the quality jobs
+      # cannot catch a broken image: they check out the entire repo, while the
+      # build sees only what .dockerignore admits, so a file the build needs
+      # (README.md, for the readme uv_build opens) can be missing here and
+      # present there. Building on every PR moves that failure before merge.
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: akunaki:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Proves the artifact runs, not just that it assembled: the package
+      # imports and the console entrypoints resolve inside the final image.
+      - name: Image boots core-only
+        run: |
+          set -euo pipefail
+          # -i is required: without stdin attached, `python -` reads an empty
+          # program, exits 0, and this gate passes while asserting nothing.
+          docker run --rm -i \
+            -e AKUNAKI_DATABASE_URL="sqlite+libsql:///tmp/img.db" \
+            akunaki:ci python - <<'PY'
+          import akunaki
+          from akunaki.api.app import create_app
+          from akunaki.worker.__main__ import run_worker
+          print("image imports core package and entrypoints")
+          PY
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
