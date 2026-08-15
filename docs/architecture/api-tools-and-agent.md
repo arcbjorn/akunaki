@@ -21,7 +21,7 @@ No HTTP server exists in this repository yet. Paths and payloads are proposed co
 | Pagination | **Cursor**: `?cursor=&limit=`; response `{ items, next_cursor }` |
 | Idempotency | **`Idempotency-Key`** header on mutating POSTs that create jobs or side effects |
 | Concurrency | Response **`ETag` header** on mutable resources; client sends **`If-Match`**; mismatch → **412** (not body-embedded ETag) |
-| Auth | Session cookie after OIDC code+PKCE; `Authorization: Bearer` reserved for future MCP/service |
+| Auth | Session cookie after OIDC code+PKCE; `Authorization: Bearer` service tokens (read-scoped, hash-only stored, operator-minted) accepted on `/v1/tools` only — the rest of the Bearer surface remains reserved for future MCP/service |
 | Versioning | URL version; additive fields OK; breaking changes require `/v2` |
 | Caching | Authenticated health responses: `Cache-Control: private, no-store`; never durable CDN cache |
 
