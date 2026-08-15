@@ -84,6 +84,14 @@ class Settings(BaseSettings):
         ),
     )
     echo_sql: bool = Field(default=False, description="Echo SQL to logs (dev only).")
+    api_host: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Interface the API binds. Loopback by default so a bare local run "
+            "exposes nothing; a container sets 0.0.0.0 explicitly."
+        ),
+    )
+    api_port: int = Field(default=8000, ge=1, le=65535, description="Port the API binds.")
     secret_keks: str = Field(
         default="",
         description=(

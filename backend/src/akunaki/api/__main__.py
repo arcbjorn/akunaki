@@ -30,11 +30,11 @@ def configure_logging() -> None:
 
 
 def main() -> None:
-    """Run the API with uvicorn (development-oriented defaults)."""
+    """Run the API with uvicorn; bind address comes from settings."""
     configure_logging()
     settings = get_settings()
     app = create_app(settings)
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    uvicorn.run(app, host=settings.api_host, port=settings.api_port, log_level="info")
 
 
 if __name__ == "__main__":
