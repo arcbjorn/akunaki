@@ -1,7 +1,11 @@
-# Only pyproject.toml, uv.lock, alembic.ini, src/, and scripts/ enter the image.
+# Only pyproject.toml, uv.lock, README.md, alembic.ini, src/, and scripts/
+# enter the image. README.md is not documentation ballast: pyproject.toml
+# declares `readme = "README.md"`, so uv_build opens it while building the
+# project and the build fails without it.
 *
 !pyproject.toml
 !uv.lock
+!README.md
 !alembic.ini
 !src
 !scripts

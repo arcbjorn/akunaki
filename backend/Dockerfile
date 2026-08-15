@@ -29,7 +29,10 @@ RUN uv sync --frozen --no-dev --no-install-project
 # CI and local dev run, so alembic.ini's script_location works unchanged.
 # scripts/ rides along for operator acts run inside the container, chiefly
 # service-token minting (scripts/service_token.py).
-COPY alembic.ini ./
+# README.md is required, not decorative: pyproject.toml declares it as the
+# project readme, so this sync's build of akunaki opens it. It is copied here
+# rather than with pyproject.toml so prose edits do not bust the layer above.
+COPY README.md alembic.ini ./
 COPY src ./src
 COPY scripts ./scripts
 RUN uv sync --frozen --no-dev
