@@ -70,3 +70,12 @@ def generate_confirmation_token() -> str:
     the same unguessable entropy.
     """
     return "confirm_" + _b64url(secrets.token_bytes(_TOKEN_ENTROPY_BYTES))
+
+
+def generate_service_token() -> str:
+    """Return a fresh opaque service token for a non-browser API caller.
+
+    Same entropy and hash-only storage as session tokens; the prefix makes a
+    leaked string recognizable to secret scanners as an akunaki credential.
+    """
+    return "aksvc_" + _b64url(secrets.token_bytes(_TOKEN_ENTROPY_BYTES))

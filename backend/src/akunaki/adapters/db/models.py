@@ -1287,6 +1287,38 @@ class SessionRow(Base):
     )
 
 
+class ServiceToken(Base):
+    """A backend-issued bearer credential for a non-browser caller.
+
+    Stores the hash only, like sessions: the raw token is shown once at issue
+    time and never persisted. ``expires_at`` is nullable — a long-lived agent
+    token's lifecycle is revocation, not expiry — and ``scope`` is checked to
+    the known values so an unknown scope cannot be smuggled in by SQL.
+    """
+
+    __tablename__ = "service_tokens"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("length(name) > 0", name="service_token_name_nonempty"),
+        CheckConstraint("scope IN ('read')", name="service_token_scope_known"),
+        Index("ix_service_tokens_token_hash", "token_hash", unique=True),
+    )
+
+
 class LoginState(Base):
     """One in-flight OIDC login attempt.
 
