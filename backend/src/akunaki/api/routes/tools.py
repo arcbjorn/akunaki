@@ -3,7 +3,8 @@
 This is the "tools usable by REST without model packages" phase-two exit
 criterion in the flesh: the same typed registry an agent or MCP adapter would
 use is exposed to a plain HTTP client. Every tool runs under the caller's
-session context, so a tool can no more cross tenants than a direct route.
+authenticated context — a browser session or a read-scoped bearer service
+token — so a tool can no more cross tenants than a direct route.
 
 Read tools execute directly. Each mutating tool declares a
 ``ConfirmationPolicy`` and the route asks the tool, rather than hardcoding one
@@ -33,7 +34,7 @@ from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.api.app import get_session_factory
-from akunaki.api.security import CurrentSession
+from akunaki.api.security import CurrentToolCaller, ToolCaller
 from akunaki.application.anomalies_surface import AnomaliesSurfaceService
 from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.deletion_service import DeletionService
@@ -43,6 +44,7 @@ from akunaki.application.sleep_surface import SleepSurfaceService
 from akunaki.application.sync_request import SyncRequestService
 from akunaki.application.today_surface import TodaySurfaceService
 from akunaki.application.tool_registry import (
+    SideEffect,
     Tool,
     ToolContext,
     ToolNotFoundError,
@@ -54,7 +56,7 @@ from akunaki.application.tools.privacy import register_privacy_tools
 from akunaki.application.workouts_surface import WorkoutsSurfaceService
 from akunaki.domain.audit import ActorType, AuditAction
 from akunaki.domain.confirmations import ConfirmationBinding, canonical_args_hash
-from akunaki.domain.sessions import AuthenticatedSession
+from akunaki.domain.service_tokens import AuthenticatedServiceToken
 
 logger = logging.getLogger("akunaki.tools")
 
@@ -155,7 +157,7 @@ RegistryDep = Annotated[ToolRegistry, Depends(_registry)]
 
 @router.get("", response_model=ToolListResponse)
 def list_tools(
-    response: Response, session: CurrentSession, registry: RegistryDep
+    response: Response, caller: CurrentToolCaller, registry: RegistryDep
 ) -> ToolListResponse:
     """List the registered tools and their metadata."""
     response.headers["Cache-Control"] = "private, no-store"
@@ -178,7 +180,7 @@ def _require_confirmation(
     *,
     tool: Tool[Any, Any],
     body: ToolInvokeRequest,
-    session: AuthenticatedSession,
+    caller: ToolCaller,
     confirmations: ConfirmationRepository,
 ) -> None:
     """Redeem the confirmation authorizing this exact call, or refuse it.
@@ -198,8 +200,8 @@ def _require_confirmation(
         )
 
     requested = ConfirmationBinding(
-        tenant_id=session.tenant_id,
-        user_id=session.user_id,
+        tenant_id=caller.tenant_id,
+        user_id=caller.user_id,
         run_id=body.run_id,
         tool_name=tool.name,
         args_hash=canonical_args_hash(body.input),
@@ -225,7 +227,7 @@ def _audit_invocation(
     *,
     tool: Tool[Any, Any],
     body: ToolInvokeRequest,
-    session: AuthenticatedSession,
+    caller: ToolCaller,
     audit: AuditRepository,
     outcome: str,
 ) -> None:
@@ -244,16 +246,20 @@ def _audit_invocation(
     if not tool.is_audited:
         return
     metadata = {"outcome": outcome}
-    if body.run_id is not None:
+    if isinstance(caller, AuthenticatedServiceToken):
+        # A service token acts for the user but is not the user at a browser;
+        # a reviewer of a refused mutation needs to see which credential tried.
+        metadata["origin"] = "service_token"
+    elif body.run_id is not None:
         # Distinguishes an agent-originated call from a direct one, which is
         # the first thing a reviewer asks about a suspicious mutation.
         metadata["origin"] = "agent_run"
     try:
         audit.record(
             event_id=str(uuid.uuid4()),
-            tenant_id=session.tenant_id,
+            tenant_id=caller.tenant_id,
             actor_type=ActorType.USER,
-            actor_id=session.user_id,
+            actor_id=caller.user_id,
             action=AuditAction.TOOL_INVOKE,
             resource_type="tool",
             resource_id=tool.name,
@@ -268,13 +274,13 @@ def _audit_invocation(
 def invoke_tool(
     tool_name: str,
     response: Response,
-    session: CurrentSession,
+    caller: CurrentToolCaller,
     registry: RegistryDep,
     body: ToolInvokeRequest,
     confirmations: Annotated[ConfirmationRepository, Depends(_confirmations)],
     audit: Annotated[AuditRepository, Depends(_audit)],
 ) -> dict[str, Any]:
-    """Invoke a read tool by name under the caller's session context."""
+    """Invoke a read tool by name under the caller's context."""
     response.headers["Cache-Control"] = "private, no-store"
     try:
         tool = registry.get(tool_name)
@@ -282,6 +288,14 @@ def invoke_tool(
         raise HTTPException(
             status_code=404, detail={"code": "tool_not_found", "name": tool_name}
         ) from exc
+
+    # A service token is read-scoped by construction: a mutation needs a
+    # cookie session (CSRF-attributed) and, per the tool's policy, a
+    # confirmation. Refused before the confirmation machinery so a stolen
+    # token cannot even probe it.
+    if isinstance(caller, AuthenticatedServiceToken) and tool.side_effect is not SideEffect.NONE:
+        _audit_invocation(tool=tool, body=body, caller=caller, audit=audit, outcome="refused")
+        raise HTTPException(status_code=403, detail={"code": "forbidden"})
 
     # The tool's declared policy decides, not this route: a read needs nothing,
     # an "if agent" mutation needs one only inside an agent run, and a
@@ -291,21 +305,21 @@ def invoke_tool(
             _require_confirmation(
                 tool=tool,
                 body=body,
-                session=session,
+                caller=caller,
                 confirmations=confirmations,
             )
         except HTTPException:
             # A refused mutation is the most audit-worthy event there is: it is
             # what a confused-deputy attempt looks like from the outside.
-            _audit_invocation(tool=tool, body=body, session=session, audit=audit, outcome="refused")
+            _audit_invocation(tool=tool, body=body, caller=caller, audit=audit, outcome="refused")
             raise
 
-    context = ToolContext(tenant_id=session.tenant_id, user_id=session.user_id)
+    context = ToolContext(tenant_id=caller.tenant_id, user_id=caller.user_id)
     try:
         result = tool.invoke(body.input, context)
     except ValueError as exc:
         # Input validation or a bad day argument: a client error, not a 500.
-        _audit_invocation(tool=tool, body=body, session=session, audit=audit, outcome="failed")
+        _audit_invocation(tool=tool, body=body, caller=caller, audit=audit, outcome="failed")
         raise HTTPException(
             status_code=422, detail={"code": "invalid_tool_input", "message": str(exc)}
         ) from exc
@@ -313,8 +327,8 @@ def invoke_tool(
         # The tool ran but its subject does not exist for this tenant. The
         # message is generic on purpose: unknown and cross-tenant must be
         # indistinguishable, so an id cannot be probed through a tool either.
-        _audit_invocation(tool=tool, body=body, session=session, audit=audit, outcome="failed")
+        _audit_invocation(tool=tool, body=body, caller=caller, audit=audit, outcome="failed")
         raise HTTPException(status_code=404, detail={"code": "not_found"}) from exc
 
-    _audit_invocation(tool=tool, body=body, session=session, audit=audit, outcome="succeeded")
+    _audit_invocation(tool=tool, body=body, caller=caller, audit=audit, outcome="succeeded")
     return result.model_dump()

@@ -19,8 +19,10 @@ from typing import Annotated
 from fastapi import Cookie, Depends, Header, HTTPException, Request, Response
 from sqlalchemy.orm import Session, sessionmaker
 
+from akunaki.adapters.db.service_token_repository import ServiceTokenRepository
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import get_session_factory
+from akunaki.domain.service_tokens import AuthenticatedServiceToken
 from akunaki.domain.sessions import AuthenticatedSession
 
 SESSION_COOKIE_NAME = "akunaki_session"
@@ -118,3 +120,48 @@ def require_session(
 
 
 CurrentSession = Annotated[AuthenticatedSession, Depends(require_session)]
+
+
+# A caller of the tools surface: a browser session or a read-scoped service
+# token. Everything else on /v1 stays session-only; the registry is the one
+# surface designed for non-browser callers (agent, MCP), so Bearer lands here
+# first — exactly where the security design reserved it.
+ToolCaller = AuthenticatedSession | AuthenticatedServiceToken
+
+
+def _service_tokens(
+    session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
+) -> ServiceTokenRepository:
+    return ServiceTokenRepository(session_factory)
+
+
+def require_tool_caller(
+    request: Request,
+    sessions: Annotated[SessionRepository, Depends(_sessions)],
+    service_tokens: Annotated[ServiceTokenRepository, Depends(_service_tokens)],
+    session_cookie: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
+    csrf_header: Annotated[str | None, Header(alias=CSRF_HEADER_NAME)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> ToolCaller:
+    """Authenticate a tools-surface caller: bearer service token or session.
+
+    An ``Authorization`` header commits the caller to the bearer path — a
+    request carrying both credentials is not silently downgraded to the
+    cookie, so a rejected token cannot ride along on ambient cookie auth.
+    Bearer requests skip CSRF deliberately: CSRF defends ambient cookie
+    authority, which a header the caller must attach does not have.
+    """
+    if authorization is not None:
+        scheme, _, credential = authorization.partition(" ")
+        credential = credential.strip()
+        if scheme.lower() != "bearer" or not credential:
+            raise _unauthenticated()
+        result = service_tokens.validate(token=credential, now=datetime.now(UTC))
+        if not result.ok or result.principal is None:
+            raise _unauthenticated()
+        return result.principal
+
+    return require_session(request, sessions, session_cookie, csrf_header)
+
+
+CurrentToolCaller = Annotated[ToolCaller, Depends(require_tool_caller)]
