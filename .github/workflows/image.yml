@@ -1,0 +1,61 @@
+name: image
+
+# Publishes ghcr.io/arcbjorn/akunaki, but only for a master commit whose
+# backend workflow (lint, types, tests, migrations, boot boundary) already
+# passed — a red build must never become :latest. The built-in GITHUB_TOKEN
+# pushes to the repo owner's namespace, so no extra publish secret exists.
+
+on:
+  workflow_run:
+    workflows: [backend]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: build and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # On workflow_run, build exactly the commit the gates passed on.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          # The base node is amd64; add arm64 only when a node needs it.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
