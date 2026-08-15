@@ -28,6 +28,7 @@ dev = [
     "mypy==2.3.0",
     "import-linter==2.13",
     "pip-audit==2.10.1",
+    "pytest-xdist==3.8.0",
 ]
 
 [build-system]
@@ -44,7 +45,10 @@ pythonpath = ["src"]
 # Coverage is not in addopts: it slows every local run. CI passes --cov
 # explicitly (see the quality job), which is what backs the "Tested" column
 # in docs/implementation-status.md.
-addopts = ["-q", "--strict-markers", "--strict-config"]
+# -n auto: tests are per-file-DB isolated, so xdist parallelism is safe; with
+# the once-per-process migrated-template copy (conftest.upgrade_to_head) it
+# takes the suite from minutes to seconds. Serial debugging: pytest -n 0.
+addopts = ["-q", "--strict-markers", "--strict-config", "-n", "auto"]
 filterwarnings = ["error"]
 
 [tool.coverage.run]
