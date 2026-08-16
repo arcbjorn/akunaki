@@ -135,6 +135,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.include_router(auth_router)
 
+    # The public training calendar only when a tenant is named: it is
+    # unauthenticated and discloses that tenant's trained/untrained days to
+    # anyone, so it is not registered at all unless the deployment opts in.
+    if resolved.public_training_tenant_id.strip():
+        from akunaki.api.routes.public_training import router as public_training_router
+
+        app.include_router(public_training_router)
+
     # Metrics only when enabled: the endpoint is unauthenticated (a scraper
     # cannot hold a session cookie), so it is not registered at all unless the
     # deployment opts in and can restrict who reaches the port.

@@ -163,6 +163,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    public_training_tenant_id: str = Field(
+        default="",
+        description=(
+            "Tenant whose training calendar is served on the unauthenticated "
+            "GET /v1/public/training. Empty (the default) leaves the route "
+            "unmounted. The surface discloses only which local days carried a "
+            "workout session over a fixed 30-day window plus the streaks derived "
+            "from them - no times, zones, loads, or any other measurement - and "
+            "is meant for a personal public page, so it names one tenant "
+            "explicitly rather than inferring the sole user."
+        ),
+    )
+
     # Per-connector OAuth credentials. Each provider is link-enabled only when
     # its id, secret, and redirect are all set — an unconfigured provider is not
     # mounted, so there is no half-built connect surface (as with OIDC login).

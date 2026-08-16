@@ -1014,6 +1014,49 @@ class FactRepository:
                 result[day] = per_provider[chosen]
         return result
 
+    def workout_days(
+        self,
+        *,
+        tenant_id: str,
+        local_health_days: list[str],
+    ) -> dict[str, tuple[str, ...]]:
+        """The local days that carry a workout session, with who recorded them.
+
+        Answers only *whether* a day was trained and by which providers — no
+        count, timing, or load — for the public training calendar, whose
+        disclosure is deliberately that narrow. Providers are the sorted set
+        that recorded a session that day, so a caller can name its sources
+        without learning anything about the sessions themselves.
+
+        The same eligibility as :meth:`daily_strain_load`: current, active,
+        ``exclude_from_load = 0`` (a duplicate of a session another provider
+        already recorded neither adds a day nor a source). A day with no
+        eligible fact is absent — the caller treats absence as untrained.
+        """
+        if not local_health_days:
+            return {}
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(FactRecord.local_health_day, FactRecord.provider)
+                .join(WorkoutSession, WorkoutSession.fact_record_id == FactRecord.id)
+                .where(
+                    FactRecord.tenant_id == tenant_id,
+                    FactRecord.entity_type == WORKOUT_ENTITY_TYPE,
+                    FactRecord.local_health_day.in_(local_health_days),
+                    FactRecord.is_current == 1,
+                    FactRecord.deletion_state == "active",
+                    FactRecord.exclude_from_load == 0,
+                )
+                .distinct()
+            ).all()
+
+        by_day: dict[str, set[str]] = {}
+        for day, provider in rows:
+            if day is None or provider is None:
+                continue
+            by_day.setdefault(day, set()).add(provider)
+        return {day: tuple(sorted(providers)) for day, providers in by_day.items()}
+
     def _daily_vital(
         self,
         *,

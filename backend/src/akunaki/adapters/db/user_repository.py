@@ -169,3 +169,21 @@ class UserRepository:
             primary_timezone=primary_timezone,
             display_name=display_name,
         )
+
+    def tenant_timezone(self, *, tenant_id: str) -> str | None:
+        """The tenant's stated ``primary_timezone``, or None when no such tenant.
+
+        For a surface with no caller to name a day — the public training
+        calendar — this is the only legitimate way to decide what "today" is:
+        the tenant's own stated preference, never the server's clock alone.
+        None means the tenant does not exist (or was scrubbed), which the
+        caller must treat as "not provisioned", not as UTC.
+        """
+        with self._session_factory() as session:
+            row = session.execute(
+                select(Tenant.primary_timezone).where(Tenant.id == tenant_id)
+            ).one_or_none()
+        if row is None:
+            return None
+        timezone: str = row[0]
+        return timezone
