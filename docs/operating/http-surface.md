@@ -93,7 +93,7 @@ logs.
 | Mode | Applies to | Mechanism |
 |------|-----------|-----------|
 | Session cookie | Everything under `/v1` except as noted | `akunaki_session` cookie; `X-Akunaki-CSRF` header additionally required on `POST`/`PUT`/`PATCH`/`DELETE` |
-| Session **or** bearer | `/v1/tools` only | Cookie session, or `Authorization: Bearer <service token>` |
+| Session **or** bearer | `/v1/tools` only | Cookie session, or `Authorization: Bearer <service token>`; which tools a token may invoke depends on its scope |
 | Vendor signature | `/webhooks/*` | Per-provider HMAC or Google push OIDC token — no session |
 | None | `/healthz`, `/readyz`, `/metrics`, `/auth/*` | Unauthenticated by design |
 
@@ -215,7 +215,7 @@ which internal check failed:
 | Status | Meaning here |
 |--------|--------------|
 | `401` | Unauthenticated. One generic body for every cause |
-| `403` | Authenticated but refused: CSRF missing/invalid, confirmation required or invalid, or a service token attempting a mutation |
+| `403` | Authenticated but refused: CSRF missing/invalid, confirmation required or invalid, or a service token attempting a tool its scope does not admit |
 | `404` | Not found **or** not configured **or** another tenant's — indistinguishable on purpose |
 | `409` | Exists but not in a usable state (e.g. a connection needing re-consent) |
 | `422` | Invalid input |

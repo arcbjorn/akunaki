@@ -118,6 +118,10 @@ The raw token is printed **once** and is not stored — only its hash lands in
 the database. Capture it into your secret store immediately; a lost token can
 only be replaced by minting a new one and revoking the old.
 
+The token is `read`-scoped unless you pass `--scope read_sync`, which
+additionally lets it trigger `connections.sync`. The scope is fixed at mint
+time, so start narrow — widening means minting a replacement.
+
 Full usage, scope semantics, and revocation are in
 [tools-api.md](tools-api.md#minting-listing-and-revoking-tokens).
 
@@ -128,7 +132,13 @@ Full usage, scope semantics, and revocation are in
 Connector linking is **session-authenticated** — it runs through the same
 browser session the login established, at
 `GET /v1/connections/{provider}/authorize`. A service token cannot link a
-connector: it is read-scoped, and linking is a mutation.
+connector at any scope: linking requires a browser to walk the provider's
+consent screen, and the callback is session-authenticated.
+
+Completing a link queues the connection's history backfill immediately, one job
+per stream the provider serves, reaching back `AKUNAKI_LOOKBACK_DAYS` (default
+30) — see [configuration.md](configuration.md#history-window). Data should
+begin appearing within a worker cycle rather than at the next reconcile sweep.
 
 Per-provider portal setup, redirect URIs, and scopes are in
 [connectors.md](connectors.md).

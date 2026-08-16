@@ -43,7 +43,8 @@ and ignores it.
 
 `scripts/` is copied into the image at `/app/scripts`, so operator acts run
 inside a container with the deployed code and its exact dependencies. That is
-how you mint a service token — see [tools-api.md](tools-api.md#minting-a-token)
+how you mint a service token — see
+[tools-api.md](tools-api.md#minting-listing-and-revoking-tokens)
 and [bootstrap.md](bootstrap.md).
 
 The image is built from a `.dockerignore` allow-list: only `pyproject.toml`,

@@ -56,9 +56,8 @@ The arguments go **inside an `input` object**, not at the top level. An empty
 an empty object if omitted entirely. The response body is the tool's typed
 output model, returned directly.
 
-Three more fields exist on the request body, all for mutating tools and all
-unusable with a service token: `confirmation_token`, `idempotency_key`, and
-`run_id`.
+Three more fields exist on the request body, all for mutating tools:
+`confirmation_token`, `idempotency_key`, and `run_id`.
 
 ### Response codes
 
@@ -66,7 +65,7 @@ unusable with a service token: `confirmation_token`, `idempotency_key`, and
 |--------|---------|
 | `200` | The tool ran; body is its output |
 | `401` | Missing, malformed, unknown, expired, or revoked token — one generic body for all |
-| `403` | A service token attempted a tool with a side effect, or a confirmation was required and absent/invalid |
+| `403` | A service token attempted a tool its scope does not admit, or a confirmation was required and absent/invalid |
 | `404` | No such tool — **or** the tool ran and its subject does not exist for this tenant |
 | `422` | Invalid input for that tool |
 
@@ -76,52 +75,74 @@ through a route.
 
 ---
 
-## A service token is read-scoped by construction
+## What a service token may reach
 
-This is the security property that makes handing a token to an agent
-reasonable, and it is worth stating precisely.
+A token's **scope** bounds which tools it can invoke, and the boundary follows
+each tool's declared `ConfirmationPolicy` rather than a blanket "does it have a
+side effect" test. Those are not the same question. `connections.sync` enqueues
+the same job a webhook already queues — idempotent, deduplicated, and something
+the user can trigger themselves from their own session. `privacy.delete`
+destroys data inline and cannot be undone. Treating them identically meant the
+benign one was unreachable so that the irreversible one would be.
 
-`ServiceTokenScope` has exactly one member: `READ`. There is no write scope to
-grant, no flag to widen a token, and no code path that issues anything else.
+### The two scopes
 
-The enforcement is in the invoke route, and it is **positioned before the
-confirmation machinery**:
+| Scope | Admits |
+|-------|--------|
+| `read` (default) | Tools whose policy is `never` — every read tool |
+| `read_sync` | The same, plus tools whose policy is `if_agent` — today `connections.sync` |
 
-```python
-if isinstance(caller, AuthenticatedServiceToken) and tool.side_effect is not SideEffect.NONE:
-    ... audit "refused" ...
-    raise HTTPException(status_code=403, ...)
-```
+**No scope admits an `always` tool.** `privacy.delete` is refused for every
+service token however it was minted. A confirmation is what guards a
+destructive action, and a bearer credential that could carry one would turn a
+stolen token into an erasure.
 
-A bearer caller invoking any tool with a side effect is refused with `403`
-*before* any confirmation token is examined. So a stolen service token cannot
-even probe the confirmation system — it cannot discover whether a confirmation
-would have been accepted, or which tokens are live.
+The check sits in the invoke route, **before the confirmation machinery**, so a
+token that may not reach a tool cannot probe whether a confirmation would have
+been accepted or which tokens are live. Concretely:
 
-Concretely, with a service token:
+| Tool | `ConfirmationPolicy` | `read` token | `read_sync` token |
+|------|----------------------|--------------|-------------------|
+| `health.get_today` | `never` | Works | Works |
+| `health.get_recovery` | `never` | Works | Works |
+| `health.get_sleep` | `never` | Works | Works |
+| `health.find_anomalies` | `never` | Works | Works |
+| `health.get_recent_workouts` | `never` | Works | Works |
+| `health.get_workout` | `never` | Works | Works |
+| `connections.list` | `never` | Works | Works |
+| `connections.sync` | `if_agent` | **403** | Works |
+| `privacy.delete` | `always` | **403** | **403** |
 
-| Tool | `side_effect` | Bearer caller |
-|------|---------------|---------------|
-| `health.get_today` | `none` | Works |
-| `health.get_recovery` | `none` | Works |
-| `health.get_sleep` | `none` | Works |
-| `health.find_anomalies` | `none` | Works |
-| `health.get_recent_workouts` | `none` | Works |
-| `health.get_workout` | `none` | Works |
-| `connections.list` | `none` | Works |
-| `connections.sync` | `enqueue_job` | **403** |
-| `privacy.delete` | `destroy_data` | **403** |
+### The capability is opt-in at mint time
 
-Every refusal is written to the audit trail with `origin: service_token`,
-because a refused mutation is what a confused-deputy attempt looks like from
-the outside. The trail records *that* a tool ran and how it ended — never the
-arguments.
+`read` is the default, and there is no way to widen a token that already
+exists. A token minted before `read_sync` existed keeps exactly the authority it
+was granted; to grant more, mint a new token and revoke the old one. That is
+also why the scope is a stored column with a CHECK constraint — a row edited
+out of band cannot invent a grant the code does not understand.
 
-**Consequence for integrations:** an agent given a service token can read
-health data and list connections, and nothing else. To trigger a sync or an
-erasure, a human must act through a browser session — with CSRF, and (for
-`privacy.delete`) an explicit confirmation. Design the integration around that;
-there is no configuration that relaxes it.
+### Confirmations still apply
+
+Scope decides which tools a token may reach. The tool's policy still decides
+what a **particular call** needs. A `read_sync` token invoking
+`connections.sync`:
+
+- **without `run_id`** — runs. The token is itself the deliberate, operator-issued
+  authorization, and the enqueue is idempotent and deduplicated.
+- **with `run_id`** — needs a confirmation bound to that exact call, exactly as a
+  session caller does. Confirmations are issued from a browser session
+  (`POST /v1/confirmations`) and bind `(tenant, user, run_id, tool, args hash,
+  idempotency key)`; because a service token acts for the same user, it can
+  redeem one the user granted.
+
+Every invocation — refused or successful — is written to the audit trail with
+`origin: service_token`, so a reviewer can always tell which credential asked.
+The trail records *that* a tool ran and how it ended, never the arguments.
+
+**Consequence for integrations:** an agent with a `read` token can read health
+data and list connections, and nothing else. An agent with a `read_sync` token
+can additionally ask for fresh data. Neither can erase anything; that requires
+a browser session and an explicit confirmation, and no configuration relaxes it.
 
 ---
 
@@ -158,6 +179,7 @@ write the database file:
 
 ```
 python /app/scripts/service_token.py issue --name my-agent
+python /app/scripts/service_token.py issue --name my-agent --scope read_sync
 python /app/scripts/service_token.py issue --name ci-probe --ttl-days 7
 ```
 
@@ -178,6 +200,11 @@ caller's secret store now:
 The raw token is printed once and **never stored** — only its SHA-256 hash
 lands in the database. There is no recovery path; a lost token is replaced by
 minting a new one and revoking the old.
+
+`--scope` is optional and defaults to `read`. Pass `--scope read_sync` only for
+a consumer that genuinely needs to trigger syncs; see
+[what a service token may reach](#what-a-service-token-may-reach). The scope is
+fixed at mint time and cannot be changed afterwards.
 
 `--ttl-days` is optional. Omitted, the token does not expire and is retired only
 by revocation — appropriate for a personal agent's long-lived credential, but it
@@ -216,6 +243,9 @@ token gets a `401`.
 
 - **One token per consumer.** Revocation is per-token, so a shared token cannot
   be rotated for one caller without breaking the others.
+- **Mint the narrowest scope that works.** `read` is the default for a reason.
+  A consumer that only reads a day view should not hold a credential that can
+  cause vendor calls, and you cannot narrow a token later — only revoke it.
 - **Rotate by overlap.** Mint the new token, deploy it to the consumer, confirm
   traffic, then revoke the old one. There is no built-in grace period.
 - **Bearer requests skip CSRF**, deliberately — CSRF defends ambient cookie
@@ -226,6 +256,7 @@ token gets a `401`.
   is rejected, not downgraded to the cookie.
 - **`model_exposure` is declared, not enforced.** The field states whether a
   model may invoke a tool, but no agent caller exists in this codebase to
-  enforce it against. `confirmation` and the read-only scope are what actually
-  guard a mutation today. If you build an agent adapter, it must consult
-  `model_exposure` itself.
+  enforce it against. The tool's `ConfirmationPolicy` and the token's scope are
+  what actually guard a mutation today. If you build an agent adapter, it must
+  consult `model_exposure` itself — note that `privacy.delete` sets it to
+  `false`, and a bearer token cannot reach it under any scope regardless.

@@ -151,6 +151,38 @@ registry and no HTTP server; observe the worker through `/readyz` instead.
 
 ---
 
+## History window
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `AKUNAKI_LOOKBACK_DAYS` | `30` | How far back a backfill reaches, in days. Validated to 1–3650; anything outside stops the process at settings load. |
+
+**What it governs: first sync only.** The window applies to a connection's
+initial backfill, and to any later sync for a stream that still has no cursor.
+An established connection resumes from its stored cursor minus a 36-hour
+overlap, so raising or lowering this value does not change what an already-
+syncing connection fetches. To re-read further back on a connection that has
+already synced, you must clear its cursor — changing this variable alone will
+not do it.
+
+**Effect on the first sync.** With the default, linking a connector fetches
+roughly the last 30 days per stream (plus the overlap, and widened where a
+vendor imposes a minimum window — Google Health v4 refuses ranges narrower than
+14 days). Raising it to `365` makes that first sync proportionally larger: more
+vendor calls, more pages, more raw revisions, and a longer first run. It is
+safe to raise — re-fetched records deduplicate on content hash, so a wider
+window never produces duplicate facts — but a provider serves only what it
+retains, so a large value cannot conjure history the vendor no longer has
+(Polar's `/v3/exercises`, for instance, returns its own 30-day retention set
+and ignores the requested bounds entirely).
+
+**It is a worker setting.** The value reaches sync behaviour through the worker's
+handler wiring, so it must be set on the **worker** process. Setting it only on
+the API has no effect. Like every setting, it is read once at boot; changing it
+requires a restart.
+
+---
+
 ## Connector OAuth
 
 Nine variables in three symmetric groups. All three of a provider's variables
