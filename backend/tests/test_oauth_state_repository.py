@@ -25,7 +25,7 @@ from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
 from akunaki.domain.oauth import OAuthStateRejection
-from conftest import upgrade_to_head
+from conftest import held_write_lock, upgrade_to_head
 
 T0 = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
 TTL = timedelta(minutes=10)
@@ -168,6 +168,30 @@ def test_state_is_single_use(repository: OAuthStateRepository) -> None:
     assert not second.ok
     assert second.rejection is OAuthStateRejection.ALREADY_CONSUMED
     assert second.sealed_verifier is None
+
+
+def test_consume_waits_out_a_held_write_lock(
+    repository: OAuthStateRepository, oauth_db: str
+) -> None:
+    """A contended callback must wait, not surface ``database is locked``.
+
+    Two connector callbacks racing for one state both open a write transaction.
+    libsql raises under a concurrent writer even with ``busy_timeout`` set, so
+    without ``run_short_tx`` the loser got an unhandled error — a 500 on a link
+    that should have reported ``ALREADY_CONSUMED``, the very rejection this
+    repository exists to return.
+    """
+    state = generate_state()
+    verifier = _create(repository, state=state)
+
+    with held_write_lock(oauth_db, table="oauth_states"):
+        result = repository.consume(state=state, redirect_uri=REDIRECT, now=T0)
+
+    # It waited for the lock and then did the real work, rather than raising.
+    assert result.ok
+    assert result.rejection is None
+    assert result.sealed_verifier is not None
+    assert _sealer().open(result.sealed_verifier, aad=b"state-1").decode() == verifier
 
 
 def test_expired_state_is_rejected(repository: OAuthStateRepository) -> None:

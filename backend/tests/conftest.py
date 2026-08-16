@@ -6,7 +6,9 @@ import atexit
 import os
 import shutil
 import tempfile
+import threading
 from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -114,6 +117,45 @@ def upgrade_to_head(database_url: str) -> None:
         sibling = template.with_name(template.name + suffix)
         if sibling.exists():
             shutil.copyfile(sibling, Path(str(target) + suffix))
+
+
+@contextmanager
+def held_write_lock(database_url: str, *, table: str, hold_for_s: float = 0.4) -> Iterator[None]:
+    """Hold an exclusive write lock on ``table`` for the duration of the block.
+
+    Makes lock contention **deterministic**. Racing threads only reproduce it on
+    a machine slow enough to lose the engine's 50ms ``busy_timeout`` — which is
+    why the login-state race passed locally for months and then failed on a
+    loaded CI runner. Holding the lock outright removes the timing luck: any
+    write inside the block *must* contend.
+
+    The default hold is 8x ``BUSY_TIMEOUT_MS`` (long enough that an unretried
+    write is certain to fail) and well inside ``run_short_tx``'s 2s budget (so a
+    retried one is certain to succeed). Tests assert the outcome, not a timing.
+    """
+    engine = create_db_engine(Settings(database_url=database_url))
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with engine.connect() as conn:
+            conn.execute(text("BEGIN IMMEDIATE"))
+            # A no-op self-update: takes the write lock without changing a row,
+            # so the contending write sees unmodified data once it proceeds.
+            conn.execute(text(f"UPDATE {table} SET rowid = rowid"))  # noqa: S608
+            holding.set()
+            release.wait(timeout=hold_for_s)
+            conn.execute(text("ROLLBACK"))
+
+    holder = threading.Thread(target=hold, name="lock-holder")
+    holder.start()
+    try:
+        assert holding.wait(timeout=10), "the blocker never acquired the write lock"
+        yield
+    finally:
+        release.set()
+        holder.join(timeout=10)
+        engine.dispose()
 
 
 @pytest.fixture

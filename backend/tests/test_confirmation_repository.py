@@ -26,7 +26,7 @@ from akunaki.domain.confirmations import (
     canonical_args_hash,
 )
 from akunaki.domain.jobs import to_utc_rfc3339
-from conftest import upgrade_to_head
+from conftest import held_write_lock, upgrade_to_head
 
 T0 = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
 NOW_S = to_utc_rfc3339(T0)
@@ -141,6 +141,33 @@ def test_replay_is_rejected(factory: sessionmaker[Session]) -> None:
     second = repo.consume(token=token, requested=_binding(), now=T0)
 
     assert second is ConfirmationRejection.ALREADY_CONSUMED
+
+
+def test_consume_waits_out_a_held_write_lock(
+    factory: sessionmaker[Session], confirm_db: str
+) -> None:
+    """A contended redemption must wait, not surface ``database is locked``.
+
+    This path matters most of the three. The CAS is deliberately built on the
+    loser *blocking* until the winner commits, but libsql only waits for
+    ``BUSY_TIMEOUT_MS`` and then raises — so without ``run_short_tx`` the
+    serialization this design depends on became a 500, turning a security
+    control into an error a caller cannot interpret. A 500 does not say whether
+    the mutation ran, so the natural response is to retry a call that may
+    already have executed.
+    """
+    repo = ConfirmationRepository(factory)
+    token = _issue(repo)
+
+    with held_write_lock(confirm_db, table="tool_confirmations"):
+        rejection = repo.consume(token=token, requested=_binding(), now=T0)
+
+    # Waited for the lock, then authorized normally.
+    assert rejection is None
+    # And it really was consumed: single-use still holds after a retry.
+    assert repo.consume(token=token, requested=_binding(), now=T0) is (
+        ConfirmationRejection.ALREADY_CONSUMED
+    )
 
 
 def test_sequential_replay_is_rejected_repeatedly(

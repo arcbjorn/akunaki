@@ -6,6 +6,11 @@ concurrent executions of the same confirmation cannot both pass: exactly one
 wins the CAS and the other sees zero affected rows and is rejected as already
 consumed. Checking and then updating in separate statements would leave a
 window in which a replay succeeds — which is precisely rule 4.
+
+That CAS assumes the loser *waits* for the winner. libsql only waits for
+``BUSY_TIMEOUT_MS`` and then raises ``database is locked``, so consumption runs
+under the shared ``run_short_tx`` retry; otherwise the losing redeemer got an
+unhandled error instead of the rejection the design specifies.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.crypto.sessions import hash_token
-from akunaki.adapters.db.job_repository import affected_rows
+from akunaki.adapters.db.job_repository import affected_rows, run_short_tx
 from akunaki.adapters.db.models import ToolConfirmation
 from akunaki.domain.confirmations import (
     ConfirmationBinding,
@@ -83,13 +88,28 @@ class ConfirmationRepository:
         Returns None when the execution is authorized **and** the confirmation
         has been marked consumed in the same transaction. Any other outcome
         leaves the row untouched.
+
+        Runs under :func:`run_short_tx`, and here that matters more than
+        anywhere else it is applied. The CAS below is deliberately built on the
+        loser *blocking* until the winner commits (see the comment on it), but
+        the engine gives the driver only ``BUSY_TIMEOUT_MS`` to wait — so
+        without a retry the very serialization this design relies on surfaced
+        as ``database is locked``. That turned a **security control** into a
+        500, and a caller seeing a 500 cannot tell whether the mutation ran, so
+        the natural response is to retry a call that may already have executed.
+        With the retry the loser re-reads and gets ``ALREADY_CONSUMED``, which
+        is an answer it can act on.
+
+        Retrying is safe because the closure only reads and writes through its
+        own transaction: a rolled-back attempt leaves nothing behind, and the
+        re-read observes the winner's ``consumed`` status at the check.
         """
         if not token:
             return ConfirmationRejection.UNKNOWN
         now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
         token_hash = hash_token(token)
 
-        with self._session_factory() as session, session.begin():
+        def work(session: Session) -> ConfirmationRejection | None:
             row = session.execute(
                 select(ToolConfirmation).where(ToolConfirmation.token_hash == token_hash)
             ).scalar_one_or_none()
@@ -136,6 +156,8 @@ class ConfirmationRepository:
             if affected_rows(result) != 1:
                 return ConfirmationRejection.ALREADY_CONSUMED
             return None
+
+        return run_short_tx(self._session_factory, work)
 
     def cancel(self, *, tenant_id: str, confirmation_id: str, now: datetime) -> bool:
         """Withdraw a pending confirmation. False when there was none to cancel."""

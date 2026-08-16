@@ -28,7 +28,7 @@ from akunaki.adapters.db.login_state_repository import LoginStateRepository
 from akunaki.adapters.db.models import LoginState
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.oauth import OAuthStateRejection
-from conftest import upgrade_to_head
+from conftest import held_write_lock, upgrade_to_head
 
 T0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
 TTL = timedelta(minutes=10)
@@ -269,9 +269,8 @@ def test_consume_waits_out_a_held_write_lock(login_db: str) -> None:
 
     The thread race above only reproduces this on a machine slow enough to lose
     the 50ms ``busy_timeout`` — it passed locally for a long time and failed on
-    CI. So this holds an exclusive write lock for **longer than the timeout**
-    and asserts the outcome directly, making the regression deterministic
-    rather than a matter of scheduling luck.
+    CI. ``held_write_lock`` removes the timing luck by holding the lock
+    outright, so the contention is certain and the assertion is on the outcome.
 
     libsql raises ``database is locked`` under a concurrent writer even with
     ``busy_timeout`` set, which is why ``consume`` runs under the shared
@@ -284,33 +283,14 @@ def test_consume_waits_out_a_held_write_lock(login_db: str) -> None:
     finally:
         engine.dispose()
 
-    hold_for_s = 0.4  # 8x the 50ms busy_timeout, well inside the 2s retry budget
-    blocker = create_db_engine(Settings(database_url=login_db))
-    holding = threading.Event()
-    released = threading.Event()
-
-    def hold_write_lock() -> None:
-        with blocker.connect() as conn:
-            conn.execute(text("BEGIN IMMEDIATE"))
-            conn.execute(text("UPDATE login_states SET redirect_uri = redirect_uri"))
-            holding.set()
-            released.wait(timeout=hold_for_s)
-            conn.execute(text("ROLLBACK"))
-
-    holder = threading.Thread(target=hold_write_lock, name="lock-holder")
-    holder.start()
-    assert holding.wait(timeout=10), "the blocker never acquired the write lock"
-
     worker = create_db_engine(Settings(database_url=login_db))
     try:
-        result = LoginStateRepository(create_session_factory(worker)).consume(
-            state=state, redirect_uri=REDIRECT, now=T0
-        )
+        with held_write_lock(login_db, table="login_states"):
+            result = LoginStateRepository(create_session_factory(worker)).consume(
+                state=state, redirect_uri=REDIRECT, now=T0
+            )
     finally:
-        released.set()
-        holder.join(timeout=10)
         worker.dispose()
-        blocker.dispose()
 
     # It waited for the lock and then did the real work, rather than raising.
     assert result.ok

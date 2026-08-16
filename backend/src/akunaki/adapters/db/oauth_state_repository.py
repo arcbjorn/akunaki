@@ -9,6 +9,12 @@ forget one:
   cannot win twice even under concurrency;
 - expiry and exact redirect-URI match are enforced before the verifier is
   released.
+
+Consumption is a contended write — concurrent callbacks race for one row — so
+it runs under the shared ``run_short_tx`` lock-contention retry. libsql raises
+``database is locked`` under concurrent writers even with ``busy_timeout`` set,
+which without the retry turned a losing race into an unhandled error rather
+than the ``ALREADY_CONSUMED`` rejection above.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from sqlalchemy import Select, delete, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.crypto.oauth import hash_state, redirect_uri_matches
-from akunaki.adapters.db.job_repository import affected_rows
+from akunaki.adapters.db.job_repository import affected_rows, run_short_tx
 from akunaki.adapters.db.models import OAuthState
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
 from akunaki.domain.oauth import (
@@ -111,6 +117,14 @@ class OAuthStateRepository:
         unconsumed, is unexpired, and the redirect URI matches exactly.
         Every failure returns a typed rejection rather than raising, so
         callers surface a generic error without leaking which check failed.
+
+        Runs under :func:`run_short_tx`: two callbacks racing for one state both
+        open a write transaction, and libsql raises ``database is locked``
+        rather than honouring ``busy_timeout``. Without the retry the loser got
+        an unhandled error — a 500 on a link that should simply have reported
+        ``ALREADY_CONSUMED``, and the one rejection this method exists to
+        return. The single-use guarantee rests on the conditional UPDATE below,
+        not on transaction timing, so retrying cannot let a second caller win.
         """
         if not state or not redirect_uri:
             return OAuthStateConsumption(rejection=OAuthStateRejection.NOT_FOUND)
@@ -119,7 +133,7 @@ class OAuthStateRepository:
         now_s = to_utc_rfc3339(now_aware)
         state_hash = hash_state(state)
 
-        with self._session_factory() as session, session.begin():
+        def work(session: Session) -> OAuthStateConsumption:
             row = session.execute(
                 # Read the row first so specific rejections can be
                 # distinguished internally; the claim itself is the atomic
@@ -169,6 +183,8 @@ class OAuthStateRepository:
                 sealed_verifier=SealedSecret(ciphertext=ciphertext, key_version=key_version),
                 redirect_uri=stored_redirect,
             )
+
+        return run_short_tx(self._session_factory, work)
 
     def purge_expired(self, *, now: datetime) -> int:
         """Delete states past their expiry. Returns rows removed.
