@@ -15,7 +15,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
-from typing import TypeVar
 
 from sqlalchemy import and_, case, delete, exists, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -35,8 +34,6 @@ from akunaki.domain.jobs import (
     require_aware,
     to_utc_rfc3339,
 )
-
-T = TypeVar("T")
 
 # Canonical lease timestamps serialize at second resolution (to_utc_rfc3339).
 # Subsecond positive TTLs would collapse to immediate expiry after serialization.
@@ -176,12 +173,12 @@ class JobRepository:
     # Short-tx runner
     # ------------------------------------------------------------------
 
-    def _run_short_tx(
+    def _run_short_tx[R](
         self,
-        work: Callable[[Session], T],
+        work: Callable[[Session], R],
         *,
         retry_budget_s: float = _BUSY_RETRY_BUDGET_S,
-    ) -> T:
+    ) -> R:
         """Run ``work`` in a short transaction with bounded lock-contention retry.
 
         Each retry opens a fresh Session (and checks out a pooled DB-API
