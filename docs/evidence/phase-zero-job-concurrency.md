@@ -40,7 +40,7 @@ Canonical lease timestamps use **second precision** (`to_utc_rfc3339` drops micr
 | In-memory URLs (`sqlite+libsql://`, `sqlite+libsql:///:memory:`) | `StaticPool` | Separate connections/sessions on one Engine share one in-memory DB |
 | File-backed URLs | `QueuePool` (pool_size=5, max_overflow=5, pool_timeout=5) | Bounded connection pool; concurrent short CAS transactions reuse physical DB-API connections via pooled checkouts |
 | `PRAGMA foreign_keys` | `ON` | Every new connection |
-| `PRAGMA busy_timeout` | **50 ms** | Every new connection; short, bounded driver wait compatible with repository retry budget |
+| `PRAGMA busy_timeout` | **50 ms** | Every new connection; short, bounded driver wait, paired with the repository retry budget below. The two are a unit: a contended write without the retry does not "fail fast", it just fails |
 | `PRAGMA journal_mode=WAL` | Once per file Engine | First-connection hook only; **never** for in-memory |
 | Repository short-tx lock retry budget | **2.0 s** | Only `database is locked` / `database is busy`; fresh session per retry (QueuePool provides connection reuse) |
 | `claim_next` outer contention budget | **0.25 s** | Monotonic deadline for full discover-then-CAS-loop cycle; returns `None` when exhausted |
@@ -163,7 +163,9 @@ Concurrency tests do **not** use always-true branches, fairness assumptions, or 
 
 ### libSQL lock-contention note
 
-`PRAGMA busy_timeout=50` is set on every connection (and reported as set). **libsql-experimental** under concurrent writers may still raise `ValueError('database is locked')` without fully waiting like stdlib `sqlite3`. The repository applies a **bounded** retry **only** for that lock-contention class on short transactions (`_run_short_tx` budget **2.0 s**; `claim_next` outer polling budget **0.25 s**). Each retry opens a fresh Session; pooled checkouts (QueuePool) provide real DB-API connection reuse. Non-lock errors are never swallowed. This is a local driver quirk, not a relaxation of CAS semantics.
+`PRAGMA busy_timeout=50` is set on every connection (and reported as set). **libsql-experimental** under concurrent writers may still raise `ValueError('database is locked')` without fully waiting like stdlib `sqlite3`. The repository applies a **bounded** retry **only** for that lock-contention class on short transactions (`run_short_tx` budget **2.0 s**; `claim_next` outer polling budget **0.25 s**). Each retry opens a fresh Session; pooled checkouts (QueuePool) provide real DB-API connection reuse. Non-lock errors are never swallowed. This is a local driver quirk, not a relaxation of CAS semantics.
+
+**Update (2026-08-16).** The quirk is a property of the driver, not of jobs, and the retry was private to `JobRepository` when this evidence was written. It has since been promoted to a shared `run_short_tx` (same budget, same semantics) and applied to the other contended single-use CAS writes — `login_states`, `oauth_states`, and `tool_confirmations` consumption. Those paths previously surfaced the raw `database is locked` to the caller: it reached CI as a flake on the login-state race, and on the OIDC and confirmation paths would have been a 500 in production where the contract specifies an `ALREADY_CONSUMED` rejection. The measurements in this document are unchanged — they were taken against the job lifecycle, which is unaffected.
 
 ---
 

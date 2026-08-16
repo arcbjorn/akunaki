@@ -23,7 +23,7 @@ Legend:
 | Safe local default `sqlite+libsql` URL | yes | yes | parent dir created on engine build |
 | Local-only `database_url` validation (official `sqlite+libsql://` memory / path memory / relative / absolute file) | yes | yes | rejects hostname, credentials, port, query, fragment, non-dialect |
 | Remote Turso auth token / connect_args | **no** | n/a | **intentionally deferred** (not wired; not credential-blocked) |
-| SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5) |
+| SQLAlchemy 2 engine/session + FK pragma + busy_timeout(50ms) + file WAL once | yes | yes | StaticPool in-memory; QueuePool file-backed (pool_size=5, max_overflow=5, pool_timeout=5). `busy_timeout` is **half of a pair**: libsql may report the pragma as set and still raise `database is locked` under concurrent writers, so a contended write is only survivable inside `run_short_tx` (shared from `job_repository`, 2s budget, retries the lock class only). Every single-use CAS consume — `jobs`, `login_states`, `oauth_states`, `tool_confirmations` — runs under it; uncontended writes deliberately do not, so the wrapper marks which writes actually race. Regression-tested deterministically via `conftest.held_write_lock`, which holds the lock outright rather than racing threads and hoping to lose the 50ms window |
 | Declarative base + naming conventions | yes | yes | |
 | Database readiness probe | yes | yes | |
 | Alembic env + migrations (through OIDC login states) | yes | yes (up/down/up through `0012`; legacy job + `system.noop` backfill; head derived, not hardcoded) | full product schema pending |

@@ -2,7 +2,7 @@
 
 **Status:** Describes shipped code (`backend/Dockerfile`, `backend/src/akunaki/api/__main__.py`, `backend/src/akunaki/worker/__main__.py`)
 
-**Last reviewed:** 2026-08-15
+**Last reviewed:** 2026-08-16
 
 ---
 
@@ -66,9 +66,12 @@ consequences, all mandatory:
 
 **One API replica and one worker replica.** Two writers on one SQLite file
 across a network filesystem is a corruption risk, not a scaling strategy. The
-`busy_timeout` is set to 50 ms deliberately — contested transactions fail fast
-and retry rather than queueing — which is tuned for in-process concurrency, not
-for a second host.
+`busy_timeout` is set to 50 ms deliberately — a contested transaction gives up
+its connection quickly and the *repository* retries with a fresh session
+(bounded at 2 s), rather than the driver holding a connection while it waits.
+That pairing is tuned for in-process concurrency, not for a second host: adding
+a replica multiplies contention on a store whose contention budget assumes one
+writer process, and the retry cannot rescue you from it.
 
 **Never a rolling deploy.** A rolling update runs the old and new pods
 simultaneously and gives you two writers against one file for the overlap. Use
