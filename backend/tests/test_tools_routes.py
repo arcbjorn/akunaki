@@ -404,6 +404,43 @@ def test_invoke_connections_list(client: TestClient, factory: sessionmaker[Sessi
     assert body == {"connections": []}
 
 
+def test_the_listing_tool_matches_the_rest_surface(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The tool must not be strictly weaker than the route it mirrors.
+
+    Both read the same ``ConnectionSummary``. The tool deliberately drops
+    nothing but fields it has a stated reason to withhold, and an opaque
+    ``connection_id`` is not one — it is the argument ``connections.sync``
+    takes, so dropping it stranded the mutating tool.
+    """
+    with factory() as session, session.begin():
+        session.add(
+            Connection(
+                id="conn-1",
+                tenant_id="tenant-1",
+                provider="polar",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+    csrf = _login(client, factory)
+
+    [via_tool] = client.post(
+        "/v1/tools/connections.list",
+        json={"input": {}},
+        headers={CSRF_HEADER_NAME: csrf},
+    ).json()["connections"]
+    [via_route] = client.get("/v1/connections").json()["connections"]
+
+    assert via_tool["connection_id"] == via_route["connection_id"] == "conn-1"
+    # Every field the route publishes is reachable through the tool as well.
+    assert set(via_route) <= set(via_tool)
+
+
 # ---------------------------------------------------------------------------
 # Confirmation enforcement for mutating tools
 # ---------------------------------------------------------------------------

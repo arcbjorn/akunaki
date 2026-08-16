@@ -4,6 +4,12 @@
 group. It answers *is my data actually flowing?* — which providers are linked,
 whether each is healthy, and how much has been ingested.
 
+The two tools are meant to **chain**: ``list`` reports each connection's
+``connection_id``, which is exactly the argument ``sync`` takes. That is the
+same list-then-act pairing ``health.get_recent_workouts`` and
+``health.get_workout`` form, and it is why the id belongs in the listing —
+without it the mutating tool is unreachable from the registry it lives in.
+
 Scoped to ``read:connections``, not ``read:health``: connection metadata is not
 health data, and folding it into the health scope would over-grant a caller
 that only needs to read a day view.
@@ -60,8 +66,16 @@ class ConnectionDTO(BaseModel):
 
     Carries no health values. ``last_error_class`` is an error *class* only, so
     a failing connector cannot leak a vendor body into a model's context.
+
+    ``connection_id`` is what makes the lifecycle group usable as a group: it is
+    the argument ``connections.sync`` takes, so without it a caller that listed
+    its connections had no way to name one to refresh. It is an opaque
+    per-tenant uuid — not health data, and not a vendor identifier — and
+    ``sync`` re-checks tenant ownership on every call, so holding one grants
+    nothing on its own.
     """
 
+    connection_id: str
     provider: str
     status: str = Field(description="pending, active, needs_reauth, revoked, or error.")
     last_success_at: str | None
@@ -87,6 +101,7 @@ def list_connections_tool(
         return ConnectionsOutput(
             connections=[
                 ConnectionDTO(
+                    connection_id=summary.connection_id,
                     provider=summary.provider,
                     status=summary.status,
                     last_success_at=summary.last_success_at,

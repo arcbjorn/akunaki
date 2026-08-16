@@ -144,6 +144,26 @@ data and list connections, and nothing else. An agent with a `read_sync` token
 can additionally ask for fresh data. Neither can erase anything; that requires
 a browser session and an explicit confirmation, and no configuration relaxes it.
 
+### Triggering a sync: list first
+
+`connections.sync` takes a `connection_id`, and `connections.list` is where you
+get one — each entry carries the `connection_id` alongside its provider and
+health. Resolve it from the listing rather than storing it; a re-linked
+connector keeps its id, but the listing is the surface that stays correct.
+
+```
+POST /v1/tools/connections.list   {"input": {}}
+  -> {"connections": [{"connection_id": "…", "provider": "polar", "status": "active", …}]}
+
+POST /v1/tools/connections.sync   {"input": {"connection_id": "…"}}
+  -> {"job_id": "…", "created": true}
+```
+
+`created: false` means an identical sync was already in flight and yours
+deduplicated onto it — a normal outcome, not an error. The `connection_id` is
+an opaque per-tenant uuid; every call re-checks tenant ownership, so a stale or
+guessed one is a `404`, indistinguishable from a connection that does not exist.
+
 ---
 
 ## Mutations from a session (for completeness)
