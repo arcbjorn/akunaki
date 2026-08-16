@@ -23,13 +23,38 @@ Everything above is driven by the **core worker**: leased jobs, fence tokens, re
 
 ## Status
 
-Partial Phase Zero + phase-one/two slices. This repository is primarily documentation
-plus a working backend foundation (model-free FastAPI + local libSQL/Turso storage).
-For an honest implemented / tested / pending breakdown, see
-[`docs/implementation-status.md`](docs/implementation-status.md).
+A working, deployable backend — model-free FastAPI over local libSQL, with the
+ingest → normalize → select → score pipeline running end to end against real
+provider data. All three connectors (Oura, Polar, Google Health) sync, and the
+`/v1` product surface plus the `/v1/tools` registry are live.
+
+Not everything in `docs/architecture/` is built: those documents describe the
+target design and are marked **Proposed**, while `docs/operating/` describes
+only what the code actually does. For an honest implemented / tested / pending
+breakdown, see [`docs/implementation-status.md`](docs/implementation-status.md).
+
+There is no frontend yet, and the optional agent layer is deliberately absent —
+the deterministic core carries no model SDK, which CI enforces.
 
 ## Docs
 
+**Running it**
+
+- [Operating guide](docs/operating/README.md) — deploy, configure, integrate
+- [Backend setup, test, run](backend/README.md)
+
+**Understanding it**
+
 - [Documentation index](docs/README.md)
 - [Architecture overview](docs/architecture/overview.md)
-- [Backend setup, test, run](backend/README.md)
+- [Implementation status](docs/implementation-status.md) — what is built vs. designed
+
+## Engineering
+
+Single `master` branch, gated by CI on every push: ruff lint + format, mypy
+`strict`, import-linter architecture contracts, the full test suite under a
+branch-coverage floor, migrations proven `up → down → base → up` on an ephemeral
+database, and a core-only install that asserts no model SDK is importable.
+
+Python is pinned to 3.13.14 exactly (3.14 segfaulted with `sqlalchemy-libsql`
+and is rejected until the stack is re-validated).
