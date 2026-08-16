@@ -36,6 +36,8 @@ from akunaki.adapters.db.models import (
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.api.app import create_app
 from akunaki.api.security import CSRF_HEADER_NAME, SESSION_COOKIE_NAME
+from akunaki.application.backfill_request import BackfillRequestService
+from akunaki.application.sync_handlers import streams_for_provider
 from akunaki.config import ConnectorOAuthConfig, Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
 from conftest import upgrade_to_head
@@ -292,6 +294,24 @@ def _link_polar(client: TestClient) -> str:
     )
 
 
+def _sync_jobs(factory: sessionmaker[Session]) -> list[Job]:
+    """The incremental-sync jobs only.
+
+    Linking a connection now enqueues its initial backfill, so a bare "no jobs
+    at all" assertion would conflate that with the manual sync under test.
+    """
+    with factory() as session:
+        return list(
+            session.scalars(select(Job).where(Job.job_type == "connection.incremental_sync"))
+        )
+
+
+def _backfill_jobs(factory: sessionmaker[Session]) -> list[Job]:
+    """The initial-sync jobs a completed link queues, one per stream."""
+    with factory() as session:
+        return list(session.scalars(select(Job).where(Job.job_type == "connection.initial_sync")))
+
+
 def test_sync_requires_a_session(client: TestClient) -> None:
     client.cookies.clear()
     response = client.post("/v1/connections/conn-1/sync", headers={"Idempotency-Key": "k1"})
@@ -440,8 +460,80 @@ def test_sync_on_a_reauth_needing_connection_is_409(
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "connection_not_syncable"
+    # Scoped to the job the refused request would have queued: linking the
+    # connection in the first place legitimately enqueued its initial backfill.
+    assert _sync_jobs(factory) == []
+
+
+# ---------------------------------------------------------------------------
+# Backfill on link completion
+# ---------------------------------------------------------------------------
+
+
+def test_a_completed_link_queues_its_history_backfill(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A newly linked connector starts backfilling now, not at the next sweep.
+
+    ``connection.initial_sync`` had a registered handler and no enqueue site in
+    ``src/``, so a linked connection's first data waited on the reconcile
+    sweep's staleness cutoff. This is that enqueue site.
+    """
+    _login(client, factory)
+    connection_id = _link_polar(client)
+
+    jobs = _backfill_jobs(factory)
+    assert jobs, "linking must queue the initial backfill"
+    assert {job.tenant_id for job in jobs} == {"tenant-1"}
+    payloads = [json.loads(job.payload_json) for job in jobs]
+    assert {p["connection_id"] for p in payloads} == {connection_id}
+    # One job per stream Polar serves: each keeps its own cursor and retry
+    # budget, so a failing stream cannot stop the others.
+    assert {p["stream"] for p in payloads} == {
+        stream for stream, _schema in streams_for_provider("polar")
+    }
+
+
+def test_relinking_does_not_stack_a_second_backfill(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Re-consenting to an already-linked connector must not double the work.
+
+    The link upserts onto the same connection row, so the second callback's
+    enqueue is keyed identically and deduplicates onto the in-flight job.
+    """
+    _login(client, factory)
+    _link_polar(client)
+    first = len(_backfill_jobs(factory))
+
+    _link_polar(client)
+
+    assert first > 0
+    assert len(_backfill_jobs(factory)) == first
+
+
+def test_a_failed_backfill_enqueue_does_not_fail_the_link(
+    client: TestClient, factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The credentials are already stored, so the link has succeeded.
+
+    Reporting an error here would send the user to re-authorize a connector
+    that is connected; the reconcile sweep reaches an unsynced connection on
+    its own cadence, so the backfill is delayed rather than lost.
+    """
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        msg = "job store unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(BackfillRequestService, "request_backfill", boom)
+    _login(client, factory)
+
+    connection_id = _link_polar(client)
+
+    assert connection_id
     with factory() as session:
-        assert session.scalars(select(Job)).all() == []
+        assert session.get(Connection, connection_id) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -614,8 +706,7 @@ def test_disconnected_connection_cannot_sync(
     )
 
     assert response.status_code == 409
-    with factory() as session:
-        assert session.scalars(select(Job)).all() == []
+    assert _sync_jobs(factory) == []
 
 
 def test_disconnecting_another_tenants_connection_is_404(

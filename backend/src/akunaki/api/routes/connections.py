@@ -8,6 +8,12 @@ connection for their own tenant.
 Only providers with fully-configured OAuth credentials are linkable; a request
 for an unconfigured or unknown provider is a 404, so an unconfigured deployment
 exposes no half-built connect surface.
+
+A completed link queues the connection's history backfill immediately, so the
+first data does not wait on the reconcile sweep's cadence. The enqueue is
+best-effort: a link whose credentials are stored has succeeded, and reporting a
+failure would send the user to re-authorize a connector that is already
+connected.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
 from akunaki.api.app import get_session_factory
 from akunaki.api.security import CurrentSession
+from akunaki.application.backfill_request import BackfillRequestService
 from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.oauth_linking import LinkRejection, OAuthLinkingService
 from akunaki.application.sync_request import SyncRequestRejection, SyncRequestService
@@ -324,11 +331,49 @@ def callback(
         outcome="linked",
         connection_id=result.connection.connection_id,
     )
+    _request_backfill(
+        session_factory,
+        tenant_id=result.connection.tenant_id,
+        connection_id=result.connection.connection_id,
+        provider=provider,
+    )
     return LinkedResponse(
         connection_id=result.connection.connection_id,
         provider=provider,
         status=result.connection.status.value,
     )
+
+
+def _request_backfill(
+    session_factory: sessionmaker[Session],
+    *,
+    tenant_id: str,
+    connection_id: str,
+    provider: str,
+) -> None:
+    """Queue the new connection's history backfill. Never raises.
+
+    A link that stored its credentials **is** a successful link; failing the
+    callback because the follow-up work could not be queued would tell the user
+    to re-authorize a connector that is already connected. The reconcile sweep
+    reaches an unsynced connection on its own cadence, so a lost enqueue delays
+    the first data rather than stranding it.
+    """
+    try:
+        BackfillRequestService(
+            jobs=JobRepository(session_factory),
+            new_id=lambda: str(uuid.uuid4()),
+        ).request_backfill(
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            provider=provider,
+            now=datetime.now(UTC),
+        )
+    except Exception:
+        logger.exception(
+            "failed to enqueue initial backfill for a linked connection",
+            extra={"connection_id": connection_id, "provider": provider},
+        )
 
 
 def _audit_link(
