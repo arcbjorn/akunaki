@@ -1314,7 +1314,7 @@ class ServiceToken(Base):
 
     __table_args__ = (
         CheckConstraint("length(name) > 0", name="service_token_name_nonempty"),
-        CheckConstraint("scope IN ('read')", name="service_token_scope_known"),
+        CheckConstraint("scope IN ('read', 'read_sync')", name="service_token_scope_known"),
         Index("ix_service_tokens_token_hash", "token_hash", unique=True),
     )
 

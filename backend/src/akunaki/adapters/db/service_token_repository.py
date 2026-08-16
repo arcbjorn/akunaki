@@ -47,6 +47,11 @@ class ServiceTokenRepository:
 
         ``ttl`` is optional on purpose: a personal agent's credential is
         long-lived and its lifecycle is revocation, not expiry.
+
+        ``scope`` defaults to :attr:`ServiceTokenScope.READ`. The wider
+        ``READ_SYNC`` is never the default: a caller that forgets to pass one
+        must get the *narrower* grant, so an omission cannot hand out sync
+        authority by accident.
         """
         if not token_id or not user_id or not name:
             msg = "token_id, user_id, and name must be non-empty"

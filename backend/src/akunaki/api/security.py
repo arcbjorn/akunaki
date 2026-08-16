@@ -122,10 +122,11 @@ def require_session(
 CurrentSession = Annotated[AuthenticatedSession, Depends(require_session)]
 
 
-# A caller of the tools surface: a browser session or a read-scoped service
-# token. Everything else on /v1 stays session-only; the registry is the one
-# surface designed for non-browser callers (agent, MCP), so Bearer lands here
-# first — exactly where the security design reserved it.
+# A caller of the tools surface: a browser session or a service token, whose
+# scope bounds which tools it may reach (see routes/tools.py). Everything else
+# on /v1 stays session-only; the registry is the one surface designed for
+# non-browser callers (agent, MCP), so Bearer lands here first — exactly where
+# the security design reserved it.
 ToolCaller = AuthenticatedSession | AuthenticatedServiceToken
 
 

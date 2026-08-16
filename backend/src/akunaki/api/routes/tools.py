@@ -3,14 +3,19 @@
 This is the "tools usable by REST without model packages" phase-two exit
 criterion in the flesh: the same typed registry an agent or MCP adapter would
 use is exposed to a plain HTTP client. Every tool runs under the caller's
-authenticated context — a browser session or a read-scoped bearer service
-token — so a tool can no more cross tenants than a direct route.
+authenticated context — a browser session or a bearer service token — so a tool
+can no more cross tenants than a direct route.
 
 Read tools execute directly. Each mutating tool declares a
 ``ConfirmationPolicy`` and the route asks the tool, rather than hardcoding one
 rule: ``connections.sync`` is ``IF_AGENT`` (a direct session call is already an
 explicit, CSRF-enforced human act), while ``privacy.delete`` is ``ALWAYS`` and
 is refused without a confirmation from any caller.
+
+**A service token is bounded by the same declaration.** What a bearer caller
+may reach follows the tool's policy, not a blanket side-effect test: an
+``ALWAYS`` tool is refused unconditionally, and an ``IF_AGENT`` tool needs a
+token whose scope opted into it at mint time. See :func:`_token_may_invoke`.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ from akunaki.application.sleep_surface import SleepSurfaceService
 from akunaki.application.sync_request import SyncRequestService
 from akunaki.application.today_surface import TodaySurfaceService
 from akunaki.application.tool_registry import (
+    ConfirmationPolicy,
     SideEffect,
     Tool,
     ToolContext,
@@ -176,6 +182,38 @@ def list_tools(
     return ToolListResponse(tools=tools)
 
 
+def _token_may_invoke(caller: AuthenticatedServiceToken, tool: Tool[Any, Any]) -> bool:
+    """Whether a service token's scope admits this tool at all.
+
+    The refusal follows the tool's **declared confirmation policy**, not a
+    blanket "has a side effect" test. Those are not the same question: a
+    blanket test collapses ``connections.sync`` — a deduplicated enqueue of the
+    very job a webhook already queues, and one a user could trigger themselves —
+    into the same category as ``privacy.delete``, which destroys data inline
+    and is irreversible.
+
+    - ``NEVER`` (reads): any scope. The token's own authorization is the check.
+    - ``IF_AGENT``: needs a scope that opts in (``read_sync``), so every token
+      minted before the capability existed keeps exactly today's behaviour.
+    - ``ALWAYS``: refused for **every** service token, whatever its scope.
+      A destructive action must not be reachable by a bearer credential at all:
+      a confirmation is the guard there, and a token that could carry one would
+      turn a stolen credential into an erasure.
+
+    Checked before the confirmation machinery, so a token that may not reach a
+    tool cannot probe whether a confirmation would have been accepted, or which
+    tokens are live.
+    """
+    if tool.confirmation is ConfirmationPolicy.ALWAYS:
+        return False
+    if tool.confirmation is ConfirmationPolicy.IF_AGENT:
+        return caller.scope.may_invoke_if_agent
+    # A read is always admissible. A tool that somehow declares a side effect
+    # with no confirmation policy is not: it would be a mutation nothing gates,
+    # which is a registration bug, and failing closed is the safe reading.
+    return tool.side_effect is SideEffect.NONE
+
+
 def _require_confirmation(
     *,
     tool: Tool[Any, Any],
@@ -289,11 +327,7 @@ def invoke_tool(
             status_code=404, detail={"code": "tool_not_found", "name": tool_name}
         ) from exc
 
-    # A service token is read-scoped by construction: a mutation needs a
-    # cookie session (CSRF-attributed) and, per the tool's policy, a
-    # confirmation. Refused before the confirmation machinery so a stolen
-    # token cannot even probe it.
-    if isinstance(caller, AuthenticatedServiceToken) and tool.side_effect is not SideEffect.NONE:
+    if isinstance(caller, AuthenticatedServiceToken) and not _token_may_invoke(caller, tool):
         _audit_invocation(tool=tool, body=body, caller=caller, audit=audit, outcome="refused")
         raise HTTPException(status_code=403, detail={"code": "forbidden"})
 

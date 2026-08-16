@@ -3,28 +3,46 @@
 The repository half proves the credential lifecycle (issue once, validate,
 expire, revoke) and that the raw token never lands in the database. The route
 half proves the one place Bearer is accepted: the tools surface — reads work
-without a cookie or CSRF, mutations are refused outright, and every other
-``/v1`` route still demands a session.
+without a cookie or CSRF, what a mutation needs follows the tool's declared
+confirmation policy and the token's scope, and every other ``/v1`` route still
+demands a session.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
-from akunaki.adapters.db.models import FactRecord, ServiceToken, SleepSession, Tenant, User
+from akunaki.adapters.db.models import (
+    AuditEventRow,
+    Connection,
+    FactRecord,
+    Job,
+    ServiceToken,
+    SleepSession,
+    Tenant,
+    User,
+)
 from akunaki.adapters.db.service_token_repository import ServiceTokenRepository
 from akunaki.api.app import create_app
+from akunaki.api.routes.tools import _token_may_invoke
+from akunaki.application.tool_registry import ConfirmationPolicy, SideEffect, Tool
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
-from akunaki.domain.service_tokens import ServiceTokenRejection, ServiceTokenScope
+from akunaki.domain.service_tokens import (
+    AuthenticatedServiceToken,
+    ServiceTokenRejection,
+    ServiceTokenScope,
+)
 from conftest import upgrade_to_head
 
 T0 = datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC)
@@ -78,9 +96,15 @@ def client(route_db: str) -> TestClient:
     return TestClient(create_app(Settings(database_url=route_db)))
 
 
-def _issue(factory: sessionmaker[Session], *, ttl: timedelta | None = None) -> str:
+def _issue(
+    factory: sessionmaker[Session],
+    *,
+    ttl: timedelta | None = None,
+    scope: ServiceTokenScope = ServiceTokenScope.READ,
+    row_id: str = "tok-1",
+) -> str:
     issued = ServiceTokenRepository(factory).issue(
-        token_id="tok-1", user_id="user-1", name="odin-personal", now=T0, ttl=ttl
+        token_id=row_id, user_id="user-1", name="odin-personal", now=T0, scope=scope, ttl=ttl
     )
     return issued.token
 
@@ -127,6 +151,27 @@ def test_validate_rejects_unknown_expired_and_revoked(factory: sessionmaker[Sess
     assert repo.validate(token=expiring, now=T0).rejection is ServiceTokenRejection.REVOKED
     # Revoking again is a no-op, not an error.
     assert repo.revoke(token_id="tok-1", now=T0) is False
+
+
+def test_the_wider_scope_round_trips_through_storage(factory: sessionmaker[Session]) -> None:
+    """Stored and rehydrated, so validation reports the grant that was minted."""
+    token = _issue(factory, scope=ServiceTokenScope.READ_SYNC)
+
+    with factory() as session:
+        assert session.scalars(select(ServiceToken)).one().scope == "read_sync"
+    principal = ServiceTokenRepository(factory).validate(token=token, now=T0).principal
+    assert principal is not None
+    assert principal.scope is ServiceTokenScope.READ_SYNC
+    assert principal.scope.may_invoke_if_agent is True
+
+
+def test_read_is_the_default_scope(factory: sessionmaker[Session]) -> None:
+    """An omitted scope must grant the *narrower* authority, never the wider."""
+    issued = ServiceTokenRepository(factory).issue(
+        token_id="tok-default", user_id="user-1", name="unspecified", now=T0
+    )
+    assert issued.scope is ServiceTokenScope.READ
+    assert issued.scope.may_invoke_if_agent is False
 
 
 def test_issue_validates_its_inputs(factory: sessionmaker[Session]) -> None:
@@ -225,17 +270,282 @@ def test_bearer_invokes_a_read_tool_without_csrf(
     assert response.json()["local_health_day"] == DAY
 
 
-def test_bearer_cannot_invoke_a_mutating_tool(
+def _principal(scope: ServiceTokenScope) -> AuthenticatedServiceToken:
+    return AuthenticatedServiceToken(
+        token_id="tok-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        scope=scope,
+        expires_at=None,
+    )
+
+
+def _tool(
+    *,
+    confirmation: ConfirmationPolicy,
+    side_effect: SideEffect = SideEffect.NONE,
+) -> Tool[BaseModel, BaseModel]:
+    return Tool(
+        name="test.tool",
+        input_model=BaseModel,
+        output_model=BaseModel,
+        handler=lambda _inputs, _context: BaseModel(),
+        side_effect=side_effect,
+        confirmation=confirmation,
+    )
+
+
+@pytest.mark.parametrize(
+    ("confirmation", "side_effect", "read_ok", "read_sync_ok"),
+    [
+        # A read: both scopes.
+        (ConfirmationPolicy.NEVER, SideEffect.NONE, True, True),
+        # An "if agent" mutation: only the scope that opted in.
+        (ConfirmationPolicy.IF_AGENT, SideEffect.ENQUEUE_JOB, False, True),
+        # Destructive: neither scope, ever.
+        (ConfirmationPolicy.ALWAYS, SideEffect.DESTROY_DATA, False, False),
+        # Degenerate: a side effect nothing gates. Not reachable through the
+        # shipped registry, but if a tool were ever registered that way it must
+        # fail closed rather than become a mutation any token can invoke.
+        (ConfirmationPolicy.NEVER, SideEffect.ENQUEUE_JOB, False, False),
+    ],
+)
+def test_scope_admits_exactly_the_declared_policies(
+    confirmation: ConfirmationPolicy,
+    side_effect: SideEffect,
+    read_ok: bool,
+    read_sync_ok: bool,
+) -> None:
+    """The whole matrix in one place: what each scope may reach, and why.
+
+    Pinned as a table because the rule is a security boundary, and a change to
+    any single cell should have to be written down deliberately.
+    """
+    tool = _tool(confirmation=confirmation, side_effect=side_effect)
+
+    assert _token_may_invoke(_principal(ServiceTokenScope.READ), tool) is read_ok
+    assert _token_may_invoke(_principal(ServiceTokenScope.READ_SYNC), tool) is read_sync_ok
+
+
+def _link_connection(factory: sessionmaker[Session], *, connection_id: str = "conn-1") -> None:
+    with factory() as session, session.begin():
+        session.add(
+            Connection(
+                id=connection_id,
+                tenant_id="tenant-1",
+                provider="polar",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+
+
+def test_a_read_token_cannot_invoke_a_mutating_tool(
     client: TestClient, factory: sessionmaker[Session]
 ) -> None:
-    # connections.sync mutates (side_effect != none); a read-scoped token is
-    # refused before the confirmation machinery, with the generic 403.
+    """The narrow scope keeps exactly its old behaviour.
+
+    ``connections.sync`` is ``IF_AGENT``, so reaching it needs a scope that
+    opted in. A token minted before ``read_sync`` existed did not, and must not
+    gain the capability retroactively.
+    """
+    _link_connection(factory)
     token = _issue(factory)
+
     response = client.post(
-        "/v1/tools/connections.sync", headers=_bearer(token), json={"input": {"connection_id": "c"}}
+        "/v1/tools/connections.sync",
+        headers=_bearer(token),
+        json={"input": {"connection_id": "conn-1"}},
     )
+
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "forbidden"
+    with factory() as session:
+        assert session.scalars(select(Job)).all() == []
+
+
+def test_a_read_sync_token_enqueues_a_sync(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The point of the wider scope: an agent can ask for fresh data.
+
+    The enqueue is the same ``connection.incremental_sync`` job a webhook or
+    the reconcile sweep would queue — an agent cannot reach a sync path a user
+    could not — and it is idempotent, so a retry collapses rather than piling up.
+    """
+    _link_connection(factory)
+    token = _issue(factory, scope=ServiceTokenScope.READ_SYNC)
+
+    response = client.post(
+        "/v1/tools/connections.sync",
+        headers=_bearer(token),
+        json={"input": {"connection_id": "conn-1"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["created"] is True
+    with factory() as session:
+        job = session.scalars(
+            select(Job).where(Job.job_type == "connection.incremental_sync")
+        ).one()
+    assert job.tenant_id == "tenant-1"
+
+
+def test_a_repeated_sync_from_a_token_does_not_pile_up_jobs(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Idempotent by design: this is why the enqueue is safe to expose at all."""
+    _link_connection(factory)
+    token = _issue(factory, scope=ServiceTokenScope.READ_SYNC)
+    payload = {"input": {"connection_id": "conn-1"}}
+
+    first = client.post("/v1/tools/connections.sync", headers=_bearer(token), json=payload)
+    second = client.post("/v1/tools/connections.sync", headers=_bearer(token), json=payload)
+
+    assert first.json()["created"] is True
+    # Deduplicated onto the in-flight job rather than queued twice.
+    assert second.json()["created"] is False
+    assert first.json()["job_id"] == second.json()["job_id"]
+    with factory() as session:
+        assert len(session.scalars(select(Job)).all()) == 1
+
+
+def test_no_scope_can_reach_a_destructive_tool(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """``ALWAYS`` is refused for every service token, however it was minted.
+
+    This is the line the whole change is drawn around: widening the scope
+    admits an idempotent enqueue, never an irreversible erasure. A bearer
+    credential must not be able to destroy data even holding a confirmation.
+    """
+    for scope, row_id in (
+        (ServiceTokenScope.READ, "tok-read"),
+        (ServiceTokenScope.READ_SYNC, "tok-sync"),
+    ):
+        token = _issue(factory, scope=scope, row_id=row_id)
+        response = client.post(
+            "/v1/tools/privacy.delete", headers=_bearer(token), json={"input": {}}
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "forbidden"
+
+    # And the tenant it would have erased is still there.
+    with factory() as session:
+        assert session.get(Tenant, "tenant-1") is not None
+
+
+def test_a_token_still_cannot_sync_another_tenants_connection(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Scope widens *which tools*, never *whose data*."""
+    with factory() as session, session.begin():
+        session.add(
+            Tenant(
+                id="tenant-2",
+                created_at=NOW_S,
+                status="active",
+                primary_timezone="UTC",
+                display_name="Other",
+            )
+        )
+        session.add(
+            Connection(
+                id="conn-theirs",
+                tenant_id="tenant-2",
+                provider="polar",
+                status="active",
+                scopes_granted_json="[]",
+                external_user_id=None,
+                connected_at=NOW_S,
+                updated_at=NOW_S,
+            )
+        )
+    token = _issue(factory, scope=ServiceTokenScope.READ_SYNC)
+
+    response = client.post(
+        "/v1/tools/connections.sync",
+        headers=_bearer(token),
+        json={"input": {"connection_id": "conn-theirs"}},
+    )
+
+    assert response.status_code == 404
+    with factory() as session:
+        assert session.scalars(select(Job)).all() == []
+
+
+def test_a_token_sync_carries_its_origin_into_the_audit_trail(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A reviewer must be able to tell which credential asked for the sync.
+
+    A service token acts *for* the user but is not the user at a browser, and
+    now that it can cause an enqueue, the distinction is what makes the trail
+    worth reading.
+    """
+    _link_connection(factory)
+    token = _issue(factory, scope=ServiceTokenScope.READ_SYNC)
+
+    client.post(
+        "/v1/tools/connections.sync",
+        headers=_bearer(token),
+        json={"input": {"connection_id": "conn-1"}},
+    )
+
+    with factory() as session:
+        [event] = list(session.scalars(select(AuditEventRow)))
+    assert event.resource_id == "connections.sync"
+    assert json.loads(event.metadata_json) == {
+        "outcome": "succeeded",
+        "origin": "service_token",
+    }
+
+
+def test_a_refused_token_mutation_is_audited(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A refusal is what a stolen credential looks like from the outside."""
+    token = _issue(factory)
+
+    client.post(
+        "/v1/tools/connections.sync",
+        headers=_bearer(token),
+        json={"input": {"connection_id": "conn-1"}},
+    )
+
+    with factory() as session:
+        [event] = list(session.scalars(select(AuditEventRow)))
+    assert json.loads(event.metadata_json) == {
+        "outcome": "refused",
+        "origin": "service_token",
+    }
+
+
+def test_an_agent_run_call_from_a_token_still_needs_a_confirmation(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Scope admits the tool; the policy still decides what the *call* needs.
+
+    ``IF_AGENT`` means a call carrying a ``run_id`` must prove the user
+    authorized that exact call. Widening the scope does not exempt a token from
+    that — it only gets it past the door.
+    """
+    _link_connection(factory)
+    token = _issue(factory, scope=ServiceTokenScope.READ_SYNC)
+
+    response = client.post(
+        "/v1/tools/connections.sync",
+        headers=_bearer(token),
+        json={"input": {"connection_id": "conn-1"}, "run_id": "run-1"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "confirmation_required"
+    with factory() as session:
+        assert session.scalars(select(Job)).all() == []
 
 
 def test_bearer_rejections_are_one_generic_401(

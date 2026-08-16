@@ -9,9 +9,18 @@ mint itself a durable token.
 The raw token is printed **once** and never stored; only its hash lands in the
 database.
 
+A token is ``read``-scoped unless ``--scope read_sync`` is passed. That scope
+additionally permits tools whose confirmation policy is ``if_agent`` — today
+just ``connections.sync``, an idempotent, deduplicated enqueue. It never
+permits an ``always`` tool such as ``privacy.delete``: no bearer credential can
+reach a destructive action, whatever its scope. Widening is deliberately
+mint-time only — there is no way to promote a live token, so grant the wider
+scope by minting a new one and revoking the old.
+
 Usage:
 
     uv run python scripts/service_token.py issue --name odin-personal
+    uv run python scripts/service_token.py issue --name odin --scope read_sync
     uv run python scripts/service_token.py issue --name ci-probe --ttl-days 7
     uv run python scripts/service_token.py list
     uv run python scripts/service_token.py revoke --id <token-id>
@@ -30,6 +39,7 @@ from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.models import User
 from akunaki.adapters.db.service_token_repository import ServiceTokenRepository
 from akunaki.config import get_settings
+from akunaki.domain.service_tokens import ServiceTokenScope
 from akunaki.domain.tenants import SYSTEM_TENANT_ID
 
 
@@ -65,6 +75,7 @@ def _issue(args: argparse.Namespace) -> int:
         user_id=user_id,
         name=args.name,
         now=datetime.now(UTC),
+        scope=ServiceTokenScope(args.scope),
         ttl=ttl,
     )
     print(f"token_id:   {issued.token_id}")
@@ -109,10 +120,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    issue = sub.add_parser("issue", help="mint a new read-scoped token")
+    issue = sub.add_parser("issue", help="mint a new token (read-scoped by default)")
     issue.add_argument("--name", required=True, help="operator label, e.g. odin-personal")
     issue.add_argument("--user-id", default=None, help="user to bind; defaults to the sole user")
     issue.add_argument("--ttl-days", type=int, default=None, help="optional expiry in days")
+    issue.add_argument(
+        "--scope",
+        # The narrow scope is the default, so an operator who omits the flag
+        # mints the credential that can do less, never more.
+        default=ServiceTokenScope.READ.value,
+        choices=[scope.value for scope in ServiceTokenScope],
+        help="read (default) or read_sync, which also permits connections.sync",
+    )
     issue.set_defaults(func=_issue)
 
     listing = sub.add_parser("list", help="list tokens (never shows secrets)")
