@@ -2,7 +2,7 @@
 
 **Status:** Describes shipped code (`backend/src/akunaki/config.py`)
 
-**Last reviewed:** 2026-08-15
+**Last reviewed:** 2026-08-16
 
 Configuration is read by pydantic-settings with the **`AKUNAKI_` prefix**. Every
 field below is one entry in `Settings`; the environment variable is the field
@@ -148,6 +148,32 @@ not the internet.
 
 Only the **API** process serves it. The worker has a separate in-process
 registry and no HTTP server; observe the worker through `/readyz` instead.
+
+---
+
+## Public training calendar
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `AKUNAKI_PUBLIC_TRAINING_TENANT_ID` | `""` (empty) | Mount `GET /v1/public/training` for exactly this tenant. |
+
+**What empty does.** The route is not registered — `/v1/public/training` is a
+404.
+
+**What it discloses.** For the named tenant, the last 30 local days ending on
+the tenant's local today (under its stated `primary_timezone`), each marked
+`trained` or not — a day counts when at least one workout session was recorded
+— plus `days_trained`, `current_streak`, `longest_streak`, and the providers
+that recorded a session in the window. **Nothing else**: no times, zone
+minutes, loads, scores, or vitals. It exists for a personal public page and is
+**unauthenticated by design**, served with `Cache-Control: public, max-age=3600`
+and `Access-Control-Allow-Origin: *`, so a browser on any origin may read it and
+an edge cache can absorb the traffic.
+
+**Name the tenant explicitly.** The value is a tenant id (see `/v1/me`), not a
+boolean. If it names a tenant that does not exist the route answers `503
+public_training_unavailable` rather than an empty calendar — an empty calendar
+would be a fabricated "never trains".
 
 ---
 

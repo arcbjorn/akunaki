@@ -2,7 +2,7 @@
 
 **Status:** Describes shipped code (`backend/src/akunaki/api/app.py`, `backend/src/akunaki/api/routes/`)
 
-**Last reviewed:** 2026-08-15
+**Last reviewed:** 2026-08-16
 
 The complete public path list, what authenticates each one, and which paths
 exist only under certain configuration.
@@ -95,7 +95,7 @@ logs.
 | Session cookie | Everything under `/v1` except as noted | `akunaki_session` cookie; `X-Akunaki-CSRF` header additionally required on `POST`/`PUT`/`PATCH`/`DELETE` |
 | Session **or** bearer | `/v1/tools` only | Cookie session, or `Authorization: Bearer <service token>`; which tools a token may invoke depends on its scope |
 | Vendor signature | `/webhooks/*` | Per-provider HMAC or Google push OIDC token — no session |
-| None | `/healthz`, `/readyz`, `/metrics`, `/auth/*` | Unauthenticated by design |
+| None | `/healthz`, `/readyz`, `/metrics`, `/auth/*`, `/v1/public/*` | Unauthenticated by design |
 
 An `Authorization` header on `/v1/tools` **commits** the caller to the bearer
 path: a request carrying both a bearer token and a cookie is not silently
@@ -134,6 +134,17 @@ Unset issuer → both are `404`.
 | GET | `/metrics` | Prometheus text format, unauthenticated, PHI-free |
 
 Disabled → `404`.
+
+### Mounted only when `AKUNAKI_PUBLIC_TRAINING_TENANT_ID` is set
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/v1/public/training` | Unauthenticated. The named tenant's last 30 local days, each `trained` or not, plus streaks. No times, zones, loads, or other measurement. `Cache-Control: public, max-age=3600`, `Access-Control-Allow-Origin: *`. `503 public_training_unavailable` when the named tenant does not exist |
+
+This is the only `/v1` path that takes no session. It is the one surface that
+answers *anyone* about one operator-named tenant, which is why it is unmounted
+by default and discloses a boolean per day and nothing else. See
+[configuration.md](configuration.md#public-training-calendar).
 
 ### Session-authenticated (`/v1`)
 
