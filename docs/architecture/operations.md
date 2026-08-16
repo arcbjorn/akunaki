@@ -8,6 +8,8 @@ Authoritative for **deployment**, **observability**, and co-authoritative for **
 
 No production environment is defined by running code in this repository.
 
+> **Operators:** this page is the *proposed target* architecture, which is broader than what is built. For the contract the shipped backend actually implements — container commands, every `AKUNAKI_` variable, the full route list, connector and webhook setup, and probe behaviour — see [../operating/README.md](../operating/README.md). Where the two disagree, the operating section describes the code.
+
 ---
 
 ## Deployment topology (MVP target)
