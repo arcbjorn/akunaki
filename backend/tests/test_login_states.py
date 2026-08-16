@@ -264,6 +264,60 @@ def test_concurrent_consume_yields_exactly_one_winner(login_db: str) -> None:
     assert successes.count(True) == 1, f"expected one winner, got {successes}"
 
 
+def test_consume_waits_out_a_held_write_lock(login_db: str) -> None:
+    """A contended consume must wait, not surface ``database is locked``.
+
+    The thread race above only reproduces this on a machine slow enough to lose
+    the 50ms ``busy_timeout`` — it passed locally for a long time and failed on
+    CI. So this holds an exclusive write lock for **longer than the timeout**
+    and asserts the outcome directly, making the regression deterministic
+    rather than a matter of scheduling luck.
+
+    libsql raises ``database is locked`` under a concurrent writer even with
+    ``busy_timeout`` set, which is why ``consume`` runs under the shared
+    ``run_short_tx`` retry. Without it this call raises instead of returning.
+    """
+    state, nonce = generate_state(), generate_nonce()
+    engine = create_db_engine(Settings(database_url=login_db))
+    try:
+        _create(LoginStateRepository(create_session_factory(engine)), state=state, nonce=nonce)
+    finally:
+        engine.dispose()
+
+    hold_for_s = 0.4  # 8x the 50ms busy_timeout, well inside the 2s retry budget
+    blocker = create_db_engine(Settings(database_url=login_db))
+    holding = threading.Event()
+    released = threading.Event()
+
+    def hold_write_lock() -> None:
+        with blocker.connect() as conn:
+            conn.execute(text("BEGIN IMMEDIATE"))
+            conn.execute(text("UPDATE login_states SET redirect_uri = redirect_uri"))
+            holding.set()
+            released.wait(timeout=hold_for_s)
+            conn.execute(text("ROLLBACK"))
+
+    holder = threading.Thread(target=hold_write_lock, name="lock-holder")
+    holder.start()
+    assert holding.wait(timeout=10), "the blocker never acquired the write lock"
+
+    worker = create_db_engine(Settings(database_url=login_db))
+    try:
+        result = LoginStateRepository(create_session_factory(worker)).consume(
+            state=state, redirect_uri=REDIRECT, now=T0
+        )
+    finally:
+        released.set()
+        holder.join(timeout=10)
+        worker.dispose()
+        blocker.dispose()
+
+    # It waited for the lock and then did the real work, rather than raising.
+    assert result.ok
+    assert result.rejection is None
+    assert result.nonce_hash == hash_state(nonce)
+
+
 # ---------------------------------------------------------------------------
 # Purge and validation
 # ---------------------------------------------------------------------------

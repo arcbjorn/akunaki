@@ -80,6 +80,43 @@ def affected_rows(result: object) -> int:
 _affected_rows = affected_rows
 
 
+def run_short_tx[R](
+    session_factory: sessionmaker[Session],
+    work: Callable[[Session], R],
+    *,
+    retry_budget_s: float = _BUSY_RETRY_BUDGET_S,
+) -> R:
+    """Run ``work`` in a short transaction with bounded lock-contention retry.
+
+    Shared with the other repositories rather than kept private here, because
+    the condition it handles is a property of the **driver**, not of jobs:
+    libsql may report ``PRAGMA busy_timeout`` as set and still raise
+    ``database is locked`` under concurrent writers. Any contended
+    single-use CAS write has the same exposure, and one implementation means a
+    fix or a tuning change lands everywhere at once.
+
+    Each retry opens a fresh Session (checking out a pooled DB-API connection),
+    so a caller that loses a race waits and re-reads rather than failing. Only
+    the lock-contention class is retried; every other error propagates
+    unchanged, and the budget is bounded so a genuinely stuck write still
+    surfaces instead of hanging.
+    """
+    if retry_budget_s <= 0:
+        msg = "retry_budget_s must be > 0"
+        raise ValueError(msg)
+    deadline = time.monotonic() + retry_budget_s
+    while True:
+        session: Session = session_factory()
+        try:
+            with session.begin():
+                return work(session)
+        except Exception as exc:
+            if not _is_database_locked(exc) or time.monotonic() >= deadline:
+                raise
+        finally:
+            session.close()
+
+
 def _require_nonempty(value: str, *, field_name: str) -> str:
     if not value:
         msg = f"{field_name} must be non-empty"
@@ -145,21 +182,12 @@ class JobRepository:
         closed, and a new session retries within the budget; all other errors
         propagate unchanged.  Pooled checkouts provide real DB-API connection
         reuse without the connection storm that NullPool would cause.
+
+        Delegates to the module-level :func:`run_short_tx`, which the other
+        repositories share; this stays as the bound form every method here
+        already calls.
         """
-        if retry_budget_s <= 0:
-            msg = "retry_budget_s must be > 0"
-            raise ValueError(msg)
-        deadline = time.monotonic() + retry_budget_s
-        while True:
-            session: Session = self._session_factory()
-            try:
-                with session.begin():
-                    return work(session)
-            except Exception as exc:
-                if not _is_database_locked(exc) or time.monotonic() >= deadline:
-                    raise
-            finally:
-                session.close()
+        return run_short_tx(self._session_factory, work, retry_budget_s=retry_budget_s)
 
     # ------------------------------------------------------------------
     # Enqueue

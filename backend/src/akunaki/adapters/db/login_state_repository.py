@@ -4,6 +4,12 @@ Mirrors ``OAuthStateRepository``: the raw ``state`` and ``nonce`` are never
 stored, consumption is an atomic conditional UPDATE so a replayed callback
 cannot win twice, and the sealed PKCE verifier is released only after every
 check passes.
+
+Consumption is a *contended* write — concurrent callbacks race for one row — so
+it runs under the shared ``run_short_tx`` lock-contention retry. libsql raises
+``database is locked`` under concurrent writers even with ``busy_timeout`` set,
+which without the retry turned a losing race into an unhandled error rather
+than the ``ALREADY_CONSUMED`` rejection the caller is meant to see.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.crypto.oauth import hash_state, redirect_uri_matches
-from akunaki.adapters.db.job_repository import affected_rows
+from akunaki.adapters.db.job_repository import affected_rows, run_short_tx
 from akunaki.adapters.db.models import LoginState
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
 from akunaki.domain.oauth import OAuthStateRejection
@@ -101,14 +107,27 @@ class LoginStateRepository:
         redirect_uri: str,
         now: datetime,
     ) -> LoginStateConsumption:
-        """Validate and single-use consume a login state."""
+        """Validate and single-use consume a login state.
+
+        Runs under :func:`run_short_tx` because this is a **contended** write:
+        two callbacks racing for the same state both open a write transaction,
+        and libsql raises ``database is locked`` rather than honouring
+        ``busy_timeout``. Without the retry the loser surfaced that as an
+        unhandled error — a 500 on a login that should simply have reported
+        ``ALREADY_CONSUMED``. The retry re-reads inside a fresh transaction, so
+        the loser observes the winner's ``consumed_at`` and loses *correctly*.
+
+        The single-use guarantee is unchanged: it rests on the conditional
+        UPDATE below, not on transaction timing, so retrying cannot let a second
+        caller win.
+        """
         if not state or not redirect_uri:
             return LoginStateConsumption(rejection=OAuthStateRejection.NOT_FOUND)
 
         now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
         state_hash = hash_state(state)
 
-        with self._session_factory() as session, session.begin():
+        def work(session: Session) -> LoginStateConsumption:
             row = session.execute(
                 select(
                     LoginState.id,
@@ -161,6 +180,8 @@ class LoginStateRepository:
                 nonce_hash=nonce_hash,
                 redirect_uri=stored_redirect,
             )
+
+        return run_short_tx(self._session_factory, work)
 
     def purge_expired(self, *, now: datetime) -> int:
         """Delete login states past their expiry. Returns rows removed."""
