@@ -15,9 +15,23 @@ from sqlalchemy.pool import QueuePool, StaticPool
 
 from akunaki.config import Settings
 
-# Milliseconds. Short, bounded driver wait compatible with repository
-# _run_short_tx retry budget (2.0 s). Kept low so contested transactions fail
-# fast and the repository retries with a fresh Session.
+# Milliseconds. Short, bounded driver wait paired with the repositories'
+# ``run_short_tx`` retry budget (2.0 s). Kept low so a contested transaction
+# gives up its connection quickly and the *repository* retries with a fresh
+# Session, rather than the driver holding one while it waits.
+#
+# The two halves are a pair, and only work as one. A write path that contends
+# without ``run_short_tx`` does not "fail fast" in any useful sense — it just
+# fails, surfacing ``database is locked`` to the caller after 50ms. That is not
+# hypothetical: it reached CI as a flake and, on the OIDC and confirmation
+# paths, would have been a 500 in production. Raising this value is *not* the
+# fix, because libsql may report the pragma as set and still raise under
+# concurrent writers; the retry is what actually makes contention survivable.
+#
+# So: any repository write that two callers can race for the same row belongs
+# in ``run_short_tx``. Uncontended writes (inserts with distinct keys) do not
+# need it, and wrapping them would only obscure which writes are genuinely
+# contended.
 BUSY_TIMEOUT_MS = 50
 
 

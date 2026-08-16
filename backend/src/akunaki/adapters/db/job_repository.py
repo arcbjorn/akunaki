@@ -100,6 +100,14 @@ def run_short_tx[R](
     the lock-contention class is retried; every other error propagates
     unchanged, and the budget is bounded so a genuinely stuck write still
     surfaces instead of hanging.
+
+    **``work`` must be safe to run more than once.** A retry only follows a
+    transaction that rolled back — ``session.begin()`` unwinds on the exception,
+    so nothing it wrote survives — which makes any closure that only reads and
+    writes through its ``session`` automatically safe. What is *not* safe is a
+    closure with an effect outside that transaction: an enqueue on another
+    store, a counter increment, an outbound call. Those would repeat silently.
+    Keep such effects at the call site, after this returns.
     """
     if retry_budget_s <= 0:
         msg = "retry_budget_s must be > 0"
