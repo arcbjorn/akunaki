@@ -96,7 +96,13 @@ __all__ = [
 
 
 # Default backfill lookback. Roadmap decision 6 (2026-07-19) settled on 30 days
-# for lower first-sync cost and vendor load; still configurable per connection.
+# for lower first-sync cost and vendor load.
+#
+# This is the *fallback* a handler constructed without a config gets, not the
+# deployment's setting: the worker wiring builds every SyncConfig from
+# ``AKUNAKI_LOOKBACK_DAYS`` (see adapters/wiring/registry.py). The application
+# layer keeps a literal so it stays free of configuration, and so a handler
+# built directly in a test or a script has a sane window without one.
 DEFAULT_LOOKBACK_DAYS = 30
 
 # Overlap absorbs late vendor finalization on the sleep stream.

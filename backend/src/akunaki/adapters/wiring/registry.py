@@ -67,6 +67,7 @@ from akunaki.application.sync_handlers import (
     NormalizeHandler,
     ProviderDispatchSyncHandler,
     ReconcileSweepHandler,
+    SyncConfig,
     streams_for_provider,
     sync_config_for_provider,
 )
@@ -86,6 +87,23 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+def sync_configs(settings: Settings) -> dict[tuple[str, str], SyncConfig]:
+    """Every ``(provider, stream)`` the worker syncs, with its backfill config.
+
+    Named and public because this is where the deployment's history window
+    stops being configuration and becomes a sync's behaviour: every handler the
+    registry builds takes its ``lookback_days`` from here, so a setting that
+    reached some streams and not others would be worse than none at all.
+    """
+    return {
+        (provider, stream): sync_config_for_provider(
+            provider, stream=stream, lookback_days=settings.lookback_days
+        )
+        for provider in _FETCH_CLIENTS
+        for stream, _schema in streams_for_provider(provider)
+    }
+
+
 def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -> HandlerRegistry:
     """Construct the full product handler registry for a worker process."""
     sealer = build_sealer(settings)
@@ -102,6 +120,9 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
     # others, and each keeps its own cursor and retry budget.
     initial: dict[tuple[str, str], Callable[..., None]] = {}
     incremental: dict[tuple[str, str], Callable[..., None]] = {}
+    # The deployment's window reaches the handlers here and nowhere else, so
+    # there is one source of truth for how far back a backfill reaches.
+    configs = sync_configs(settings)
     for provider, make_client in _FETCH_CLIENTS.items():
         # The OAuth client lets a sync renew an expiring access token before
         # spending a request on it. A provider whose credentials are not
@@ -110,7 +131,7 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
         oauth_config = settings.connector_oauth(provider)
         oauth_client = build_oauth_client(provider, oauth_config) if oauth_config else None
         for stream, _schema in streams_for_provider(provider):
-            config = sync_config_for_provider(provider, stream=stream)
+            config = configs[provider, stream]
             backfill = InitialSyncHandler(
                 fetch_client=make_client(),
                 ingestion=ingestion,

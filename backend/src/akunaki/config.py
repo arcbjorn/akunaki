@@ -138,6 +138,20 @@ class Settings(BaseSettings):
             "with credentials."
         ),
     )
+    lookback_days: int = Field(
+        default=30,
+        ge=1,
+        le=3650,
+        description=(
+            "How far back a backfill reaches, in days. Governs a connection's "
+            "first sync (and any later one that has no cursor yet); an "
+            "established connection resumes from its stored cursor and is "
+            "unaffected. Raising it costs vendor calls on the next first sync "
+            "only — re-fetched records dedupe on content hash — but a provider "
+            "serves only what it retains, so a large value does not conjure "
+            "history the vendor no longer has."
+        ),
+    )
     metrics_enabled: bool = Field(
         default=False,
         description=(

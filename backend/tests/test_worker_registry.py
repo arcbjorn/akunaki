@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,9 +23,10 @@ from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import Job, Tenant
-from akunaki.adapters.wiring.registry import build_registry
+from akunaki.adapters.wiring.registry import build_registry, sync_configs
 from akunaki.application.score_handlers import SCORE_RECOMPUTE_JOB_TYPE
 from akunaki.application.sync_handlers import (
+    DEFAULT_LOOKBACK_DAYS,
     INCREMENTAL_SYNC_JOB_TYPE,
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
@@ -87,6 +89,52 @@ def test_registry_has_every_product_job_type(db_url: str, factory: sessionmaker[
         RECONCILE_SWEEP_JOB_TYPE,
     ):
         assert registry.get(job_type) is not None
+
+
+def test_the_configured_lookback_reaches_every_stream(db_url: str) -> None:
+    """``AKUNAKI_LOOKBACK_DAYS`` is what a deployment actually backfills with.
+
+    The window used to be a module constant no configuration could reach, so a
+    deployment could never backfill more than 30 days. The setting has to land
+    on **every** ``(provider, stream)`` the worker syncs, not just the first: a
+    lookback that applied to one stream and not its siblings would be worse
+    than none, because the shortfall would be invisible.
+    """
+    settings = Settings(
+        database_url=db_url,
+        secret_keks=f"v1:{KEK_B64}",
+        active_kek_version="v1",
+        lookback_days=365,
+    )
+
+    configs = sync_configs(settings)
+
+    assert configs, "the worker must sync at least one stream"
+    assert {config.lookback_days for config in configs.values()} == {365}
+    # Every stream the dispatcher can route to has a config, so none silently
+    # falls back to the module default.
+    for provider in ("oura", "polar", "google_health"):
+        for stream, _schema in streams_for_provider(provider):
+            assert (provider, stream) in configs
+
+
+def test_the_lookback_default_is_thirty_days(db_url: str) -> None:
+    """Unset, the deployment keeps the settled 30-day window."""
+    configs = sync_configs(_settings(db_url))
+
+    assert {config.lookback_days for config in configs.values()} == {DEFAULT_LOOKBACK_DAYS}
+
+
+def test_the_lookback_setting_refuses_a_meaningless_window(db_url: str) -> None:
+    """A zero or negative window would backfill nothing; reject it at load.
+
+    ``SyncConfig`` already refuses it, but that failure would surface inside a
+    worker at wiring time. Validating at settings load stops the process with a
+    message naming the variable instead.
+    """
+    for invalid in (0, -1):
+        with pytest.raises(ValidationError):
+            Settings(database_url=db_url, lookback_days=invalid)
 
 
 def test_reconcile_sweep_enqueues_a_syncable_job(
