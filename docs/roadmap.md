@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 
-**Last reviewed:** 2026-07-14
+**Last reviewed:** 2026-08-16
 
 Authoritative for **phased plan** (coverage matrix item 20). Phases describe the implementation sequence. Application code has **started** under `backend/` for a model-free platform foundation; Phase Zero is **in progress**, not complete. See [implementation-status.md](implementation-status.md).
 
@@ -193,6 +193,37 @@ phase0 ──► phase1 ──► phase2 ──► phase3 ──► phase4
 | Clinical validation study | Out of eng roadmap |
 | Household multi-user tenancy | MVP single user per tenant |
 | Write-capable MCP remote | Safety |
+| **Wiring `arcbjorn.com/training` to `GET /v1/public/training`** | Polar workout history is still incomplete (2026-08-16); the page shows the stated schedule until it is. Checklist below |
+
+### Checklist: wire the public training page (target ~2026-09-06..13)
+
+The endpoint ships (`api/routes/public_training.py`, unmounted by default — see
+[operating/http-surface.md](operating/http-surface.md)); the page ships static
+(`arcbjorn.com` `src/utils/training.ts`, `defaultTraining()`: every day except
+Saturday). Connecting them is configuration plus one component change:
+
+1. **Confirm the data.** `GET /v1/workouts` (session cookie) shows a session on
+   every trained day of the last 30. If Polar is missing days, fix the sync
+   first — the public calendar must not go live reading gaps as rest days.
+2. **Name the tenant.** `base_infrastructure/gitops/infra/apps/akunaki/app.yaml`,
+   api container env: `AKUNAKI_PUBLIC_TRAINING_TENANT_ID=<tenant id from /v1/me>`.
+   Then `curl -i https://akunaki.arcbjorn.com/v1/public/training` — expect
+   `200`, `cache-control: public, max-age=3600`,
+   `access-control-allow-origin: *`, and no `start`/`end`/`zone` in the body.
+3. **Timezone.** The window ends on the tenant's local today under
+   `tenants.primary_timezone`, which is `UTC` (nothing sets it yet). Accept UTC
+   day boundaries, or set the column before go-live.
+4. **arcbjorn.com.** In `src/components/TrainingCalendar.tsx` replace
+   `createMemo(() => defaultTraining(new Date()))` with a
+   `createResource(() => fetchPublicTraining(TRAINING_ENDPOINT))` (both helpers
+   already exist and are tested in `tests/utils/training.test.ts`); render a
+   loading skeleton and an honest "unavailable" state, never a fake grid. Add
+   `https://akunaki.arcbjorn.com` to `connect-src` in `public/_headers`. Restore
+   the provenance line ("measured by {sources} · via akunaki") and its i18n keys
+   in all seven languages. Keep the stated averages line
+   (6 km run, 2600 m swim, 12.5 km ride) — the endpoint carries no distances.
+5. **Verify** `pnpm vitest run`, `pnpm build`, and the live page in light and
+   dark; the dots must match `GET /v1/workouts` for the same window.
 
 ---
 
