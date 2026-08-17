@@ -169,8 +169,8 @@ class Settings(BaseSettings):
             "Tenant whose training calendar is served on the unauthenticated "
             "GET /v1/public/training. Empty (the default) leaves the route "
             "unmounted. The surface discloses only which local days carried a "
-            "workout session over a fixed 30-day window plus the streaks derived "
-            "from them - no times, zones, loads, or any other measurement - and "
+            "workout session over a fixed 30-day window - no times, zones, "
+            "loads, counts, or any other measurement - and "
             "is meant for a personal public page, so it names one tenant "
             "explicitly rather than inferring the sole user."
         ),

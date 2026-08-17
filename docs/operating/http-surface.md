@@ -139,7 +139,7 @@ Disabled → `404`.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/v1/public/training` | Unauthenticated. The named tenant's last 30 local days, each `trained` or not, plus streaks. No times, zones, loads, or other measurement. `Cache-Control: public, max-age=3600`, `Access-Control-Allow-Origin: *`. `503 public_training_unavailable` when the named tenant does not exist |
+| GET | `/v1/public/training` | Unauthenticated. The named tenant's last 30 local days, each `trained` or not. No times, zones, loads, counts, or other measurement. `Cache-Control: public, max-age=3600`, `Access-Control-Allow-Origin: *`. `503 public_training_unavailable` when the named tenant does not exist |
 
 This is the only `/v1` path that takes no session. It is the one surface that
 answers *anyone* about one operator-named tenant, which is why it is unmounted

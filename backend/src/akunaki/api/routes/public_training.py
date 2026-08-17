@@ -4,7 +4,7 @@ Mounted only when ``AKUNAKI_PUBLIC_TRAINING_TENANT_ID`` names a tenant, and
 serves that tenant alone. It exists so a personal public page can show daily
 training consistency straight from the system of record instead of a hand-kept
 list, and it discloses exactly what such a page needs: per local day, trained
-or not, plus the streaks — no times, zones, loads, or any other measurement.
+or not — no times, zones, loads, counts, or any other measurement.
 
 Everything about it is the opposite of the ``/v1`` session surfaces on
 purpose: no cookie, ``Cache-Control: public`` so an edge cache absorbs the
@@ -56,11 +56,6 @@ class PublicTrainingResponse(BaseModel):
     as_of: str = Field(description="The tenant's local today; last day of the window.")
     window_days: int
     days: list[PublicTrainingDayResponse] = Field(description="Oldest first.")
-    days_trained: int
-    current_streak: int = Field(
-        description="Consecutive trained days ending today, or yesterday if today is not yet.",
-    )
-    longest_streak: int = Field(description="Longest run inside the window.")
     sources: list[str] = Field(description="Providers that recorded a session in the window.")
     definition: str = Field(description="What makes a day count, stated verbatim.")
 
@@ -73,9 +68,6 @@ def _to_response(calendar: PublicTrainingCalendar) -> PublicTrainingResponse:
             PublicTrainingDayResponse(day=entry.local_health_day, trained=entry.trained)
             for entry in calendar.days
         ],
-        days_trained=calendar.days_trained,
-        current_streak=calendar.current_streak,
-        longest_streak=calendar.longest_streak,
         sources=list(calendar.sources),
         definition=calendar.definition,
     )
@@ -104,7 +96,7 @@ def public_training(
     session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> PublicTrainingResponse:
-    """The configured tenant's last 30 local days: trained or not, plus streaks."""
+    """The configured tenant's last 30 local days: trained or not."""
     tenant_id = settings.public_training_tenant_id.strip()
     timezone_name = UserRepository(session_factory).tenant_timezone(tenant_id=tenant_id)
     if timezone_name is None:

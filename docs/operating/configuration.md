@@ -163,9 +163,8 @@ registry and no HTTP server; observe the worker through `/readyz` instead.
 **What it discloses.** For the named tenant, the last 30 local days ending on
 the tenant's local today (under its stated `primary_timezone`), each marked
 `trained` or not — a day counts when at least one workout session was recorded
-— plus `days_trained`, `current_streak`, `longest_streak`, and the providers
-that recorded a session in the window. **Nothing else**: no times, zone
-minutes, loads, scores, or vitals. It exists for a personal public page and is
+— plus the providers that recorded a session in the window. **Nothing else**:
+no times, zone minutes, loads, counts, scores, or vitals. It exists for a personal public page and is
 **unauthenticated by design**, served with `Cache-Control: public, max-age=3600`
 and `Access-Control-Allow-Origin: *`, so a browser on any origin may read it and
 an edge cache can absorb the traffic.

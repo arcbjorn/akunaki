@@ -19,11 +19,7 @@ from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
 from akunaki.adapters.db.models import Tenant, User
 from akunaki.api.app import create_app
-from akunaki.application.public_training_surface import (
-    WINDOW_DAYS,
-    current_streak,
-    longest_streak,
-)
+from akunaki.application.public_training_surface import WINDOW_DAYS
 from akunaki.config import Settings, clear_settings_cache
 from akunaki.domain.jobs import to_utc_rfc3339
 from akunaki.domain.workout_normalizer import WorkoutFact
@@ -175,28 +171,18 @@ def test_window_is_thirty_days_ending_today_oldest_first(
 def test_no_workouts_is_all_untrained(client: TestClient, factory: sessionmaker[Session]) -> None:
     body = client.get("/v1/public/training").json()
     assert all(entry["trained"] is False for entry in body["days"])
-    assert body["days_trained"] == 0
-    assert body["current_streak"] == 0
-    assert body["longest_streak"] == 0
     assert body["sources"] == []
 
 
-def test_trained_days_and_streaks(client: TestClient, factory: sessionmaker[Session]) -> None:
-    # Today, yesterday, the day before: a current streak of 3.
-    for offset in (0, 1, 2):
+def test_trained_days(client: TestClient, factory: sessionmaker[Session]) -> None:
+    for offset in (0, 1, 2, 10, 11, 12, 13, 14):
         _seed_workout(factory, workout_id=f"w-{offset}", day=_days_ago(offset))
-    # A longer, older run of 5 that ended with a rest day.
-    for offset in range(10, 15):
-        _seed_workout(factory, workout_id=f"w-{offset}", day=_days_ago(offset))
-    # Two sessions on one day still count once.
+    # Two sessions on one day still read as one trained day.
     _seed_workout(factory, workout_id="w-10-second", day=_days_ago(10))
 
     body = client.get("/v1/public/training").json()
     trained = {entry["day"] for entry in body["days"] if entry["trained"]}
     assert trained == {_days_ago(o) for o in (0, 1, 2, 10, 11, 12, 13, 14)}
-    assert body["days_trained"] == 8
-    assert body["current_streak"] == 3
-    assert body["longest_streak"] == 5
     assert body["sources"] == ["polar"]
 
 
@@ -205,7 +191,7 @@ def test_a_day_outside_the_window_is_not_shown(
 ) -> None:
     _seed_workout(factory, workout_id="w-old", day=_days_ago(30))
     body = client.get("/v1/public/training").json()
-    assert body["days_trained"] == 0
+    assert not any(entry["trained"] for entry in body["days"])
     assert _days_ago(30) not in {entry["day"] for entry in body["days"]}
 
 
@@ -214,7 +200,7 @@ def test_other_tenants_sessions_do_not_count(
 ) -> None:
     _seed_workout(factory, workout_id="w-other", day=_today(), tenant_id="tenant-2")
     body = client.get("/v1/public/training").json()
-    assert body["days_trained"] == 0
+    assert not any(entry["trained"] for entry in body["days"])
 
 
 # --- disclosure -------------------------------------------------------------
@@ -224,16 +210,7 @@ def test_discloses_no_measurement(client: TestClient, factory: sessionmaker[Sess
     """Per day: the day and a boolean. Nothing a session could be rebuilt from."""
     _seed_workout(factory, workout_id="w-0", day=_today())
     body = client.get("/v1/public/training").json()
-    assert set(body) == {
-        "as_of",
-        "window_days",
-        "days",
-        "days_trained",
-        "current_streak",
-        "longest_streak",
-        "sources",
-        "definition",
-    }
+    assert set(body) == {"as_of", "window_days", "days", "sources", "definition"}
     assert all(set(entry) == {"day", "trained"} for entry in body["days"])
     text = client.get("/v1/public/training").text
     for leak in ("start", "end", "zone", "load", "utc", "min", "score"):
@@ -248,25 +225,3 @@ def test_is_publicly_cacheable_and_cross_origin_readable(
     assert response.headers["access-control-allow-origin"] == "*"
     # Relaxed for this route only; the security middleware default is same-origin.
     assert response.headers["cross-origin-resource-policy"] == "cross-origin"
-
-
-# --- streak arithmetic ------------------------------------------------------
-
-
-def test_current_streak_skips_an_untrained_today() -> None:
-    """Today is in progress; not having trained *yet* must not zero the streak."""
-    assert current_streak((True, True, True, False)) == 3
-    assert current_streak((True, True, True, True)) == 4
-
-
-def test_current_streak_ends_on_an_untrained_yesterday() -> None:
-    assert current_streak((True, True, False, False)) == 0
-    assert current_streak((True, True, False, True)) == 1
-    assert current_streak(()) == 0
-    assert current_streak((False,)) == 0
-
-
-def test_longest_streak_is_the_best_run_anywhere() -> None:
-    assert longest_streak((True, True, False, True, True, True, False, True)) == 3
-    assert longest_streak((False, False)) == 0
-    assert longest_streak(()) == 0
