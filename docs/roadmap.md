@@ -202,6 +202,12 @@ The endpoint ships (`api/routes/public_training.py`, unmounted by default — se
 (`arcbjorn.com` `src/utils/training.ts`, `defaultTraining()`: every day except
 Saturday). Connecting them is configuration plus one component change:
 
+0. **Per-sport disclosure.** The page shows one calendar per sport (swim,
+   ride, run); this endpoint returns one `trained` boolean per day because
+   workout facts carry no sport. Before wiring, either normalize Polar's
+   `sport` onto the workout fact and add a per-sport breakdown to the response
+   (still booleans per day, nothing else), or agree the page shows one shared
+   calendar until then.
 1. **Confirm the data.** `GET /v1/workouts` (session cookie) shows a session on
    every trained day of the last 30. If Polar is missing days, fix the sync
    first — the public calendar must not go live reading gaps as rest days.
