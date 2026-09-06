@@ -212,13 +212,23 @@ class ConnectionRepository:
             )
 
     def stale_connections(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str, str]]:
-        """Active connections whose last successful sync is older than ``cutoff``.
+        """Connections whose last successful sync is older than ``cutoff``.
 
-        Returns ``(connection_id, tenant_id, provider)`` for each ACTIVE connection whose
-        ``connection_health.last_success_at`` is null (never synced) or strictly
-        older than ``cutoff`` (a UTC RFC3339 instant). Only ACTIVE connections
-        are swept — a ``needs_reauth`` or ``error`` connection will not sync
-        until the user re-consents, so re-enqueuing it would only burn attempts.
+        Returns ``(connection_id, tenant_id, provider)`` for each connection
+        whose ``connection_health.last_success_at`` is null (never synced) or
+        strictly older than ``cutoff`` (a UTC RFC3339 instant), and that is in
+        a state a sync can fix:
+
+        - ``active``: swept as soon as it is stale.
+        - ``error``: a vendor 5xx, a rate limit, or a bug of ours exhausted the
+          attempt budget. None of those is settled by waiting for the user, so
+          it is swept too — once its own ``updated_at`` is older than the cutoff,
+          which spaces retries by the staleness window instead of every tick.
+          Until 2026-09-06 ``error`` was excluded, so one bad hour (a 204 read as
+          malformed JSON, a too-wide window) parked a connection for good.
+        - ``needs_reauth`` / ``revoked`` / ``pending``: excluded; only the user
+          can move these, and re-enqueuing them would burn attempts.
+
         The stable ``id`` ordering makes the sweep deterministic and pageable.
         """
         with self._session_factory() as session:
@@ -226,7 +236,11 @@ class ConnectionRepository:
                 select(Connection.id, Connection.tenant_id, Connection.provider)
                 .outerjoin(ConnectionHealth, ConnectionHealth.connection_id == Connection.id)
                 .where(
-                    Connection.status == ConnectionStatus.ACTIVE.value,
+                    (Connection.status == ConnectionStatus.ACTIVE.value)
+                    | (
+                        (Connection.status == ConnectionStatus.ERROR.value)
+                        & (Connection.updated_at < cutoff)
+                    ),
                     (ConnectionHealth.last_success_at.is_(None))
                     | (ConnectionHealth.last_success_at < cutoff),
                 )
