@@ -84,13 +84,18 @@ ROLLUP_STREAMS = frozenset({"steps", "active_minutes"})
 # Vendor **maximum** window per request, in days. v4 caps the range for
 # `active-minutes` (with heart-rate, total-calories, and
 # calories-in-heart-rate-zone) at 14 days and everything else at 90; a wider
-# request is refused outright with a bare "Invalid argument in request", which
-# the transport classifies as transient and would retry forever. A stream absent
-# here has no cap beyond the caller's window.
+# request is refused outright with a bare "Invalid argument in request".
+#
+# Every stream is capped here. Until 2026-09-06 only `active-minutes` was, and
+# the initial backfill asked `steps` for a ten-year roll-up: Google refused it,
+# the 400 was classified as transient, five retries dead-lettered the stream,
+# and the connection sat in `error` for three weeks while its grant was fine.
 #
 # Note this is the *opposite* constraint to `GOOGLE_HEALTH_MIN_WINDOW` (a 14-day
 # **floor** on the sleep list call): for `active-minutes`, 14 days is the ceiling.
 STREAM_MAX_WINDOW_DAYS = {
+    "sleep": 90,
+    "steps": 90,
     "active_minutes": 14,
 }
 
@@ -148,6 +153,13 @@ class GoogleHealthFetchClient:
         if end < start:
             msg = "window_end must not precede window_start"
             raise ValueError(msg)
+        # Clamp to the vendor's ceiling for this data type. Trimming the window
+        # costs older days on one call — which the next sync's own window
+        # covers — whereas exceeding it has the whole request refused, so the
+        # stream would ingest nothing at all.
+        max_days = STREAM_MAX_WINDOW_DAYS.get(stream)
+        if max_days is not None:
+            start = max(start, end - timedelta(days=max_days))
 
         start_s = to_utc_rfc3339(start)
         end_s = to_utc_rfc3339(end)
@@ -170,13 +182,6 @@ class GoogleHealthFetchClient:
             # would replace the day's total instead of adding to it. Rolling up
             # vendor-side keeps one payload equal to one complete day.
             url = f"{url}:dailyRollUp"
-            # Clamp to the vendor's ceiling for this data type. Trimming the
-            # window costs older days on one call — which the next sync's own
-            # window covers — whereas exceeding it has the whole request
-            # refused, so the stream would ingest nothing at all.
-            max_days = STREAM_MAX_WINDOW_DAYS.get(stream)
-            if max_days is not None:
-                start = max(start, end - timedelta(days=max_days))
         try:
             response = (
                 self._post(url, _rollup_body(start, end, page_token), access_token)
@@ -266,6 +271,13 @@ class GoogleHealthFetchClient:
             failure = FetchFailure.UNAUTHORIZED
         elif status == 429:
             failure = FetchFailure.RATE_LIMIT
+        elif 400 <= status < 500:
+            # A 4xx is a request-shape bug on our side — a too-wide range, a
+            # bad filter member — and the same request is refused every time.
+            # Permanent and named, so it surfaces on the first attempt instead
+            # of burning the budget under a "transient" label (as the ten-year
+            # steps roll-up did).
+            failure = FetchFailure.MALFORMED_REQUEST
         else:
             failure = FetchFailure.PROVIDER_ERROR
 
