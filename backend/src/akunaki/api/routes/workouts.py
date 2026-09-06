@@ -48,6 +48,12 @@ class WorkoutResponse(BaseModel):
     zone3_min: float
     zone4_min: float
     zone5_min: float
+    sport: str | None = None
+    sport_detail: str | None = None
+    avg_hr_bpm: int | None = None
+    max_hr_bpm: int | None = None
+    calories: int | None = None
+    distance_m: float | None = None
     total_zone_min: float = Field(description="Sum of the five zone minutes.")
 
 
@@ -73,6 +79,12 @@ def _to_response(summary: WorkoutSummary) -> WorkoutResponse:
         zone3_min=summary.zone3_min,
         zone4_min=summary.zone4_min,
         zone5_min=summary.zone5_min,
+        sport=summary.sport,
+        sport_detail=summary.sport_detail,
+        avg_hr_bpm=summary.avg_hr_bpm,
+        max_hr_bpm=summary.max_hr_bpm,
+        calories=summary.calories,
+        distance_m=summary.distance_m,
         total_zone_min=summary.total_zone_min,
     )
 
