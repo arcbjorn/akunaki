@@ -28,6 +28,7 @@ from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import get_settings
 from akunaki.domain.schedule import ScheduleSpec
 from akunaki.domain.tenants import SYSTEM_TENANT_ID
+from akunaki.logfmt import JsonFormatter
 
 # How often the leader enqueues a reconciliation sweep. The sweep skips fresh
 # connections, so a frequent tick is cheap; staleness is decided by the handler.
@@ -66,10 +67,9 @@ def configure_logging() -> None:
     configure logging: it is imported by tests and other callers, and a
     ``basicConfig`` there mutates the root logger for the whole process.
     """
-    logging.basicConfig(
-        level=logging.INFO,
-        format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
-    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
 
 
 def run_worker(*, stop_event: threading.Event | None = None) -> int:
