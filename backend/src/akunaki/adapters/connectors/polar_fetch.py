@@ -179,14 +179,26 @@ class PolarFetchClient:
             return self._classify_error(response, stream=stream)
 
         body = response.text
-        try:
-            response.json()
-        except ValueError:
-            logger.warning(
-                "polar fetch response was not valid json",
-                extra={"stream": stream, "status": response.status_code},
-            )
-            return FetchResult(failure=FetchFailure.MALFORMED_RESPONSE)
+        if response.status_code == 204 or not body.strip():
+            # AccessLink answers a window with nothing in it as ``204 No
+            # Content`` — documented, and routine: a rest day has no activity
+            # record. An empty body is not malformed JSON; it is an empty
+            # collection, and it is recorded as one so the page commits, the
+            # cursor advances, and the connection stays healthy. Treating it as
+            # malformed (the behaviour until 2026-09-06) dead-lettered the
+            # stream after five retries on the first quiet day and left the
+            # connection in ``error``, where the sweep never looked again.
+            logger.info("polar fetch returned no content", extra={"stream": stream})
+            body = "[]"
+        else:
+            try:
+                response.json()
+            except ValueError:
+                logger.warning(
+                    "polar fetch response was not valid json",
+                    extra={"stream": stream, "status": response.status_code},
+                )
+                return FetchResult(failure=FetchFailure.MALFORMED_RESPONSE)
 
         return FetchResult(
             envelope=RawEnvelope(
