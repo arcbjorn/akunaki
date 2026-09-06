@@ -418,6 +418,12 @@ class FactRepository:
                     zone3_min=fact.zone3_min,
                     zone4_min=fact.zone4_min,
                     zone5_min=fact.zone5_min,
+                    sport=fact.sport,
+                    sport_detail=fact.sport_detail,
+                    avg_hr_bpm=fact.avg_hr_bpm,
+                    max_hr_bpm=fact.max_hr_bpm,
+                    calories=fact.calories,
+                    distance_m=fact.distance_m,
                 )
             )
 
@@ -1232,6 +1238,12 @@ def _workout_summary(fact: FactRecord, detail: WorkoutSession) -> WorkoutSummary
         zone3_min=float(detail.zone3_min),
         zone4_min=float(detail.zone4_min),
         zone5_min=float(detail.zone5_min),
+        sport=detail.sport,
+        sport_detail=detail.sport_detail,
+        avg_hr_bpm=detail.avg_hr_bpm,
+        max_hr_bpm=detail.max_hr_bpm,
+        calories=detail.calories,
+        distance_m=detail.distance_m,
     )
 
 
