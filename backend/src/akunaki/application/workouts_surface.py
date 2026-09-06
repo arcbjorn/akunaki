@@ -49,6 +49,13 @@ class WorkoutSummary:
     zone3_min: float
     zone4_min: float
     zone5_min: float
+    # Vendor-measured extras; None when the provider or the row predates them.
+    sport: str | None = None
+    sport_detail: str | None = None
+    avg_hr_bpm: int | None = None
+    max_hr_bpm: int | None = None
+    calories: int | None = None
+    distance_m: float | None = None
 
     @property
     def total_zone_min(self) -> float:
