@@ -154,9 +154,10 @@ def _normalize_record(record: dict[str, Any]) -> WorkoutFact | None:
 def _zone_minutes(raw: object) -> ZoneMinutes | None:
     """Parse the five HR-zone durations (minutes), or None when incomplete.
 
-    The vendor's ``zone`` array: five objects, each with an ISO-8601 ``in-zone``
-    duration. All five must be present and in range — a partial set is dropped
-    rather than zero-filled, since a missing zone is unknown, not zero.
+    The vendor's ``heart_rate_zones`` array: five objects (``index`` 0-4), each
+    with an ISO-8601 duration. All five must be present and in range — a partial
+    set is dropped rather than zero-filled, since a missing zone is unknown,
+    not zero.
     """
     if not isinstance(raw, list) or len(raw) != 5:
         return None
@@ -174,10 +175,21 @@ def _zone_minutes(raw: object) -> ZoneMinutes | None:
 
 
 def _zone_entry_minutes(entry: object) -> float | None:
-    """Minutes in one zone, from the vendor's hyphenated ``in-zone`` field."""
+    """Minutes in one zone.
+
+    The live API sends ``in_zone`` (verified against ``GET /v3/exercises``
+    on 2026-09-06: ``{"index": 0, "lower_limit": 95, "upper_limit": 114,
+    "in_zone": "PT8M4S"}``); the documentation this was first written against
+    spelled it ``in-zone``. Until 2026-09-06 only the hyphen was read, so every
+    real exercise was dropped as "no zone data" and no workout fact was ever
+    written. Both spellings are accepted; the underscore wins when both exist.
+    """
     if not isinstance(entry, dict):
         return None
-    return _duration_minutes(entry.get("in-zone"))
+    value = entry.get("in_zone")
+    if value is None:
+        value = entry.get("in-zone")
+    return _duration_minutes(value)
 
 
 def _duration_minutes(value: object) -> float | None:
