@@ -110,6 +110,27 @@ def test_empty_exercise_list_is_a_valid_page() -> None:
     assert json.loads(envelope.payload_text) == []
 
 
+def test_204_no_content_is_an_empty_page() -> None:
+    """A quiet day is 204 from AccessLink: an empty collection, not an error."""
+
+    def no_content(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(204)
+
+    result = _client(no_content).fetch_page(
+        access_token="AT",
+        stream="daily_activity",
+        window_start=WINDOW_START,
+        window_end=WINDOW_END,
+        page_token=None,
+        now=T0,
+    )
+    assert result.ok
+    assert result.envelope is not None
+    assert result.envelope.http_status == 204
+    assert json.loads(result.envelope.payload_text) == []
+    assert result.envelope.next_page_token is None
+
+
 def test_empty_access_token_is_rejected() -> None:
     with pytest.raises(ValueError, match="access_token must be non-empty"):
         PolarFetchClient().fetch_page(
