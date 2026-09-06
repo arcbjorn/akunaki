@@ -9,19 +9,15 @@ import uvicorn
 from akunaki.api.app import create_app
 from akunaki.api.request_context import RequestIdFilter
 from akunaki.config import get_settings
-
-# JSON log line including the per-request correlation id. Outside a request the
-# id is "-", so startup lines are still well-formed.
-_LOG_FORMAT = (
-    '{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s",'
-    '"request_id":"%(request_id)s","msg":"%(message)s"}'
-)
+from akunaki.logfmt import JsonFormatter
 
 
 def configure_logging() -> None:
     """Install structured logging with the request-id filter on every record."""
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    # The request-id filter stamps ``request_id`` on the record; the formatter
+    # renders it like any other extra field, "-" outside a request.
+    handler.setFormatter(JsonFormatter())
     handler.addFilter(RequestIdFilter())
     root = logging.getLogger()
     root.handlers.clear()
