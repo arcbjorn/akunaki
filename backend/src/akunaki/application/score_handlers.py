@@ -206,11 +206,12 @@ class ScoreRecomputeHandler:
         now: datetime,
         session: Any,
     ) -> ScoreWriteOutcomeLike:
-        """Record the derivation run, write the score, and advance anomalies.
+        """Record the derivation run and write the score.
 
         Every write here belongs to the same unit of work: when ``session`` is
         supplied they commit or roll back together with the lease check that
-        authorized them.
+        authorized them. Anomaly tracking is deliberately not here — see
+        ``_track_anomalies``.
         """
         # Record a derivation run for the score when the writer is wired, so the
         # served value can be traced through an opaque provenance token, and
@@ -239,7 +240,7 @@ class ScoreRecomputeHandler:
             )
             run_id = created.run_id
 
-        outcome = self._scores.write_recovery_score(
+        return self._scores.write_recovery_score(
             score_id=self._new_id(),
             tenant_id=claim.tenant_id,
             surface=surface,
@@ -250,20 +251,32 @@ class ScoreRecomputeHandler:
             session=session,
         )
 
-        # Detect and track anomalies for the day when both collaborators are
-        # wired. The anomaly state machine advances one day per recompute.
-        if self._inputs is not None and self._tracker is not None:
-            signals = self._inputs.feature_signals(
-                tenant_id=claim.tenant_id,
-                local_health_day=local_health_day,
-            )
-            self._tracker.track(
-                tenant_id=claim.tenant_id,
-                local_health_day=local_health_day,
-                signals=signals,
-            )
+    def _track_anomalies(self, *, claim: JobClaim, local_health_day: str) -> None:
+        """Detect and track the day's anomalies when both collaborators are wired.
 
-        return outcome
+        Runs **after** the fenced score write has committed, never inside it.
+        The tracker writes through the anomaly repository's own session; called
+        from inside the fenced transaction — which already holds SQLite's write
+        lock once the score row is written — that second writer waited out
+        ``busy_timeout`` and failed with ``database is locked``. Only days whose
+        anomaly state actually changed took the path, so three specific days
+        dead-lettered deterministically (2026-08-18/21/24, seen 2026-09-06)
+        while every other recompute succeeded. The anomaly state machine reads
+        facts, not the score row, so nothing is lost by advancing it after the
+        commit; a failure here retries the job, and the score write is
+        versioned and idempotent.
+        """
+        if self._inputs is None or self._tracker is None:
+            return
+        signals = self._inputs.feature_signals(
+            tenant_id=claim.tenant_id,
+            local_health_day=local_health_day,
+        )
+        self._tracker.track(
+            tenant_id=claim.tenant_id,
+            local_health_day=local_health_day,
+            signals=signals,
+        )
 
     def __call__(self, claim: JobClaim) -> None:
         """Execute one recompute job."""
@@ -299,6 +312,8 @@ class ScoreRecomputeHandler:
                 now=now,
                 session=None,
             )
+
+        self._track_anomalies(claim=claim, local_health_day=local_health_day)
 
         logger.info(
             "recomputed recovery score",
