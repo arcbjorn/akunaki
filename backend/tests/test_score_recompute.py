@@ -500,3 +500,64 @@ def test_recompute_opens_no_anomaly_when_in_range(
         from akunaki.adapters.db.models import Anomaly as AnomalyRow
 
         assert session.scalars(select(AnomalyRow)).all() == []
+
+
+def test_anomaly_tracking_does_not_deadlock_the_fenced_write(
+    factory: sessionmaker[Session],
+) -> None:
+    """Production wires a fenced unit of work; the tracker must run after it.
+
+    Inside the fence the score write holds SQLite's write lock, and the anomaly
+    repository writes through its own session — so a day whose anomaly state
+    changes locked against its own job and dead-lettered (2026-09-06).
+    """
+    facts = FactRepository(factory)
+    inputs = RecoveryInputService(features=facts)
+    handler = ScoreRecomputeHandler(
+        recovery=RecoverySurfaceService(inputs=inputs),
+        scores=ScoreRepository(factory),
+        new_id=lambda: f"id-{next(_IDS)}",
+        inputs=inputs,
+        tracker=AnomalyTracker(
+            store=AnomalyRepository(factory),
+            new_id=lambda: f"an-{next(_IDS)}",
+            clock=lambda: T0,
+        ),
+        derivations=DerivationRepository(factory),
+        generate_token=lambda: f"opaque_tok_{next(_IDS)}",
+        unit_of_work=FencedUnitOfWork(factory),
+        clock=lambda: T0,
+    )
+    for offset in range(1, 29):
+        day = (datetime.fromisoformat(DAY) - timedelta(days=offset)).date().isoformat()
+        _seed_vitals(factory, day=day, fact_id=f"pv-{offset}", hrv_ms=58.0 if offset % 2 else 62.0)
+    _seed_vitals(factory, day=DAY, fact_id="tv", hrv_ms=20.0)
+    _seed_sleep(factory, day=DAY, fact_id="ts")
+
+    worker = JobWorker(
+        JobRepository(factory),
+        owner="worker-1",
+        config=WorkerConfig(lease_ttl=timedelta(seconds=60)),
+        registry=HandlerRegistry({SCORE_RECOMPUTE_JOB_TYPE: handler}),
+        jitter=lambda: 0.0,
+    )
+    # Twice: the second recompute supersedes the first score row with an UPDATE
+    # inside the fence, which is what actually takes the write lock. A first
+    # write is only a pending INSERT until commit, so one run never showed it.
+    for job_id in ("rc-fenced-1", "rc-fenced-2"):
+        JobRepository(factory).enqueue_job(
+            job_id=job_id,
+            tenant_id="tenant-1",
+            job_type=SCORE_RECOMPUTE_JOB_TYPE,
+            payload_json=f'{{"local_health_day":"{DAY}"}}',
+            now=T0,
+        )
+        assert worker.run_once()
+    assert worker.stats.succeeded == 2, "the fenced recompute must not lock against its tracker"
+    assert worker.stats.dead_lettered == 0
+
+    with factory() as session:
+        from akunaki.adapters.db.models import Anomaly as AnomalyRow
+
+        codes = {a.feature_code for a in session.scalars(select(AnomalyRow)).all()}
+    assert "low_hrv" in codes
