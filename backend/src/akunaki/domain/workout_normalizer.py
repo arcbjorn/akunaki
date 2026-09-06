@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -60,6 +60,20 @@ class WorkoutFact:
     quality: str
     confidence: float
     content_hash: str
+    # What the vendor measured about the session beyond the zones. Optional:
+    # an older revision, or another provider, may carry none of it. ``sport``
+    # is the vendor's own label (Polar: SWIMMING, RUNNING, OTHER) and
+    # ``sport_detail`` its finer one (POOL_SWIMMING, OTHER_INDOOR); a consumer
+    # routing sessions by kind needs these, and inferring them from the clock
+    # is a guess. ``distance_m`` is stored as reported and is **not** trusted
+    # per se — a Polar Verity Sense reports a placeholder for pool swims — so
+    # the consumer decides, per device, whether it is a measurement.
+    sport: str | None = None
+    sport_detail: str | None = None
+    avg_hr_bpm: int | None = None
+    max_hr_bpm: int | None = None
+    calories: int | None = None
+    distance_m: float | None = None
 
     @property
     def fact_key(self) -> str:
@@ -132,6 +146,9 @@ def _normalize_record(record: dict[str, Any]) -> WorkoutFact | None:
     end = start + timedelta(minutes=duration_min) if duration_min is not None else start
     local_day = _local_date(start, offset_minutes)
 
+    heart_rate = record.get("heart_rate")
+    if not isinstance(heart_rate, dict):
+        heart_rate = {}
     fact = WorkoutFact(
         vendor_record_id=vendor_id,
         start_utc=to_utc_rfc3339(start),
@@ -147,8 +164,39 @@ def _normalize_record(record: dict[str, Any]) -> WorkoutFact | None:
         quality="high",
         confidence=0.9,
         content_hash="",
+        sport=_text(record.get("sport")),
+        sport_detail=_text(record.get("detailed_sport_info")),
+        avg_hr_bpm=_count(heart_rate.get("average")),
+        max_hr_bpm=_count(heart_rate.get("maximum")),
+        calories=_count(record.get("calories")),
+        distance_m=_metres(record.get("distance")),
     )
     return _with_content_hash(fact)
+
+
+def _text(value: object) -> str | None:
+    """A non-empty string, else None."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _count(value: object) -> int | None:
+    """A non-negative integer, else None. Bools are not counts."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if value < 0:
+        return None
+    return int(value)
+
+
+def _metres(value: object) -> float | None:
+    """A non-negative distance in metres, else None."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if value < 0:
+        return None
+    return round(float(value), 1)
 
 
 def _zone_minutes(raw: object) -> ZoneMinutes | None:
@@ -274,6 +322,12 @@ def _with_content_hash(fact: WorkoutFact) -> WorkoutFact:
             "end_utc": fact.end_utc,
             "local_health_day": fact.local_health_day,
             "session_load": fact.session_load,
+            "sport": fact.sport,
+            "sport_detail": fact.sport_detail,
+            "avg_hr_bpm": fact.avg_hr_bpm,
+            "max_hr_bpm": fact.max_hr_bpm,
+            "calories": fact.calories,
+            "distance_m": fact.distance_m,
             "zones": [
                 fact.zone1_min,
                 fact.zone2_min,
@@ -285,19 +339,4 @@ def _with_content_hash(fact: WorkoutFact) -> WorkoutFact:
         sort_keys=True,
     )
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
-    return WorkoutFact(
-        vendor_record_id=fact.vendor_record_id,
-        start_utc=fact.start_utc,
-        end_utc=fact.end_utc,
-        local_health_day=fact.local_health_day,
-        source_offset_minutes=fact.source_offset_minutes,
-        session_load=fact.session_load,
-        zone1_min=fact.zone1_min,
-        zone2_min=fact.zone2_min,
-        zone3_min=fact.zone3_min,
-        zone4_min=fact.zone4_min,
-        zone5_min=fact.zone5_min,
-        quality=fact.quality,
-        confidence=fact.confidence,
-        content_hash=digest,
-    )
+    return replace(fact, content_hash=digest)
