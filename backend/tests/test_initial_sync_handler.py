@@ -384,6 +384,38 @@ def test_unauthorized_flips_connection_and_does_not_retry(
         assert connection.status == ConnectionStatus.NEEDS_REAUTH.value
 
 
+def test_unauthorized_secondary_stream_keeps_connection_active(
+    factory: sessionmaker[Session],
+) -> None:
+    """A 401 on a stream the grant lacks stops that stream, not the connection.
+
+    Oura refuses an unscoped collection with a 401 naming the scope while the
+    grant serves sleep perfectly well; flipping the whole connection to
+    needs_reauth (the behaviour until 2026-09-06) demanded re-consent for data
+    that was still flowing.
+    """
+
+    def unauthorized(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            401, json={"detail": "Token is not authorized access workout scope."}
+        )
+
+    handler = _handler(
+        factory,
+        unauthorized,
+        config=SyncConfig(stream="workout", schema_version="oura_raw.workout.v2", max_pages=5),
+    )
+    worker = _run_job(factory, handler)
+
+    assert worker.stats.dead_lettered == 1
+    assert worker.stats.retried == 0
+
+    with factory() as session:
+        connection = session.get(Connection, "conn-1")
+        assert connection is not None
+        assert connection.status == ConnectionStatus.ACTIVE.value
+
+
 def test_rate_limit_is_retried(factory: sessionmaker[Session]) -> None:
     def limited(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(429, json={"error": "rate_limit"}, headers={"retry-after": "120"})
