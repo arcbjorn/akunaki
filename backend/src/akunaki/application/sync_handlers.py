@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn, Protocol
@@ -90,6 +90,8 @@ __all__ = [
     "ProviderDispatchSyncHandler",
     "ReconcileSweepHandler",
     "SyncConfig",
+    "stream_is_granted",
+    "stream_required_scope",
     "streams_for_provider",
     "sync_config_for_provider",
 ]
@@ -205,6 +207,57 @@ _PROVIDER_ALL_STREAMS: dict[str, tuple[tuple[str, str], ...]] = {
         ("active_minutes", "google_health_activity.v4"),
     ),
 }
+
+
+# The OAuth scope each Oura stream needs beyond ``daily``. Oura publishes no
+# per-endpoint mapping (its OpenAPI spec declares an empty scope list on every
+# endpoint), so this was read off the vendor's own 401 bodies on 2026-09-06 —
+# "Token is not authorized access workout scope." — against a grant holding
+# only ``daily``. A stream absent here is served by ``daily``. Polar's single
+# ``accesslink.read_all`` and Google's two scopes are requested in full at link
+# time, so nothing is gated for them.
+_OURA_STREAM_SCOPES: dict[str, str] = {
+    "workout": "workout",
+    "session": "session",
+    "heartrate": "heartrate",
+    "daily_resilience": "stress",
+    "daily_cardiovascular_age": "heart_health",
+    "vo2_max": "heart_health",
+}
+_PROVIDER_STREAM_SCOPES: dict[str, dict[str, str]] = {"oura": _OURA_STREAM_SCOPES}
+
+# Oura records a granted scope as ``extapi:daily``; the request form is ``daily``.
+_SCOPE_PREFIXES = ("extapi:",)
+
+
+def _bare_scope(scope: str) -> str:
+    for prefix in _SCOPE_PREFIXES:
+        if scope.startswith(prefix):
+            return scope[len(prefix) :]
+    return scope
+
+
+def stream_required_scope(provider: str, stream: str) -> str | None:
+    """The scope ``stream`` needs beyond the provider's base grant, if any."""
+    return _PROVIDER_STREAM_SCOPES.get(provider, {}).get(stream)
+
+
+def stream_is_granted(provider: str, stream: str, granted: Iterable[str] | None) -> bool:
+    """Whether a connection's grant covers ``stream``.
+
+    A grant that recorded no scopes (``None`` or empty — an older row, or a
+    provider that omits ``scope`` from its token body) is trusted: the stream
+    is attempted, and a refusal is handled at fetch time, exactly as before
+    gating existed. Gating exists to spare the requests that are known to be
+    doomed, not to guess.
+    """
+    required = stream_required_scope(provider, stream)
+    if required is None:
+        return True
+    scopes = {_bare_scope(scope) for scope in (granted or ())}
+    if not scopes:
+        return True
+    return required in scopes
 
 
 def streams_for_provider(provider: str) -> tuple[tuple[str, str], ...]:
@@ -329,12 +382,14 @@ class InitialSyncHandler:
         )
         if new_revisions == 0:
             # A first backfill over the whole lookback that yields nothing is
-            # not proof of an empty account. Oura in particular answers a
-            # scope-deficient token with an **empty array, not an error**, so an
-            # under-scoped grant is indistinguishable from "no data" at the
-            # transport layer. Surfacing it keeps a silently empty connection
-            # from looking like a healthy one; it is deliberately not an error,
-            # because a genuinely new user really does have nothing yet.
+            # not proof of an empty account. Oura's ``daily`` collections answer
+            # a token with no data as an **empty array**, so a thin grant can
+            # be indistinguishable from "no data" at the transport layer (its
+            # scoped collections, by contrast, refuse with a 401 that names the
+            # scope — see ``_OURA_STREAM_SCOPES``). Surfacing it keeps a
+            # silently empty connection from looking like a healthy one; it is
+            # deliberately not an error, because a genuinely new user really
+            # does have nothing yet.
             logger.warning(
                 "initial sync produced no records over the full lookback window",
                 extra={
@@ -682,6 +737,29 @@ class InitialSyncHandler:
         Always raises: every fetch failure is either permanent or transient.
         """
         if failure is FetchFailure.UNAUTHORIZED:
+            primary = _PROVIDER_STREAMS.get(self._fetch.provider, (None, None))[0]
+            if self._config.stream != primary:
+                # A secondary stream refused while the grant exists is a scope
+                # the grant lacks, not a dead grant: Oura answers an unscoped
+                # collection with 401 and names the scope. The connection keeps
+                # syncing what it is allowed to; this stream stops until the
+                # user re-links with that scope.
+                logger.warning(
+                    "stream not authorized by the grant; connection left as is",
+                    extra={
+                        "connection_id": connection_id,
+                        "provider": self._fetch.provider,
+                        "stream": self._config.stream,
+                        "required_scope": stream_required_scope(
+                            self._fetch.provider, self._config.stream
+                        ),
+                    },
+                )
+                msg = (
+                    f"stream {self._config.stream!r} is not authorized by the grant; "
+                    "re-link with the missing scope"
+                )
+                raise PermanentJobError(msg)
             # Flip health first so the user sees why, then stop retrying.
             self._connections.mark_status(
                 connection_id=connection_id,
@@ -849,6 +927,24 @@ class ProviderDispatchSyncHandler:
             supported = ", ".join(sorted(f"{p}/{s}" for p, s in self._handlers))
             msg = f"no sync handler for provider {provider!r} stream {stream!r} (have: {supported})"
             raise PermanentJobError(msg)
+
+        # A stream the grant does not cover is refused with a 401 every time,
+        # and until 2026-09-06 that 401 flipped the whole connection to
+        # needs_reauth — six retained-only Oura streams took down a grant that
+        # served sleep perfectly well. Skipping is a success: nothing to sync
+        # until the user re-links with the missing scope.
+        granted = getattr(connection, "scopes", None)
+        if not stream_is_granted(provider, stream, granted):
+            logger.info(
+                "sync skipped: stream not covered by the grant",
+                extra={
+                    "connection_id": connection_id,
+                    "provider": provider,
+                    "stream": stream,
+                    "required_scope": stream_required_scope(provider, stream),
+                },
+            )
+            return
         handler(claim)
 
 
