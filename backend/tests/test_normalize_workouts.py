@@ -151,3 +151,7 @@ def test_live_polar_shape_with_in_zone_underscore_normalizes() -> None:
     assert (fact.zone1_min, fact.zone2_min, fact.zone3_min) == (8.067, 10.721, 3.158)
     assert (fact.zone4_min, fact.zone5_min) == (0.0, 0.0)
     assert fact.session_load > 0
+    # What the vendor measured beyond the zones rides along, as reported.
+    assert (fact.sport, fact.sport_detail) == ("OTHER", "OTHER_INDOOR")
+    assert (fact.avg_hr_bpm, fact.max_hr_bpm, fact.calories) == (110, 145, 201)
+    assert fact.distance_m is None
