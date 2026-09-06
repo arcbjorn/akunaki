@@ -10,7 +10,7 @@ import httpx2
 import pytest
 
 from akunaki.adapters.connectors.google_health_fetch import GoogleHealthFetchClient
-from akunaki.domain.fetch import FetchFailure
+from akunaki.domain.fetch import FetchFailure, FetchResult
 
 T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
 WINDOW_START = datetime(2026, 6, 24, tzinfo=UTC)
@@ -170,6 +170,57 @@ def test_429_is_rate_limit_with_retry_after() -> None:
     result = _fetch(_client(responder))
     assert result.failure is FetchFailure.RATE_LIMIT  # type: ignore[attr-defined]
     assert result.retry_after_seconds == 30  # type: ignore[attr-defined]
+
+
+def test_400_is_malformed_request_and_not_retried() -> None:
+    def refused(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(400, json={"error": {"message": "Invalid argument in request"}})
+
+    result = _fetch(_client(refused))
+    assert isinstance(result, FetchResult)
+    assert result.failure is FetchFailure.MALFORMED_REQUEST
+    assert not result.failure.retryable
+
+
+def test_steps_rollup_window_is_clamped_to_90_days() -> None:
+    """A ten-year backfill window must reach Google as at most 90 days."""
+    bodies: list[dict[str, object]] = []
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(200, json={"rollupDataPoints": []})
+
+    result = _client(capture).fetch_page(
+        access_token="AT",
+        stream="steps",
+        window_start=datetime(2016, 7, 22, tzinfo=UTC),
+        window_end=WINDOW_END,
+        page_token=None,
+        now=T0,
+    )
+    assert result.ok
+    assert len(bodies) == 1
+    start = bodies[0]["range"]["start"]["date"]  # type: ignore[index]
+    assert (start["year"], start["month"], start["day"]) == (2026, 4, 23)
+
+
+def test_sleep_list_window_is_clamped_to_90_days() -> None:
+    seen: list[str] = []
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.url.params["filter"])
+        return httpx2.Response(200, json={"dataPoints": []})
+
+    result = _client(capture).fetch_page(
+        access_token="AT",
+        stream="sleep",
+        window_start=datetime(2016, 7, 22, tzinfo=UTC),
+        window_end=WINDOW_END,
+        page_token=None,
+        now=T0,
+    )
+    assert result.ok
+    assert seen[0].startswith('sleep.interval.end_time >= "2026-04-23T00:00:00Z"')
 
 
 def test_500_is_provider_error() -> None:
