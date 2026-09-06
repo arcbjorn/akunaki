@@ -113,6 +113,16 @@ class WorkoutDTO(BaseModel):
     zone4_min: float
     zone5_min: float
     total_zone_min: float
+    # Vendor-measured extras, None when not reported. ``sport`` is the
+    # vendor's label (SWIMMING, RUNNING, OTHER) — route sessions by it, never
+    # by the clock. ``distance_m`` is as reported: a Polar Verity Sense sends a
+    # placeholder for pool swims, so treat it as a claim, not a measurement.
+    sport: str | None = None
+    sport_detail: str | None = None
+    avg_hr_bpm: int | None = None
+    max_hr_bpm: int | None = None
+    calories: int | None = None
+    distance_m: float | None = None
 
 
 class WorkoutsOutput(BaseModel):
@@ -136,6 +146,12 @@ def _workout_dto(summary: WorkoutSummary) -> WorkoutDTO:
         zone4_min=summary.zone4_min,
         zone5_min=summary.zone5_min,
         total_zone_min=summary.total_zone_min,
+        sport=summary.sport,
+        sport_detail=summary.sport_detail,
+        avg_hr_bpm=summary.avg_hr_bpm,
+        max_hr_bpm=summary.max_hr_bpm,
+        calories=summary.calories,
+        distance_m=summary.distance_m,
     )
 
 
