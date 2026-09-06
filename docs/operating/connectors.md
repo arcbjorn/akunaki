@@ -2,7 +2,7 @@
 
 **Status:** Describes shipped code (`backend/src/akunaki/adapters/connectors/`, `backend/src/akunaki/api/routes/connections.py`, `backend/src/akunaki/api/routes/webhooks.py`)
 
-**Last reviewed:** 2026-08-15
+**Last reviewed:** 2026-09-06
 
 Three connectors are implemented. Each needs OAuth credentials to be linkable
 and, separately, webhook configuration to receive push notifications. The two
@@ -90,17 +90,32 @@ akunaki session cookie when the provider redirects back. The session cookie is
 | API base | `https://api.ouraring.com/v2/usercollection` |
 | Callback to register | `https://<host>/v1/connections/oura/callback` |
 | Flow | Authorization code **with PKCE** |
-| Scopes requested | `daily` |
+| Scopes requested | `daily heartrate workout session stress heart_health spo2` |
 | Webhook | HMAC-SHA256, header `X-Oura-Signature` |
 
-**The scope caveat.** Oura's OpenAPI spec declares an empty scope list on every
-endpoint, so the vendor publishes no per-endpoint scope mapping. `daily` is the
-only real scope whose description mentions sleep, so it is what the code
-requests. The failure mode is quiet: **an under-scoped Oura token returns an
-empty array, not an error**, so a scope shortfall looks like "this account has
-no data". The initial-sync handler warns when a full-lookback backfill yields
-zero records — treat that warning as a likely scope problem, not an empty
-account.
+**Scopes per collection.** Oura's OpenAPI spec declares an empty scope list on
+every endpoint, so the vendor publishes no per-endpoint mapping. The mapping the
+connector uses (`_OURA_STREAM_SCOPES` in `sync_handlers.py`) was read off the
+live API on 2026-09-06 with a grant holding only `daily`: the `daily`
+collections (`sleep`, `daily_activity`, `daily_sleep`, `daily_readiness`,
+`daily_stress`, `sleep_time`) answered 200, and every other one answered
+**`401 {"detail": "Token is not authorized access <scope> scope."}`** —
+`workout` → `workout`, `session` → `session`, `heartrate` → `heartrate`,
+`daily_resilience` → `stress`, `daily_cardiovascular_age` and `vO2_max` →
+`heart_health`, `daily_spo2` → `spo2`. Oura records a granted scope with an
+`extapi:` prefix (`extapi:daily`); the connector strips it when comparing.
+
+Two consequences:
+
+- A stream the grant does not cover is **skipped** at dispatch (logged as
+  `sync skipped: stream not covered by the grant`), and a 401 on any stream
+  other than the provider's primary one dead-letters that stream and leaves
+  the connection `active`. Until 2026-09-06 that 401 flipped the whole
+  connection to `needs_reauth`, so six retained-only streams took down a grant
+  that was serving sleep — re-link with the full scope set to get them.
+- A `daily` collection with nothing in it still returns an **empty array**, so
+  the initial-sync handler's zero-records warning remains the tell for a thin
+  grant on those.
 
 ### Polar
 
@@ -134,11 +149,26 @@ workouts":
 - **No refresh token.** AccessLink access tokens are long-lived and a refresh is
   never possible; a dead grant goes straight to `needs_reauth` and requires
   re-linking.
+- **`204 No Content` is a quiet day, not an error.** `users/activities` and
+  the other windowed resources answer a window with nothing in it as 204 with
+  an empty body. The connector records that as an empty page (`[]`), so the
+  cursor advances and the connection stays healthy. Until 2026-09-06 it was
+  classified as malformed JSON, dead-lettered after five retries, and parked
+  the connection in `error` — where the sweep never looked again.
 - **A 30-day retention horizon.** Only exercises uploaded to Flow in the last 30
   days are returned, and only those uploaded after the user linked this client.
   The connector re-reads Polar's entire retention set on every sync (no date
   filter), so losing a workout requires no successful sync for 30 consecutive
   days — and `/v1/data-quality` raises `connection_stale_sync` after one day.
+
+### Recovery from `error`
+
+A connection in `error` (a vendor 5xx, a rate limit, or a bug of ours that
+exhausted the attempt budget) is retried by the reconcile sweep once its own
+`updated_at` is older than the staleness cutoff, so a transient failure heals
+itself within a sweep window. Only `needs_reauth`, `revoked`, and `pending`
+wait for the user. Before 2026-09-06 `error` was never swept, which is how a
+single bad hour parked a connection for weeks.
 
 ### Google Health
 
