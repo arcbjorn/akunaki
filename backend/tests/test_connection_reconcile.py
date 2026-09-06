@@ -130,13 +130,30 @@ def test_stale_query_finds_never_synced_and_old(factory: sessionmaker[Session]) 
     # inactive: needs_reauth must not be swept (it cannot sync until re-consent)
     _link(repo, connection_id="reauth", tenant_id="tenant-5", now=T0 - timedelta(days=2))
     repo.mark_status(connection_id="reauth", status=ConnectionStatus.NEEDS_REAUTH, now=T0)
+    # error, settled long ago: a transient failure that exhausted its budget is
+    # retried by the sweep once the staleness window has passed...
+    _link(repo, connection_id="error-old", tenant_id="tenant-6", now=T0 - timedelta(days=2))
+    repo.mark_status(
+        connection_id="error-old",
+        status=ConnectionStatus.ERROR,
+        now=T0 - timedelta(days=1),
+        error_class="provider_error",
+    )
+    # ...but one that just failed is not hammered on every tick.
+    _link(repo, connection_id="error-fresh", tenant_id="tenant-7", now=T0 - timedelta(days=2))
+    repo.mark_status(
+        connection_id="error-fresh",
+        status=ConnectionStatus.ERROR,
+        now=T0 - timedelta(minutes=5),
+        error_class="rate_limit",
+    )
 
     cutoff = to_utc_rfc3339(T0 - timedelta(hours=6))
     stale = repo.stale_connections(cutoff=cutoff)
     ids = {cid for cid, _, _ in stale}
-    assert ids == {"old", "stale-link"}
+    assert ids == {"old", "stale-link", "error-old"}
     # tenant is carried for each.
-    assert {tid for _, tid, _ in stale} == {"tenant-3", "tenant-4"}
+    assert {tid for _, tid, _ in stale} == {"tenant-3", "tenant-4", "tenant-6"}
     # provider is carried too, so the sweep can fan out per stream.
     assert {provider for _, _, provider in stale} == {"oura"}
 
