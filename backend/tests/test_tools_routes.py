@@ -244,7 +244,13 @@ def test_invoke_today_tool(client: TestClient, factory: sessionmaker[Session]) -
 # ---------------------------------------------------------------------------
 
 
-def _seed_workout(factory: sessionmaker[Session], *, workout_id: str, start_hour: int) -> None:
+def _seed_workout(
+    factory: sessionmaker[Session],
+    *,
+    workout_id: str,
+    start_hour: int,
+    sport: str | None = None,
+) -> None:
     FactRepository(factory).write_workout_fact(
         fact_record_id=workout_id,
         tenant_id="tenant-1",
@@ -264,6 +270,10 @@ def _seed_workout(factory: sessionmaker[Session], *, workout_id: str, start_hour
             quality="high",
             confidence=1.0,
             content_hash=workout_id,
+            sport=sport,
+            sport_detail="POOL_SWIMMING" if sport == "SWIMMING" else None,
+            avg_hr_bpm=138 if sport else None,
+            distance_m=100.0 if sport == "SWIMMING" else None,
         ),
         raw_revision_id=None,
         raw_payload_id=None,
@@ -359,6 +369,25 @@ def test_invoke_get_recent_workouts(client: TestClient, factory: sessionmaker[Se
     assert [w["workout_id"] for w in body["workouts"]] == ["w2"]
     assert body["next_cursor"] is not None
     assert body["workouts"][0]["total_zone_min"] == 50.0
+    assert body["workouts"][0]["sport"] is None
+
+
+def test_get_recent_workouts_carries_the_sport(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """A consumer routes sessions by the vendor's sport label, never by the clock."""
+    _seed_workout(factory, workout_id="swim", start_hour=14, sport="SWIMMING")
+    csrf = _login(client, factory)
+    body = client.post(
+        "/v1/tools/health.get_recent_workouts",
+        json={"input": {"limit": 5}},
+        headers={CSRF_HEADER_NAME: csrf},
+    ).json()
+    swim = body["workouts"][0]
+    assert (swim["sport"], swim["sport_detail"]) == ("SWIMMING", "POOL_SWIMMING")
+    assert swim["avg_hr_bpm"] == 138
+    # Reported, not trusted: the placeholder a Verity Sense sends for a pool swim.
+    assert swim["distance_m"] == 100.0
 
 
 def test_invoke_get_workout(client: TestClient, factory: sessionmaker[Session]) -> None:
