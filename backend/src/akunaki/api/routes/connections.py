@@ -495,7 +495,15 @@ DEFAULT_SCOPES: dict[str, tuple[str, ...]] = {
     # array, not an error**, so a scope shortfall would look like "no data"
     # rather than failing loudly. `InitialSyncHandler` therefore warns when a
     # full-lookback backfill yields zero records.
-    "oura": ("daily",),
+    # Oura: every collection the connector fetches, by the scope that gates it.
+    # Least privilege still holds — nothing is asked for that no stream reads —
+    # but the earlier single ``daily`` grant was wrong about what least meant:
+    # `workout`, `session`, `heartrate`, `daily_resilience` (``stress``) and
+    # the cardiovascular-age / VO2-max collections (``heart_health``) refuse a
+    # ``daily``-only token with a 401 that names the scope (verified against
+    # the live API on 2026-09-06). ``spo2`` covers `daily_spo2`, which the
+    # connector retains alongside the others.
+    "oura": ("daily", "heartrate", "workout", "session", "stress", "heart_health", "spo2"),
     "polar": ("accesslink.read_all",),
     # Google Health scopes are all `.../auth/googlehealth.*` and are Restricted
     # (they require Google's security review before production use).
