@@ -17,6 +17,7 @@ swim log, an indoor session to cardio) had only the clock to go by. Plain
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import sqlalchemy as sa
 from alembic import op
@@ -26,22 +27,26 @@ down_revision: str | None = "20260815_0029"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_COLUMNS: tuple[tuple[str, sa.types.TypeEngine[object]], ...] = (
-    ("sport", sa.Text()),
-    ("sport_detail", sa.Text()),
-    ("avg_hr_bpm", sa.Integer()),
-    ("max_hr_bpm", sa.Integer()),
-    ("calories", sa.Integer()),
-    ("distance_m", sa.Float()),
-)
+_NAMES = ("sport", "sport_detail", "avg_hr_bpm", "max_hr_bpm", "calories", "distance_m")
+
+
+def _columns() -> list[sa.Column[Any]]:
+    return [
+        sa.Column("sport", sa.Text(), nullable=True),
+        sa.Column("sport_detail", sa.Text(), nullable=True),
+        sa.Column("avg_hr_bpm", sa.Integer(), nullable=True),
+        sa.Column("max_hr_bpm", sa.Integer(), nullable=True),
+        sa.Column("calories", sa.Integer(), nullable=True),
+        sa.Column("distance_m", sa.Float(), nullable=True),
+    ]
 
 
 def upgrade() -> None:
-    for name, kind in _COLUMNS:
-        op.add_column("workout_sessions", sa.Column(name, kind, nullable=True))
+    for column in _columns():
+        op.add_column("workout_sessions", column)
 
 
 def downgrade() -> None:
     with op.batch_alter_table("workout_sessions", schema=None) as batch:
-        for name, _kind in reversed(_COLUMNS):
+        for name in reversed(_NAMES):
             batch.drop_column(name)
