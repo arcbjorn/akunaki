@@ -808,6 +808,14 @@ class WorkoutSession(Base):
     zone3_min: Mapped[float] = mapped_column(Float, nullable=False)
     zone4_min: Mapped[float] = mapped_column(Float, nullable=False)
     zone5_min: Mapped[float] = mapped_column(Float, nullable=False)
+    # What the vendor measured beyond the zones (2026-09-06). Nullable: rows
+    # written before this, and providers that do not report them.
+    sport: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sport_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    avg_hr_bpm: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_hr_bpm: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calories: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    distance_m: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         CheckConstraint("session_load >= 0", name="workout_load_nonneg"),
