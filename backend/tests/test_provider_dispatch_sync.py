@@ -15,8 +15,9 @@ from akunaki.domain.retry import PermanentJobError
 
 
 class _FakeConnections:
-    def __init__(self, provider: Provider | None) -> None:
+    def __init__(self, provider: Provider | None, scopes: tuple[str, ...] = ()) -> None:
         self._provider = provider
+        self._scopes = scopes
 
     def get_connection(self, *, connection_id: str) -> LinkedConnection | None:
         if self._provider is None:
@@ -26,7 +27,7 @@ class _FakeConnections:
             tenant_id="tenant-1",
             provider=self._provider,
             status=ConnectionStatus.ACTIVE,
-            scopes=(),
+            scopes=self._scopes,
             external_user_id=None,
         )
 
@@ -96,3 +97,54 @@ def test_malformed_payload_is_permanent() -> None:
     )
     with pytest.raises(PermanentJobError):
         handler(bad)
+
+
+def _stream_claim(stream: str) -> JobClaim:
+    return JobClaim(
+        job_id="j1",
+        tenant_id="tenant-1",
+        role=JobRole.CORE,
+        job_type="connection.incremental_sync",
+        owner="w1",
+        fence_token=1,
+        leased_until="2026-07-24T13:00:00Z",
+        attempts=1,
+        max_attempts=5,
+        payload_json='{"connection_id":"conn-1","stream":"' + stream + '"}',
+    )
+
+
+def test_stream_outside_the_grant_is_skipped_not_run() -> None:
+    """An Oura grant holding only `daily` must not fire the workout fetch."""
+    seen: list[str] = []
+    handler = ProviderDispatchSyncHandler(
+        connections=_FakeConnections(Provider.OURA, scopes=("extapi:daily",)),
+        handlers={
+            ("oura", "sleep"): lambda _c: seen.append("sleep"),
+            ("oura", "workout"): lambda _c: seen.append("workout"),
+        },
+    )
+    handler(_stream_claim("workout"))
+    handler(_stream_claim("sleep"))
+    assert seen == ["sleep"]
+
+
+def test_stream_inside_the_grant_runs() -> None:
+    seen: list[str] = []
+    handler = ProviderDispatchSyncHandler(
+        connections=_FakeConnections(Provider.OURA, scopes=("extapi:daily", "extapi:workout")),
+        handlers={("oura", "workout"): lambda _c: seen.append("workout")},
+    )
+    handler(_stream_claim("workout"))
+    assert seen == ["workout"]
+
+
+def test_unknown_grant_is_trusted() -> None:
+    """A row that recorded no scopes keeps syncing as before gating existed."""
+    seen: list[str] = []
+    handler = ProviderDispatchSyncHandler(
+        connections=_FakeConnections(Provider.OURA, scopes=()),
+        handlers={("oura", "workout"): lambda _c: seen.append("workout")},
+    )
+    handler(_stream_claim("workout"))
+    assert seen == ["workout"]
