@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 from akunaki.application.sync_handlers import NORMALIZE_JOB_TYPE, NormalizeHandler
 from akunaki.domain.jobs import JobClaim, JobRole
-from akunaki.domain.workout_normalizer import WorkoutFact
+from akunaki.domain.workout_normalizer import WorkoutFact, normalize_workout_payload
 from akunaki.ports.facts import RevisionBody
 
 T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=UTC)
@@ -114,3 +114,40 @@ def test_polar_revision_writes_workout_facts() -> None:
     assert facts.workouts[0].local_health_day == "2026-07-22"
     # A recompute was chained for the affected day.
     assert json.loads(jobs.enqueued[0])["local_health_day"] == "2026-07-22"
+
+
+def test_live_polar_shape_with_in_zone_underscore_normalizes() -> None:
+    """The record shape `GET /v3/exercises?zones=true` really returns.
+
+    Zones are 0-indexed and the duration field is ``in_zone`` (underscore),
+    verified against the live API on 2026-09-06. Until then only the hyphenated
+    spelling was read, so every real exercise was dropped as "no zone data".
+    """
+    record = {
+        "id": "yJbbLllD",
+        "upload_time": "2026-09-06T00:58:28Z",
+        "device": "Polar Verity Sense",
+        "start_time": "2026-09-05T21:29:42",
+        "start_time_utc_offset": -180,
+        "duration": "PT1639.750S",
+        "heart_rate": {"average": 110, "maximum": 145},
+        "sport": "OTHER",
+        "detailed_sport_info": "OTHER_INDOOR",
+        "calories": 201,
+        "heart_rate_zones": [
+            {"index": 0, "lower_limit": 95, "upper_limit": 114, "in_zone": "PT8M4S"},
+            {"index": 1, "lower_limit": 114, "upper_limit": 133, "in_zone": "PT10M43.250S"},
+            {"index": 2, "lower_limit": 133, "upper_limit": 152, "in_zone": "PT3M9.500S"},
+            {"index": 3, "lower_limit": 152, "upper_limit": 171, "in_zone": "PT0S"},
+            {"index": 4, "lower_limit": 171, "upper_limit": 190, "in_zone": "PT0S"},
+        ],
+    }
+    facts = normalize_workout_payload(json.dumps([record]))
+    assert len(facts) == 1
+    fact = facts[0]
+    assert fact.vendor_record_id == "yJbbLllD"
+    assert fact.local_health_day == "2026-09-05"
+    assert fact.start_utc == "2026-09-06T00:29:42Z"
+    assert (fact.zone1_min, fact.zone2_min, fact.zone3_min) == (8.067, 10.721, 3.158)
+    assert (fact.zone4_min, fact.zone5_min) == (0.0, 0.0)
+    assert fact.session_load > 0
