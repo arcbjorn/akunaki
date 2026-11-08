@@ -91,12 +91,16 @@ def test_update_open_interval_bumps_clear_run(factory: sessionmaker[Session]) ->
         feature_code="low_hrv",
         severity=AnomalySeverity.HIGH,
         consecutive_clear_days=1,
+        local_health_day="2026-07-23",
         now=T0,
     )
     state = repo.current_state(tenant_id="tenant-1", feature_code="low_hrv")
     assert state is not None
     assert state.severity is AnomalySeverity.HIGH
     assert state.consecutive_clear_days == 1
+    # The row remembers which day advanced it, and where it began.
+    assert state.started_on == DAY
+    assert state.tracked_through == "2026-07-23"
 
 
 def test_close_interval_deactivates(factory: sessionmaker[Session]) -> None:
@@ -245,3 +249,61 @@ def test_recent_intervals_respects_the_limit(factory: sessionmaker[Session]) -> 
         _open(repo, anomaly_id=f"a{n}", feature_code=code)
 
     assert len(repo.recent_intervals(tenant_id="tenant-1", since_day="2026-07-01", limit=2)) == 2
+
+
+def _open_low_hrv(repo: AnomalyRepository, *, anomaly_id: str, day: str) -> None:
+    repo.open_interval(
+        anomaly_id=anomaly_id,
+        tenant_id="tenant-1",
+        feature_code="low_hrv",
+        severity=AnomalySeverity.MODERATE,
+        z_like=-2.7,
+        formula_version="anomaly_v0.1.0",
+        local_health_day=day,
+        now=T0,
+    )
+
+
+def test_tracked_through_follows_open_and_close(factory: sessionmaker[Session]) -> None:
+    repo = AnomalyRepository(factory)
+    _open_low_hrv(repo, anomaly_id="a1", day=DAY)
+    state = repo.current_state(tenant_id="tenant-1", feature_code="low_hrv")
+    assert state is not None
+    assert state.tracked_through == DAY
+
+    repo.close_interval(
+        tenant_id="tenant-1", feature_code="low_hrv", local_health_day="2026-07-24", now=T0
+    )
+    with factory() as session:
+        row = session.scalars(select(AnomalyRow)).one()
+    assert row.tracked_through == "2026-07-24"
+
+
+def test_last_tracked_day_survives_a_close(factory: sessionmaker[Session]) -> None:
+    """With nothing open, the frontier is the day the last interval closed."""
+    repo = AnomalyRepository(factory)
+    assert repo.last_tracked_day(tenant_id="tenant-1", feature_code="low_hrv") is None
+    _open_low_hrv(repo, anomaly_id="a1", day=DAY)
+    repo.close_interval(
+        tenant_id="tenant-1", feature_code="low_hrv", local_health_day="2026-07-24", now=T0
+    )
+    assert repo.current_state(tenant_id="tenant-1", feature_code="low_hrv") is None
+    assert repo.last_tracked_day(tenant_id="tenant-1", feature_code="low_hrv") == "2026-07-24"
+    # Another feature's history is not this one's.
+    assert repo.last_tracked_day(tenant_id="tenant-1", feature_code="elevated_rhr") is None
+
+
+def test_discard_interval_removes_the_active_row_only(factory: sessionmaker[Session]) -> None:
+    repo = AnomalyRepository(factory)
+    _open_low_hrv(repo, anomaly_id="a1", day=DAY)
+    repo.close_interval(
+        tenant_id="tenant-1", feature_code="low_hrv", local_health_day="2026-07-24", now=T0
+    )
+    _open_low_hrv(repo, anomaly_id="a2", day="2026-07-30")
+
+    repo.discard_interval(tenant_id="tenant-1", feature_code="low_hrv", now=T0)
+
+    with factory() as session:
+        ids = [row.id for row in session.scalars(select(AnomalyRow)).all()]
+    assert ids == ["a1"]
+    assert repo.current_state(tenant_id="tenant-1", feature_code="low_hrv") is None
