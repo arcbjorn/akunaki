@@ -7,6 +7,7 @@ import logging
 import uvicorn
 
 from akunaki.api.app import create_app
+from akunaki.api.logfilters import uvicorn_log_config
 from akunaki.api.request_context import RequestIdFilter
 from akunaki.config import get_settings
 from akunaki.logfmt import JsonFormatter
@@ -23,6 +24,11 @@ def configure_logging() -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(logging.INFO)
+    # ``/readyz`` compares the schema to the migration head on every probe, and
+    # alembic announces its dialect at INFO each time it does — two lines per
+    # probe, tens of thousands a day, carrying nothing. Migrations themselves
+    # run in the init container, not here.
+    logging.getLogger("alembic.runtime.migration").setLevel(logging.WARNING)
 
 
 def main() -> None:
@@ -30,7 +36,13 @@ def main() -> None:
     configure_logging()
     settings = get_settings()
     app = create_app(settings)
-    uvicorn.run(app, host=settings.api_host, port=settings.api_port, log_level="info")
+    uvicorn.run(
+        app,
+        host=settings.api_host,
+        port=settings.api_port,
+        log_level="info",
+        log_config=uvicorn_log_config(),
+    )
 
 
 if __name__ == "__main__":
