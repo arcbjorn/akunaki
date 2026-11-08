@@ -149,14 +149,13 @@ class AnomalyRepository:
                 )
             )
 
-    def discard_interval(self, *, tenant_id: str, feature_code: str, now: datetime) -> None:
+    def discard_interval(self, *, tenant_id: str, feature_code: str) -> None:
         """Delete the active interval outright.
 
         For an interval that opened on a day which, re-read once its facts were
         complete, is not anomalous: it never was one, so closing it would leave
         a zero-length anomaly in the history the user is shown.
         """
-        require_aware(now, field_name="now")
         with self._session_factory() as session, session.begin():
             session.execute(
                 delete(AnomalyRow).where(
