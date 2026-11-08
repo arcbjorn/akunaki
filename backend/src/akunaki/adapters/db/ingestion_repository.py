@@ -2,8 +2,12 @@
 
 One transaction per fetched page, exactly as the ingestion design requires:
 
-- the transport row is **always** written (every vendor response is retained,
-  including identical bodies on a retry);
+- a transport row is written for every **distinct** vendor body; a body already
+  stored for this connection and stream (same ``content_hash``) reuses its row.
+  A retry, and a resource that returns its whole retention set on every call
+  (Polar's ``/v3/exercises``), would otherwise store the same bytes once per
+  tick — 116 MB of a 349 MB store by 2026-11-08 — while ``sync_runs`` already
+  records that each fetch happened;
 - a logical revision is appended **only** when that object has not already
   recorded this ``content_hash``;
 - the cursor advances in the same transaction.
@@ -92,27 +96,44 @@ class IngestionRepository:
         now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
 
         with self._session_factory() as session, session.begin():
-            # 1. Transport row: always written, never deduped.
-            session.add(
-                RawPayload(
-                    id=payload_id,
-                    tenant_id=tenant_id,
-                    connection_id=connection_id,
-                    sync_run_id=sync_run_id,
-                    transport_kind="sync_fetch",
-                    provider=envelope.provider,
-                    stream=envelope.stream,
-                    page_token=envelope.page_token,
-                    fetched_at=envelope.fetched_at,
-                    received_at=now_s,
-                    http_status=envelope.http_status,
-                    content_type=envelope.content_type,
-                    content_hash=envelope.content_hash,
-                    payload_json=envelope.payload_text,
-                    payload_blob=None,
-                    request_meta_json=json.dumps(envelope.request_meta, sort_keys=True),
+            # 1. Transport row: one per distinct body. An identical body already
+            # stored for this connection and stream is reused — the fetch itself
+            # is on record in ``sync_runs`` — so a resource that answers every
+            # call with its whole retention set costs one row, not one per tick.
+            # Every revision this page yields then cites the row that holds the
+            # bytes it was split from, exactly as before.
+            existing_payload_id = session.execute(
+                select(RawPayload.id)
+                .where(
+                    RawPayload.connection_id == connection_id,
+                    RawPayload.content_hash == envelope.content_hash,
+                    RawPayload.stream == envelope.stream,
                 )
-            )
+                .limit(1)
+            ).scalar_one_or_none()
+            if existing_payload_id is not None:
+                payload_id = str(existing_payload_id)
+            else:
+                session.add(
+                    RawPayload(
+                        id=payload_id,
+                        tenant_id=tenant_id,
+                        connection_id=connection_id,
+                        sync_run_id=sync_run_id,
+                        transport_kind="sync_fetch",
+                        provider=envelope.provider,
+                        stream=envelope.stream,
+                        page_token=envelope.page_token,
+                        fetched_at=envelope.fetched_at,
+                        received_at=now_s,
+                        http_status=envelope.http_status,
+                        content_type=envelope.content_type,
+                        content_hash=envelope.content_hash,
+                        payload_json=envelope.payload_text,
+                        payload_blob=None,
+                        request_meta_json=json.dumps(envelope.request_meta, sort_keys=True),
+                    )
+                )
 
             # 2-3. One logical object + revision per **record** in the page.
             # The transport row above stays whole; identity is per record, so a
