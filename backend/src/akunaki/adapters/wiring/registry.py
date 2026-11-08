@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from datetime import timedelta
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -38,6 +39,7 @@ from akunaki.adapters.db.ingestion_repository import IngestionRepository, Revisi
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.login_state_repository import LoginStateRepository
 from akunaki.adapters.db.oauth_state_repository import OAuthStateRepository
+from akunaki.adapters.db.retention_repository import SettledJobRetention, SyncRunRetention
 from akunaki.adapters.db.score_repository import ScoreRepository
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.adapters.db.source_selection_repository import SourceSelectionRepository
@@ -47,6 +49,7 @@ from akunaki.adapters.db.unit_of_work import FencedUnitOfWork
 from akunaki.application.anomaly_tracker import AnomalyTracker
 from akunaki.application.audit_handlers import AUDIT_VERIFY_JOB_TYPE, AuditVerifyHandler
 from akunaki.application.handlers import HandlerRegistry
+from akunaki.application.reauth_handlers import REAUTH_PROBE_JOB_TYPE, ReauthProbeHandler
 from akunaki.application.recovery_inputs import RecoveryInputService
 from akunaki.application.recovery_surface import RecoverySurfaceService
 from akunaki.application.retention_handlers import (
@@ -73,6 +76,7 @@ from akunaki.application.sync_handlers import (
 )
 from akunaki.config import Settings
 from akunaki.ports.fetch import ConnectorFetchPort
+from akunaki.ports.oauth_client import OAuthClientPort
 
 # Providers with a fetch client, mapped to a constructor. A provider absent here
 # has no sync handler and its sync jobs fail permanently (a wiring error).
@@ -120,6 +124,9 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
     # others, and each keeps its own cursor and retry budget.
     initial: dict[tuple[str, str], Callable[..., None]] = {}
     incremental: dict[tuple[str, str], Callable[..., None]] = {}
+    # The same per-provider clients serve the reauth probe, which asks a
+    # parked connection's provider whether its refresh token still works.
+    oauth_clients: dict[str, OAuthClientPort] = {}
     # The deployment's window reaches the handlers here and nowhere else, so
     # there is one source of truth for how far back a backfill reaches.
     configs = sync_configs(settings)
@@ -130,6 +137,8 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
         # behaves exactly as it did before refresh existed.
         oauth_config = settings.connector_oauth(provider)
         oauth_client = build_oauth_client(provider, oauth_config) if oauth_config else None
+        if oauth_client is not None:
+            oauth_clients[provider] = oauth_client
         for stream, _schema in streams_for_provider(provider):
             config = configs[provider, stream]
             backfill = InitialSyncHandler(
@@ -175,6 +184,14 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
         connections=connections,
         jobs=jobs,
         new_id=_new_id,
+        staleness=timedelta(minutes=settings.sync_staleness_minutes),
+    )
+    reauth_probe = ReauthProbeHandler(
+        connections=connections,
+        sealer=sealer,
+        oauth_clients=oauth_clients,
+        jobs=jobs,
+        new_id=_new_id,
     )
 
     return HandlerRegistry(
@@ -188,6 +205,7 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
             NORMALIZE_JOB_TYPE: normalize,
             SCORE_RECOMPUTE_JOB_TYPE: recompute,
             RECONCILE_SWEEP_JOB_TYPE: reconcile,
+            REAUTH_PROBE_JOB_TYPE: reauth_probe,
             AUDIT_VERIFY_JOB_TYPE: AuditVerifyHandler(
                 audit=AuditRepository(session_factory),
                 checks=SystemCheckRepository(session_factory),
@@ -198,6 +216,10 @@ def build_registry(settings: Settings, session_factory: sessionmaker[Session]) -
                     "login_states": LoginStateRepository(session_factory),
                     "oauth_states": OAuthStateRepository(session_factory),
                     "tool_confirmations": ConfirmationRepository(session_factory),
+                    # Operational history, by age rather than expiry: settled
+                    # jobs and uncited sync runs grew without bound before this.
+                    "jobs": SettledJobRetention(session_factory),
+                    "sync_runs": SyncRunRetention(session_factory),
                 },
             ),
         }
