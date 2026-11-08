@@ -144,10 +144,9 @@ class SyncOutput(BaseModel):
     kind: Literal["sync", "reauth_probe"] = Field(
         default="sync",
         description=(
-            "`sync` refetches now. `reauth_probe` means the connection needs "
-            "re-authorization: the job asks the provider whether the stored grant "
-            "still works and, if it does, restores the connection and queues its "
-            "syncs itself; if not, the user must re-link."
+            "`reauth_probe` when the connection needs re-authorization: the job "
+            "re-checks the stored grant and restores the connection if it still "
+            "works; otherwise the user must re-link."
         ),
     )
 
