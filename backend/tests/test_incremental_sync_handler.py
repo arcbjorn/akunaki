@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx2
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.connectors.oura_fetch import OuraFetchClient
@@ -26,7 +26,7 @@ from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.ingestion_repository import IngestionRepository
 from akunaki.adapters.db.job_repository import JobRepository
-from akunaki.adapters.db.models import RawRevision, SyncCursor, Tenant
+from akunaki.adapters.db.models import Connection, ConnectionHealth, RawRevision, SyncCursor, Tenant
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.sync_handlers import (
     DEFAULT_LOOKBACK_DAYS,
@@ -38,7 +38,7 @@ from akunaki.application.sync_handlers import (
 )
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
 from akunaki.config import Settings, clear_settings_cache
-from akunaki.domain.connections import Provider
+from akunaki.domain.connections import ConnectionStatus, Provider
 from akunaki.domain.jobs import to_utc_rfc3339
 from conftest import upgrade_to_head
 
@@ -284,3 +284,59 @@ def test_stale_cursor_is_clamped_to_lookback(factory: sessionmaker[Session]) -> 
 
     expected = (T0 - timedelta(days=DEFAULT_LOOKBACK_DAYS) - DEFAULT_OVERLAP).date().isoformat()
     assert _start_date(captured[0]) == expected
+
+
+# ---------------------------------------------------------------------------
+# Health: every successful window stamps the connection
+# ---------------------------------------------------------------------------
+
+
+def test_a_successful_incremental_window_stamps_last_success_at(
+    factory: sessionmaker[Session],
+) -> None:
+    """Until 2026-11-08 only the initial backfill did; incremental runs never.
+
+    So ``last_success_at`` froze on the link day, every connection read as stale
+    on every sweep tick, and the connections surface could not tell a flowing
+    connection from a dead one.
+    """
+    linked_at = T0 - timedelta(days=30)
+    with factory() as session, session.begin():
+        session.execute(
+            update(ConnectionHealth)
+            .where(ConnectionHealth.connection_id == "conn-1")
+            .values(last_success_at=to_utc_rfc3339(linked_at))
+        )
+
+    _run(factory, _handler(factory, _capturing_responder([])))
+
+    with factory() as session:
+        health = session.get(ConnectionHealth, "conn-1")
+    assert health is not None
+    assert health.last_success_at == NOW_S
+
+
+def test_a_successful_incremental_window_restores_an_errored_connection(
+    factory: sessionmaker[Session],
+) -> None:
+    """One dead-lettered fetch left ``status = error`` until the next re-link.
+
+    Polar answered 503 for a minute on 2026-11-04 and the connection read
+    ``error`` for four days while every later window succeeded.
+    """
+    ConnectionRepository(factory).mark_status(
+        connection_id="conn-1",
+        status=ConnectionStatus.ERROR,
+        now=T0 - timedelta(hours=1),
+        error_class="provider_error",
+    )
+
+    _run(factory, _handler(factory, _capturing_responder([])))
+
+    with factory() as session:
+        connection = session.get(Connection, "conn-1")
+        health = session.get(ConnectionHealth, "conn-1")
+    assert connection is not None
+    assert connection.status == ConnectionStatus.ACTIVE.value
+    assert health is not None
+    assert health.last_error_class is None
