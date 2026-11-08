@@ -27,6 +27,10 @@ from akunaki.domain.connections import ConnectionStatus, LinkedConnection, Provi
 from akunaki.domain.jobs import require_aware, to_utc_rfc3339
 from akunaki.domain.secrets import SealedSecret
 
+# Statuses a successful fetch may lift back to ``active``. ``needs_reauth`` and
+# ``revoked`` are deliberately absent; see ``record_sync_success``.
+_RESTORED_BY_SUCCESS = (ConnectionStatus.ERROR.value, ConnectionStatus.PENDING.value)
+
 
 class ConnectionRepository:
     """Persist provider connections and their envelope-encrypted secrets."""
@@ -143,7 +147,9 @@ class ConnectionRepository:
         """Transition a connection's status. Returns False when unknown.
 
         Used to flip a connection to ``needs_reauth`` after an ``invalid_grant``
-        refusal, or to ``error`` after repeated transient failures.
+        refusal, to ``error`` after repeated transient failures, and back to
+        ``active`` by a reauth probe whose refresh succeeded. A sync that
+        fetched successfully goes through ``record_sync_success`` instead.
         """
         if not connection_id:
             msg = "connection_id must be non-empty"
@@ -248,6 +254,76 @@ class ConnectionRepository:
                 .limit(limit)
             ).all()
         return [(str(cid), str(tid), str(provider)) for cid, tid, provider in rows]
+
+    def reauth_candidates(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str, str]]:
+        """``needs_reauth`` connections whose status was last stamped before ``cutoff``.
+
+        The sweep queues a reauth probe for each. ``updated_at`` is the pacing
+        clock: every probe verdict re-stamps the status through ``mark_status``,
+        so a dead grant is asked once per interval, not once per tick.
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(Connection.id, Connection.tenant_id, Connection.provider)
+                .where(
+                    Connection.status == ConnectionStatus.NEEDS_REAUTH.value,
+                    Connection.updated_at < cutoff,
+                )
+                .order_by(Connection.id)
+                .limit(limit)
+            ).all()
+        return [(str(cid), str(tid), str(provider)) for cid, tid, provider in rows]
+
+    def record_sync_success(self, *, connection_id: str, now: datetime) -> bool:
+        """Stamp a successful fetch and restore ``active`` where a sync can earn it.
+
+        Called after **every** window that fetched and committed, not only the
+        initial backfill. Until 2026-11-08 only the initial sync wrote
+        ``last_success_at`` (through ``mark_status(ACTIVE)``), so every
+        connection read as last-synced on its link day for as long as it lived,
+        and one dead-lettered fetch left ``status = error`` until the next
+        re-link while thousands of later windows succeeded.
+
+        ``error`` and ``pending`` are restored to ``active``: a window the
+        vendor answered is proof the connection works. ``needs_reauth`` is not
+        — a secondary stream can succeed on a token the primary stream's grant
+        refuses, so only a refresh verdict (the reauth probe) may lift it. And
+        ``revoked`` is the user's decision, never undone by data arriving.
+        Returns False when the connection is unknown.
+        """
+        if not connection_id:
+            msg = "connection_id must be non-empty"
+            raise ValueError(msg)
+        now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
+
+        with self._session_factory() as session, session.begin():
+            tenant_id = session.execute(
+                select(Connection.tenant_id).where(Connection.id == connection_id)
+            ).scalar_one_or_none()
+            if tenant_id is None:
+                return False
+            session.execute(
+                update(Connection)
+                .where(
+                    Connection.id == connection_id,
+                    Connection.status.in_(_RESTORED_BY_SUCCESS),
+                )
+                .values(status=ConnectionStatus.ACTIVE.value, updated_at=now_s)
+            )
+            stamped = session.execute(
+                update(ConnectionHealth)
+                .where(ConnectionHealth.connection_id == connection_id)
+                .values(last_success_at=now_s, consecutive_failures=0, last_error_class=None)
+            )
+            if affected_rows(stamped) == 0:
+                session.add(
+                    ConnectionHealth(
+                        connection_id=connection_id,
+                        tenant_id=tenant_id,
+                        last_success_at=now_s,
+                    )
+                )
+            return True
 
     def connection_statuses(self, *, tenant_id: str) -> list[ConnectionSummary]:
         """Per-connection status and ingest counts for one tenant.
