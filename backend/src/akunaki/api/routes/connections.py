@@ -97,8 +97,8 @@ class SyncRequestedResponse(BaseModel):
         default="sync",
         description=(
             "`reauth_probe` when the connection needs re-authorization: the job "
-            "checks whether the stored grant still works and restores the "
-            "connection if so; otherwise re-linking is the only way forward."
+            "re-checks the stored grant and restores the connection if it still "
+            "works; otherwise the user must re-link."
         ),
     )
 
