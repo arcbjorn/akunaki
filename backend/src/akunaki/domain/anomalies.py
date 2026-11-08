@@ -127,11 +127,18 @@ class AnomalyState:
     ``is_open`` is whether the interval is currently open; ``severity`` is the
     peak severity while open; ``consecutive_clear_days`` counts how many recent
     days in a row met the clear condition (reset to 0 whenever it does not).
+
+    ``started_on`` and ``tracked_through`` are the local days the interval
+    opened on and was last advanced by. They are None on a state that is not
+    persisted — the result of ``advance_anomaly`` — and are what lets the
+    tracker tell a new day from an out-of-order or repeated one.
     """
 
     is_open: bool
     severity: AnomalySeverity | None
     consecutive_clear_days: int
+    started_on: str | None = None
+    tracked_through: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
