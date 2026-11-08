@@ -99,6 +99,7 @@ __all__ = [
     "ProviderDispatchSyncHandler",
     "ReconcileSweepHandler",
     "SyncConfig",
+    "enqueue_stream_syncs",
     "parse_connection_payload",
     "stream_is_granted",
     "stream_required_scope",
@@ -300,6 +301,43 @@ def streams_for_provider(provider: str) -> tuple[tuple[str, str], ...]:
     if provider in _PROVIDER_ALL_STREAMS:
         return _PROVIDER_ALL_STREAMS[provider]
     return (_PROVIDER_STREAMS[provider],)
+
+
+def enqueue_stream_syncs(
+    jobs: JobEnqueuePort,
+    *,
+    new_id: Callable[[], str],
+    connection_id: str,
+    tenant_id: str,
+    provider: str,
+    now: datetime,
+) -> int:
+    """Queue one incremental sync per stream ``provider`` serves; return how many were new.
+
+    Each stream keeps its own cursor and retry budget, so a stream that is
+    failing (or that this account has no data for) cannot stop the others. The
+    idempotency key is per connection *and* stream: a webhook or an earlier
+    sweep may already have queued the same work, and keying on the connection
+    alone would let the first stream's job suppress every other stream. The
+    reconcile sweep and the reauth probe both queue through here, so neither
+    can double-schedule the other's work.
+
+    Raises ``KeyError`` for a provider with no wired streams; the caller
+    decides whether that is skipped or fatal.
+    """
+    enqueued = 0
+    for stream, _schema in streams_for_provider(provider):
+        outcome = jobs.enqueue_job(
+            job_id=new_id(),
+            tenant_id=tenant_id,
+            job_type=INCREMENTAL_SYNC_JOB_TYPE,
+            payload_json=json.dumps({"connection_id": connection_id, "stream": stream}),
+            now=now,
+            idempotency_key=f"reconcile:{connection_id}:{stream}",
+        )
+        if outcome.created:
+            enqueued += 1
+    return enqueued
 
 
 # Vendor-imposed minimum query-window width, per provider. A provider absent
@@ -686,8 +724,7 @@ class InitialSyncHandler:
         returned unchanged and the caller proceeds with it. What the failure
         *means* travels back as the outcome, so the 401 handling downstream can
         tell "the provider refused the grant" from "the token endpoint was
-        unreachable" — which until 2026-11-08 it could not, and so parked a
-        live connection as ``needs_reauth`` over one transport error.
+        unreachable" (see ``_refuse_primary_unauthorized``).
         """
         if self._oauth_client is None:
             return stored, RefreshOutcome.UNAVAILABLE
@@ -758,11 +795,8 @@ class InitialSyncHandler:
     def _record_success(self, connection_id: str, *, now: datetime) -> None:
         """Stamp the connection's health after a committed window.
 
-        Every successful window counts, not only the initial backfill: until
-        2026-11-08 only ``InitialSyncHandler`` marked the connection, so
-        ``last_success_at`` froze on the link day and one dead-lettered fetch
-        left ``status = error`` for good while later windows kept succeeding.
-        Bookkeeping never fails a sync whose data is already committed.
+        Bookkeeping never fails a sync whose data is already committed; the
+        rationale for stamping every window lives on the repository method.
         """
         try:
             self._connections.record_sync_success(connection_id=connection_id, now=now)
@@ -1106,11 +1140,15 @@ class ReconcileSweepHandler:
 
         enqueued = 0
         for connection_id, tenant_id, provider in stale:
-            # Fan out one refetch per stream the provider serves: each stream
-            # keeps its own cursor and retry budget, so a stream that is failing
-            # (or that this account has no data for) cannot stop the others.
             try:
-                streams = streams_for_provider(provider)
+                enqueued += enqueue_stream_syncs(
+                    self._jobs,
+                    new_id=self._new_id,
+                    connection_id=connection_id,
+                    tenant_id=tenant_id,
+                    provider=provider,
+                    now=now,
+                )
             except KeyError:
                 # An unwired provider is a deployment gap, not a reason to abort
                 # the sweep for every other connection.
@@ -1118,22 +1156,6 @@ class ReconcileSweepHandler:
                     "reconcile sweep skipping unwired provider",
                     extra={"connection_id": connection_id, "provider": provider},
                 )
-                continue
-            for stream, _schema in streams:
-                outcome = self._jobs.enqueue_job(
-                    job_id=self._new_id(),
-                    tenant_id=tenant_id,
-                    job_type=INCREMENTAL_SYNC_JOB_TYPE,
-                    payload_json=json.dumps({"connection_id": connection_id, "stream": stream}),
-                    now=now,
-                    # One in-flight reconcile refetch per connection *and
-                    # stream*: a webhook or an earlier sweep may already have
-                    # queued the same work. Keying on the connection alone would
-                    # let the first stream's job suppress every other stream.
-                    idempotency_key=f"reconcile:{connection_id}:{stream}",
-                )
-                if outcome.created:
-                    enqueued += 1
 
         probes = 0
         probe_cutoff = to_utc_rfc3339(now - self._reauth_probe_interval)
