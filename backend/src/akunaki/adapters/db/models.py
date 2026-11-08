@@ -986,6 +986,9 @@ class Anomaly(Base):
     so re-detection continues the open interval rather than duplicating it.
 
     ``consecutive_clear_days`` is engine bookkeeping for the 2-day clear rule.
+    ``tracked_through`` is the last local day whose signal advanced the row;
+    the tracker ignores older days and re-reads equal ones, because recompute
+    jobs do not arrive in calendar order.
     """
 
     __tablename__ = "anomalies"
@@ -997,6 +1000,7 @@ class Anomaly(Base):
     feature_code: Mapped[str] = mapped_column(Text, nullable=False)
     started_on: Mapped[str] = mapped_column(Text, nullable=False)
     ended_on: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tracked_through: Mapped[str | None] = mapped_column(Text, nullable=True)
     severity: Mapped[str] = mapped_column(Text, nullable=False)
     z_like: Mapped[float | None] = mapped_column(Float, nullable=True)
     formula_version: Mapped[str] = mapped_column(Text, nullable=False)
