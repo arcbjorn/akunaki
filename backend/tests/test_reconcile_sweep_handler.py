@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 from akunaki.application.sync_handlers import (
     INCREMENTAL_SYNC_JOB_TYPE,
+    REAUTH_PROBE_JOB_TYPE,
     RECONCILE_SWEEP_JOB_TYPE,
     ReconcileSweepHandler,
     streams_for_provider,
@@ -66,13 +67,23 @@ class _FakeJobs:
 
 
 class _FakeConnections:
-    def __init__(self, stale: list[tuple[str, str, str]]) -> None:
+    def __init__(
+        self,
+        stale: list[tuple[str, str, str]],
+        reauth: list[tuple[str, str, str]] | None = None,
+    ) -> None:
         self._stale = stale
+        self._reauth = reauth or []
         self.cutoff_seen: str | None = None
+        self.probe_cutoff_seen: str | None = None
 
     def stale_connections(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str, str]]:
         self.cutoff_seen = cutoff
         return self._stale[:limit]
+
+    def reauth_candidates(self, *, cutoff: str, limit: int = 100) -> list[tuple[str, str, str]]:
+        self.probe_cutoff_seen = cutoff
+        return self._reauth[:limit]
 
 
 def _claim() -> JobClaim:
@@ -199,3 +210,61 @@ def test_unwired_provider_does_not_abort_the_sweep() -> None:
     handler(_claim())
 
     assert {json.loads(c.payload_json)["connection_id"] for c in jobs.calls} == {"conn-ok"}
+
+
+# ---------------------------------------------------------------------------
+# Reauth probes
+# ---------------------------------------------------------------------------
+
+
+def test_a_needs_reauth_connection_gets_one_probe_not_a_sync() -> None:
+    """The status used to be terminal from the system's side; now it is re-checked.
+
+    One job, keyed on the connection, carrying no stream: the probe asks the
+    provider whether the refresh token still works, and queues the syncs
+    itself if it does.
+    """
+    jobs = _FakeJobs()
+    handler = ReconcileSweepHandler(
+        connections=_FakeConnections([], reauth=[("conn-r", "tenant-9", "google_health")]),
+        jobs=jobs,
+        new_id=lambda: "id",
+        clock=lambda: T0,
+    )
+
+    handler(_claim())
+
+    assert [c.job_type for c in jobs.calls] == [REAUTH_PROBE_JOB_TYPE]
+    probe = jobs.calls[0]
+    assert probe.tenant_id == "tenant-9"
+    assert json.loads(probe.payload_json) == {"connection_id": "conn-r"}
+    assert probe.idempotency_key == "reauth_probe:conn-r"
+
+
+def test_probe_cutoff_is_now_minus_the_probe_interval() -> None:
+    """Probes are paced on their own interval, not the sync staleness window."""
+    connections = _FakeConnections([])
+    handler = ReconcileSweepHandler(
+        connections=connections,
+        jobs=_FakeJobs(),
+        new_id=lambda: "id",
+        staleness=timedelta(minutes=20),
+        reauth_probe_interval=timedelta(hours=6),
+        clock=lambda: T0,
+    )
+    handler(_claim())
+    assert connections.cutoff_seen == to_utc_rfc3339(T0 - timedelta(minutes=20))
+    assert connections.probe_cutoff_seen == to_utc_rfc3339(T0 - timedelta(hours=6))
+
+
+def test_a_probe_already_in_flight_is_not_queued_again() -> None:
+    jobs = _FakeJobs(existing_keys={"reauth_probe:conn-r"})
+    handler = ReconcileSweepHandler(
+        connections=_FakeConnections([], reauth=[("conn-r", "tenant-9", "oura")]),
+        jobs=jobs,
+        new_id=lambda: "id",
+        clock=lambda: T0,
+    )
+    handler(_claim())
+    assert len(jobs.calls) == 1
+    assert jobs.calls[0].created is False
