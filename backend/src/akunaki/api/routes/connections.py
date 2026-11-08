@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -87,11 +87,19 @@ class ConnectionStatusResponse(BaseModel):
 
 
 class SyncRequestedResponse(BaseModel):
-    """A queued manual sync."""
+    """A queued manual sync, or the reauth probe queued in its place."""
 
     job_id: str
     created: bool = Field(
-        description="False when an identical sync was already in flight (deduped).",
+        description="False when an identical job was already in flight (deduped).",
+    )
+    kind: Literal["sync", "reauth_probe"] = Field(
+        default="sync",
+        description=(
+            "`reauth_probe` when the connection needs re-authorization: the job "
+            "checks whether the stored grant still works and restores the "
+            "connection if so; otherwise re-linking is the only way forward."
+        ),
     )
 
 
@@ -251,8 +259,8 @@ def request_sync(
         _audit_sync(audit, session=session, connection_id=None, outcome="not_found")
         raise HTTPException(status_code=404, detail={"code": "not_found"})
     if outcome is SyncRequestRejection.NOT_SYNCABLE:
-        # 409, not 404: the connection exists but needs re-consent first, and
-        # the caller can act on that.
+        # 409, not 404: the connection exists but is revoked, and the caller
+        # can act on that by linking it again.
         _audit_sync(audit, session=session, connection_id=connection_id, outcome="not_syncable")
         raise HTTPException(status_code=409, detail={"code": "connection_not_syncable"})
 
@@ -265,7 +273,11 @@ def request_sync(
         connection_id=connection_id,
         outcome="queued" if outcome.created else "deduplicated",
     )
-    return SyncRequestedResponse(job_id=outcome.job_id, created=outcome.created)
+    return SyncRequestedResponse(
+        job_id=outcome.job_id,
+        created=outcome.created,
+        kind="reauth_probe" if outcome.probe else "sync",
+    )
 
 
 @router.get("/{provider}/authorize", response_model=AuthorizeResponse)
