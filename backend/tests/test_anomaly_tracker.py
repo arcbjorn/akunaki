@@ -83,7 +83,7 @@ class _FakeStore:
         self.frontier[(tenant_id, feature_code)] = local_health_day
         self.closed.append(feature_code)
 
-    def discard_interval(self, *, tenant_id: str, feature_code: str, now: datetime) -> None:
+    def discard_interval(self, *, tenant_id: str, feature_code: str) -> None:
         self.states.pop((tenant_id, feature_code), None)
         self.discarded.append(feature_code)
 
