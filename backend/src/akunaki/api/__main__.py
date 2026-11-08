@@ -26,9 +26,10 @@ def configure_logging() -> None:
     root.setLevel(logging.INFO)
     # ``/readyz`` compares the schema to the migration head on every probe, and
     # alembic announces its dialect at INFO each time it does — two lines per
-    # probe, tens of thousands a day, carrying nothing. Migrations themselves
-    # run in the init container, not here.
-    logging.getLogger("alembic.runtime.migration").setLevel(logging.WARNING)
+    # probe, tens of thousands a day, carrying nothing; its plugin registry
+    # adds seven more at import. Migrations themselves run in the init
+    # container, not here, so nothing alembic says at INFO matters here.
+    logging.getLogger("alembic").setLevel(logging.WARNING)
 
 
 def main() -> None:
