@@ -193,3 +193,71 @@ def test_head_to_0002_to_head_preserves_legacy_job(
     finally:
         engine.dispose()
         clear_settings_cache()
+
+
+def test_0031_repairs_anomaly_intervals_that_ended_before_they_started(
+    temp_db_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tracker advanced days out of order; 369 production rows ended before they began.
+
+    The migration deletes those — an interval that ends before it starts
+    describes nothing — and stamps every survivor with the last day it records.
+    """
+    monkeypatch.setenv("AKUNAKI_DATABASE_URL", temp_db_url)
+    clear_settings_cache()
+    cfg = _alembic_config(temp_db_url)
+    command.upgrade(cfg, "20260906_0030")
+
+    engine = create_engine(temp_db_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO tenants (id, created_at, status, primary_timezone, display_name)
+                    VALUES ('t1', '2026-11-08T00:00:00Z', 'active', 'UTC', 'T')
+                    """
+                )
+            )
+            rows = [
+                ("garbage", "2026-10-05", "2026-09-29", 0),
+                ("closed", "2026-09-28", "2026-09-30", 0),
+                ("open", "2026-10-01", None, 1),
+            ]
+            for anomaly_id, started_on, ended_on, is_active in rows:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO anomalies (
+                            id, tenant_id, feature_code, started_on, ended_on, severity,
+                            z_like, formula_version, is_active, consecutive_clear_days,
+                            created_at, updated_at
+                        ) VALUES (
+                            :id, 't1', 'elevated_rhr', :started_on, :ended_on, 'moderate',
+                            2.7, 'anomaly_v0.1.0', :is_active, 0,
+                            '2026-11-08T00:00:00Z', '2026-11-08T00:00:00Z'
+                        )
+                        """
+                    ),
+                    {
+                        "id": anomaly_id,
+                        "started_on": started_on,
+                        "ended_on": ended_on,
+                        "is_active": is_active,
+                    },
+                )
+
+        command.upgrade(cfg, "head")
+
+        with engine.begin() as conn:
+            survivors = conn.execute(
+                text("SELECT id, tracked_through FROM anomalies ORDER BY id")
+            ).all()
+        assert [tuple(row) for row in survivors] == [
+            ("closed", "2026-09-30"),
+            ("open", "2026-10-01"),
+        ]
+    finally:
+        engine.dispose()
+        clear_settings_cache()
