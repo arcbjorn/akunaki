@@ -19,6 +19,7 @@ INCREMENTAL_SYNC_JOB_TYPE = "connection.incremental_sync"
 RECONCILE_SWEEP_JOB_TYPE = "connection.reconcile_sweep"
 AUDIT_VERIFY_JOB_TYPE = "audit.verify_chain"
 RETENTION_SWEEP_JOB_TYPE = "retention.sweep_expired"
+REAUTH_PROBE_JOB_TYPE = "connection.reauth_probe"
 SCORE_RECOMPUTE_JOB_TYPE = "score.recompute"
 
 
