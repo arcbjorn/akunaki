@@ -41,8 +41,6 @@ __all__ = [
 # reconcile sweep already retries it; refusing a manual sync of what the
 # schedule will attempt anyway only confuses the person asking.
 _SYNCABLE = frozenset({ConnectionStatus.ACTIVE, ConnectionStatus.PENDING, ConnectionStatus.ERROR})
-# Statuses a sync cannot fix but a refresh verdict can.
-_PROBEABLE = frozenset({ConnectionStatus.NEEDS_REAUTH})
 
 
 class SyncRequestRejection(StrEnum):
@@ -112,9 +110,10 @@ class SyncRequestService:
         connection = self._connections.get_connection(connection_id=connection_id)
         if connection is None or connection.tenant_id != tenant_id:
             return SyncRequestRejection.NOT_FOUND
-        if connection.status in _PROBEABLE:
-            # Keyed like the sweep's own probe, so a manual request and a
-            # scheduled one collapse onto a single job rather than racing.
+        if connection.status is ConnectionStatus.NEEDS_REAUTH:
+            # A sync cannot fix this; a refresh verdict can. Keyed like the
+            # sweep's own probe, so a manual request and a scheduled one
+            # collapse onto a single job rather than racing.
             probe = self._jobs.enqueue_job(
                 job_id=self._new_id(),
                 tenant_id=tenant_id,
