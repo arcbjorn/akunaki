@@ -105,7 +105,7 @@ class AnomalyStateStore(Protocol):
         """Close the active interval."""
         ...
 
-    def discard_interval(self, *, tenant_id: str, feature_code: str, now: datetime) -> None:
+    def discard_interval(self, *, tenant_id: str, feature_code: str) -> None:
         """Delete the active interval: its opening day no longer reads as anomalous."""
         ...
 
@@ -191,9 +191,7 @@ class AnomalyTracker:
         if prior.started_on == local_health_day:
             if signal.open_today is None:
                 # Opened on a partial day that, complete, is not anomalous.
-                self._store.discard_interval(
-                    tenant_id=tenant_id, feature_code=signal.feature_code, now=now
-                )
+                self._store.discard_interval(tenant_id=tenant_id, feature_code=signal.feature_code)
                 logger.info(
                     "anomaly retracted: its opening day no longer reads as anomalous",
                     extra={
