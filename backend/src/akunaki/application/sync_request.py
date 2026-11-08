@@ -9,10 +9,12 @@ paths use, so a manual sync is not a second code path with its own semantics:
 it resumes from the stored cursor and dedupes on content hash exactly as an
 automatic one does.
 
-Refuses a connection that cannot sync. A ``needs_reauth`` or ``revoked``
-connection will not succeed until the user re-consents, so enqueuing would only
-burn attempts and report a queued sync that is guaranteed to fail — the same
-rule the reconcile sweep applies when it skips those connections.
+A connection in ``error`` syncs like an active one: the sweep retries those
+on its own, and a manual request should not be refused what the schedule will
+do anyway. A ``needs_reauth`` connection gets a **reauth probe** instead of a
+sync — the one job that can lift the status without the user, by asking the
+provider whether the refresh token still works (see ``reauth_handlers``).
+Only ``revoked`` is refused: the user ended it, and only a new link undoes that.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from akunaki.domain.connections import ConnectionStatus, LinkedConnection
-from akunaki.domain.jobs import INCREMENTAL_SYNC_JOB_TYPE
+from akunaki.domain.jobs import INCREMENTAL_SYNC_JOB_TYPE, REAUTH_PROBE_JOB_TYPE
 from akunaki.ports.jobs import JobEnqueuePort
 
 __all__ = [
@@ -35,9 +37,12 @@ __all__ = [
     "SyncRequestService",
 ]
 
-# Statuses from which a sync can actually succeed. Everything else needs user
-# action first (re-consent) or is gone.
-_SYNCABLE = frozenset({ConnectionStatus.ACTIVE, ConnectionStatus.PENDING})
+# Statuses from which a sync can actually succeed. ``error`` is here because the
+# reconcile sweep already retries it; refusing a manual sync of what the
+# schedule will attempt anyway only confuses the person asking.
+_SYNCABLE = frozenset({ConnectionStatus.ACTIVE, ConnectionStatus.PENDING, ConnectionStatus.ERROR})
+# Statuses a sync cannot fix but a refresh verdict can.
+_PROBEABLE = frozenset({ConnectionStatus.NEEDS_REAUTH})
 
 
 class SyncRequestRejection(StrEnum):
@@ -47,7 +52,7 @@ class SyncRequestRejection(StrEnum):
     """Unknown connection, or one the caller's tenant does not own."""
 
     NOT_SYNCABLE = "not_syncable"
-    """Linked but unable to sync until the user re-consents."""
+    """Revoked: nothing short of a new link can make it sync."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +62,10 @@ class SyncRequestOutcome:
     job_id: str
     created: bool
     """False when an identical sync was already in flight (deduped, not queued twice)."""
+    probe: bool = False
+    """True when the connection needed re-authorization and a reauth probe was
+    queued in place of a sync. If the grant still works the probe restores the
+    connection and queues its syncs itself."""
 
 
 class ConnectionLookupPort(Protocol):
@@ -103,6 +112,18 @@ class SyncRequestService:
         connection = self._connections.get_connection(connection_id=connection_id)
         if connection is None or connection.tenant_id != tenant_id:
             return SyncRequestRejection.NOT_FOUND
+        if connection.status in _PROBEABLE:
+            # Keyed like the sweep's own probe, so a manual request and a
+            # scheduled one collapse onto a single job rather than racing.
+            probe = self._jobs.enqueue_job(
+                job_id=self._new_id(),
+                tenant_id=tenant_id,
+                job_type=REAUTH_PROBE_JOB_TYPE,
+                payload_json=json.dumps({"connection_id": connection_id}, sort_keys=True),
+                now=now,
+                idempotency_key=f"reauth_probe:{connection_id}",
+            )
+            return SyncRequestOutcome(job_id=probe.job_id, created=probe.created, probe=True)
         if connection.status not in _SYNCABLE:
             return SyncRequestRejection.NOT_SYNCABLE
 
