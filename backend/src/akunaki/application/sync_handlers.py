@@ -5,9 +5,11 @@ worker runtime's retry vocabulary, which is where the design's rules land:
 
 - a vendor 429 or 5xx raises ``TransientJobError`` so the runtime retries with
   backoff (and honors ``Retry-After`` when the provider supplies one);
-- an auth rejection raises ``PermanentJobError`` **after** flipping the
-  connection to ``needs_reauth``, because retrying a dead grant only burns the
-  attempt budget;
+- an auth rejection the grant cannot explain away — a freshly refreshed token
+  refused, or a refresh the provider answered ``invalid_grant`` — raises
+  ``PermanentJobError`` **after** flipping the connection to ``needs_reauth``,
+  because retrying a dead grant only burns the attempt budget; a 401 on a
+  token whose refresh merely failed to complete is transient, and is retried;
 - connection health is updated on every terminal attempt, success or failure.
 
 Handlers must be idempotent: a lease can expire mid-run and the job be retried
@@ -39,6 +41,7 @@ from akunaki.domain.jobs import (
     INCREMENTAL_SYNC_JOB_TYPE,
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
+    REAUTH_PROBE_JOB_TYPE,
     RECONCILE_SWEEP_JOB_TYPE,
     SCORE_RECOMPUTE_JOB_TYPE,
     JobClaim,
@@ -58,7 +61,12 @@ from akunaki.domain.source_policy import (
     decide_selection,
 )
 from akunaki.domain.sync_runs import SyncRunStatus, SyncRunTrigger
-from akunaki.domain.tokens import merge_refreshed_tokens, needs_refresh
+from akunaki.domain.tokens import (
+    RefreshOutcome,
+    TokenExchangeFailure,
+    merge_refreshed_tokens,
+    needs_refresh,
+)
 from akunaki.domain.vitals_normalizer import normalize_vitals_payload
 from akunaki.domain.workout_normalizer import normalize_workout_payload
 from akunaki.ports.connections import ConnectionRepositoryPort
@@ -83,6 +91,7 @@ __all__ = [
     "INCREMENTAL_SYNC_JOB_TYPE",
     "INITIAL_SYNC_JOB_TYPE",
     "NORMALIZE_JOB_TYPE",
+    "REAUTH_PROBE_JOB_TYPE",
     "RECONCILE_SWEEP_JOB_TYPE",
     "IncrementalSyncHandler",
     "InitialSyncHandler",
@@ -90,6 +99,7 @@ __all__ = [
     "ProviderDispatchSyncHandler",
     "ReconcileSweepHandler",
     "SyncConfig",
+    "parse_connection_payload",
     "stream_is_granted",
     "stream_required_scope",
     "streams_for_provider",
@@ -144,6 +154,26 @@ class SyncConfig:
         if self.min_window < timedelta(0):
             msg = "min_window must not be negative"
             raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class _Credentials:
+    """A connection's opened token set, and how the access token was obtained.
+
+    ``refresh`` is what the pre-fetch refresh did. It travels with the token so
+    that a 401 downstream can be read for what it is: a dead grant when the
+    token was fresh or the refresh was refused, a stale token when the refresh
+    simply did not complete.
+    """
+
+    stored: dict[str, object]
+    refresh: RefreshOutcome
+
+    @property
+    def access_token(self) -> str:
+        """The bearer token to send; empty when the stored set has none."""
+        token = self.stored.get("access_token")
+        return str(token) if token else ""
 
 
 # The stream + schema version each provider backfills. The handler itself is
@@ -360,7 +390,7 @@ class InitialSyncHandler:
 
     def __call__(self, claim: JobClaim) -> None:
         """Execute one initial-sync job."""
-        payload = _parse_payload(claim.payload_json)
+        payload = parse_connection_payload(claim.payload_json)
         connection_id = payload["connection_id"]
         now = self._clock()
 
@@ -373,11 +403,6 @@ class InitialSyncHandler:
             trigger=SyncRunTrigger.INITIAL,
             window_start=window_start,
             window_end=now,
-            now=now,
-        )
-        self._connections.mark_status(
-            connection_id=connection_id,
-            status=ConnectionStatus.ACTIVE,
             now=now,
         )
         if new_revisions == 0:
@@ -429,7 +454,7 @@ class InitialSyncHandler:
         a raised fetch error still settles the row before propagating.
         """
         if self._sync_runs is None:
-            return self.sync_window(
+            new_revisions = self.sync_window(
                 claim=claim,
                 connection_id=connection_id,
                 sync_run_id=None,
@@ -437,6 +462,8 @@ class InitialSyncHandler:
                 window_end=window_end,
                 now=now,
             )
+            self._record_success(connection_id, now=now)
+            return new_revisions
 
         run_id = self._sync_runs.open(
             run_id=self._new_id(),
@@ -468,6 +495,7 @@ class InitialSyncHandler:
             raise
         else:
             status = SyncRunStatus.SUCCEEDED
+            self._record_success(connection_id, now=now)
             return new_revisions
         finally:
             self._close_run(
@@ -536,14 +564,14 @@ class InitialSyncHandler:
         so widening costs vendor calls but never duplicate revisions.
         """
         window_start = self._widen_to_min_window(window_start, window_end=window_end)
-        access_token = self._open_access_token(connection_id)
+        credentials = self._open_credentials(connection_id)
         pages = 0
         new_revisions = 0
         page_token: str | None = None
 
         while pages < self._config.max_pages:
             result = self._fetch.fetch_page(
-                access_token=access_token,
+                access_token=credentials.access_token,
                 stream=self._config.stream,
                 window_start=window_start,
                 window_end=window_end,
@@ -566,6 +594,7 @@ class InitialSyncHandler:
                     failure=result.failure,
                     retry_after_seconds=result.retry_after_seconds,
                     now=now,
+                    credentials=credentials,
                 )
             # Split the page into per-record slices: raw identity is per
             # record, not per response page.
@@ -619,7 +648,7 @@ class InitialSyncHandler:
             return window_start
         return min(window_start, window_end - min_window)
 
-    def _open_access_token(self, connection_id: str) -> str:
+    def _open_credentials(self, connection_id: str) -> _Credentials:
         """Open the sealed tokens for a connection, refreshing if due."""
         sealed = self._connections.get_sealed_secret(connection_id=connection_id)
         if sealed is None:
@@ -632,61 +661,61 @@ class InitialSyncHandler:
             msg = "stored credentials could not be opened"
             raise PermanentJobError(msg) from exc
 
-        stored = json.loads(opened)
-        stored = self._refresh_if_due(connection_id, stored)
-
-        token = stored.get("access_token")
-        if not token:
+        stored, outcome = self._refresh(connection_id, json.loads(opened), force=False)
+        credentials = _Credentials(stored=stored, refresh=outcome)
+        if not credentials.access_token:
             msg = "stored credentials contain no access token"
             raise PermanentJobError(msg)
-        return str(token)
+        return credentials
 
-    def _refresh_if_due(
+    def _refresh(
         self,
         connection_id: str,
         stored: dict[str, object],
-    ) -> dict[str, object]:
-        """Refresh an expiring access token and persist the result.
+        *,
+        force: bool,
+    ) -> tuple[dict[str, object], RefreshOutcome]:
+        """Refresh the access token when due (or when forced) and persist it.
 
         Proactive rather than reactive: an access token is renewed from its
-        stored expiry, not after a 401 has already failed a request. Reacting to
-        the 401 would flip the connection to ``needs_reauth`` — the path that
-        demands manual re-consent — for a condition a refresh resolves silently.
+        stored expiry, not after a 401 has already failed a request. ``force``
+        is the one reactive case — a 401 on a token that was not due — where
+        the refresh's verdict is what tells a dead grant from a bad token.
 
-        Every failure here is **non-fatal**: the stored token is returned
-        unchanged and the fetch proceeds. If it really was expired the fetch's
-        own 401 handling takes over, which is exactly the behaviour before
-        refresh existed, so a broken refresh can never be worse than no refresh.
+        Every failure here is **non-fatal** for the fetch: the stored token is
+        returned unchanged and the caller proceeds with it. What the failure
+        *means* travels back as the outcome, so the 401 handling downstream can
+        tell "the provider refused the grant" from "the token endpoint was
+        unreachable" — which until 2026-11-08 it could not, and so parked a
+        live connection as ``needs_reauth`` over one transport error.
         """
         if self._oauth_client is None:
-            return stored
+            return stored, RefreshOutcome.UNAVAILABLE
         refresh_token = stored.get("refresh_token")
         if not isinstance(refresh_token, str) or not refresh_token:
             # Nothing to refresh with: a provider issuing long-lived tokens
             # (Polar) supplies none, which is not an error.
-            return stored
-        expires_at = stored.get("expires_at")
-        if not isinstance(expires_at, str):
-            expires_at = None
-        if not needs_refresh(expires_at, now=self._clock()):
-            return stored
+            return stored, RefreshOutcome.UNAVAILABLE
+        if not force:
+            expires_at = stored.get("expires_at")
+            if not isinstance(expires_at, str):
+                expires_at = None
+            if not needs_refresh(expires_at, now=self._clock()):
+                return stored, RefreshOutcome.NOT_DUE
 
         try:
             result = self._oauth_client.refresh(refresh_token=refresh_token, now=self._clock())
         except Exception:
             # The clients map expected failures onto a typed result, so reaching
             # here means something unforeseen — a transport bug, a malformed
-            # body. Refresh is an *optimisation*: the stored token may well
-            # still work, and if it does not the fetch's own 401 handling is the
-            # right place to say so. Letting this escape would make a broken
-            # refresh strictly worse than no refresh, which is the one thing
-            # this path must never be.
+            # body. The stored token may well still work, and if it does not
+            # the fetch's own 401 handling is the right place to say so.
             logger.warning(
                 "token refresh raised; using the stored token",
                 extra={"connection_id": connection_id},
                 exc_info=True,
             )
-            return stored
+            return stored, RefreshOutcome.FAILED
 
         if not result.ok or result.tokens is None:
             logger.warning(
@@ -697,7 +726,9 @@ class InitialSyncHandler:
                     "failure": str(result.failure),
                 },
             )
-            return stored
+            if result.failure is TokenExchangeFailure.INVALID_GRANT:
+                return stored, RefreshOutcome.GRANT_REFUSED
+            return stored, RefreshOutcome.FAILED
 
         merged = merge_refreshed_tokens(stored, result.tokens)
         try:
@@ -719,10 +750,28 @@ class InitialSyncHandler:
                 extra={"connection_id": connection_id},
                 exc_info=True,
             )
-            return merged
+            return merged, RefreshOutcome.REFRESHED
 
         logger.info("access token refreshed", extra={"connection_id": connection_id})
-        return merged
+        return merged, RefreshOutcome.REFRESHED
+
+    def _record_success(self, connection_id: str, *, now: datetime) -> None:
+        """Stamp the connection's health after a committed window.
+
+        Every successful window counts, not only the initial backfill: until
+        2026-11-08 only ``InitialSyncHandler`` marked the connection, so
+        ``last_success_at`` froze on the link day and one dead-lettered fetch
+        left ``status = error`` for good while later windows kept succeeding.
+        Bookkeeping never fails a sync whose data is already committed.
+        """
+        try:
+            self._connections.record_sync_success(connection_id=connection_id, now=now)
+        except Exception:
+            logger.warning(
+                "failed to record sync success",
+                extra={"connection_id": connection_id},
+                exc_info=True,
+            )
 
     def _handle_fetch_failure(
         self,
@@ -731,10 +780,13 @@ class InitialSyncHandler:
         failure: FetchFailure | None,
         retry_after_seconds: int | None,
         now: datetime,
+        credentials: _Credentials,
     ) -> NoReturn:
         """Translate a fetch failure into the runtime's retry vocabulary.
 
         Always raises: every fetch failure is either permanent or transient.
+        ``credentials`` says how the refused token was obtained, which is what
+        an auth rejection is judged against.
         """
         if failure is FetchFailure.UNAUTHORIZED:
             primary = _PROVIDER_STREAMS.get(self._fetch.provider, (None, None))[0]
@@ -760,15 +812,9 @@ class InitialSyncHandler:
                     "re-link with the missing scope"
                 )
                 raise PermanentJobError(msg)
-            # Flip health first so the user sees why, then stop retrying.
-            self._connections.mark_status(
-                connection_id=connection_id,
-                status=ConnectionStatus.NEEDS_REAUTH,
-                now=now,
-                error_class="unauthorized",
+            self._refuse_primary_unauthorized(
+                connection_id=connection_id, credentials=credentials, now=now
             )
-            msg = "connection requires re-authorization"
-            raise PermanentJobError(msg)
 
         self._connections.mark_status(
             connection_id=connection_id,
@@ -787,6 +833,60 @@ class InitialSyncHandler:
         if failure is not None and not failure.retryable:
             raise PermanentJobError(detail)
         raise TransientJobError(detail)
+
+    def _refuse_primary_unauthorized(
+        self,
+        *,
+        connection_id: str,
+        credentials: _Credentials,
+        now: datetime,
+    ) -> NoReturn:
+        """Decide what a 401 on the primary stream says about the grant.
+
+        The 401 proves only that the token **in hand** was refused; what that
+        means depends on how the token was obtained:
+
+        - freshly refreshed, refused on refresh (``invalid_grant``), or nothing
+          to refresh with: the grant itself is dead → ``needs_reauth``, the
+          one status only a working refresh or the user can clear;
+        - due for refresh but the refresh could not complete (transport, 5xx,
+          a misconfigured client): the stale token was used knowingly and the
+          401 says nothing about the grant → ``error`` and a retry, which
+          refreshes again;
+        - not due, yet refused (revoked server-side, a clock skew): refresh
+          **now** and let that verdict decide — a refresh that works means
+          only the access token was bad, so the retry simply fetches with it.
+
+        Until 2026-11-08 every primary-stream 401 flipped the connection to
+        ``needs_reauth``. On 2026-11-04 one transport error on a refresh did
+        exactly that to a Google connection whose refresh token worked two
+        seconds later on a sibling stream — and nothing ever re-checked.
+        """
+        outcome = credentials.refresh
+        if outcome is RefreshOutcome.NOT_DUE:
+            _stored, outcome = self._refresh(connection_id, credentials.stored, force=True)
+            if outcome is RefreshOutcome.REFRESHED:
+                msg = "access token refused; refreshed, retrying with the new token"
+                raise TransientJobError(msg)
+        if outcome is RefreshOutcome.FAILED:
+            self._connections.mark_status(
+                connection_id=connection_id,
+                status=ConnectionStatus.ERROR,
+                now=now,
+                error_class="token_refresh_failed",
+            )
+            msg = "access token refused and its refresh did not complete; retrying"
+            raise TransientJobError(msg)
+        # REFRESHED (a fresh token refused), GRANT_REFUSED, or UNAVAILABLE.
+        # Flip health first so the user sees why, then stop retrying.
+        self._connections.mark_status(
+            connection_id=connection_id,
+            status=ConnectionStatus.NEEDS_REAUTH,
+            now=now,
+            error_class="unauthorized",
+        )
+        msg = "connection requires re-authorization"
+        raise PermanentJobError(msg)
 
 
 class IncrementalSyncHandler:
@@ -825,7 +925,7 @@ class IncrementalSyncHandler:
 
     def __call__(self, claim: JobClaim) -> None:
         """Execute one incremental-sync job."""
-        payload = _parse_payload(claim.payload_json)
+        payload = parse_connection_payload(claim.payload_json)
         connection_id = payload["connection_id"]
         now = self._clock()
 
@@ -909,7 +1009,7 @@ class ProviderDispatchSyncHandler:
 
     def __call__(self, claim: JobClaim) -> None:
         """Dispatch one sync job to the handler for its provider **and stream**."""
-        payload = _parse_payload(claim.payload_json)
+        payload = parse_connection_payload(claim.payload_json)
         connection_id = payload["connection_id"]
         connection = self._connections.get_connection(connection_id=connection_id)
         if connection is None:
@@ -949,10 +1049,14 @@ class ProviderDispatchSyncHandler:
 
 
 class StaleConnectionSource(Protocol):
-    """Port: active connections whose last successful sync predates a cutoff."""
+    """Port: the connections a reconcile sweep should act on."""
 
     def stale_connections(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str, str]]:
         """Return ``(connection_id, tenant_id, provider)`` for stale connections."""
+        ...
+
+    def reauth_candidates(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str, str]]:
+        """Return ``needs_reauth`` connections not probed since ``cutoff``."""
         ...
 
 
@@ -964,6 +1068,15 @@ class ReconcileSweepHandler:
     each. The enqueue is idempotency-keyed on the connection, so a connection
     already queued by a webhook or an earlier sweep is not double-scheduled — the
     sweep only fills gaps, it never piles work on a healthy connection.
+
+    It also queues a **reauth probe** for each ``needs_reauth`` connection not
+    probed within ``reauth_probe_interval``. That status used to be terminal
+    from the system's side — only the user could lift it — which turned every
+    false positive into a permanently parked connection (see
+    ``reauth_handlers``). The probe interval is independent of the staleness
+    window and deliberately long: a dead grant answers the same every time,
+    and a provider that rotates refresh tokens on every call (Oura) should not
+    be asked often.
     """
 
     def __init__(
@@ -973,6 +1086,7 @@ class ReconcileSweepHandler:
         jobs: JobEnqueuePort,
         new_id: Callable[[], str],
         staleness: timedelta = timedelta(hours=6),
+        reauth_probe_interval: timedelta = timedelta(hours=6),
         batch_limit: int = 100,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -980,6 +1094,7 @@ class ReconcileSweepHandler:
         self._jobs = jobs
         self._new_id = new_id
         self._staleness = staleness
+        self._reauth_probe_interval = reauth_probe_interval
         self._batch_limit = batch_limit
         self._clock = clock
 
@@ -1020,14 +1135,33 @@ class ReconcileSweepHandler:
                 if outcome.created:
                     enqueued += 1
 
+        probes = 0
+        probe_cutoff = to_utc_rfc3339(now - self._reauth_probe_interval)
+        for connection_id, tenant_id, _provider in self._connections.reauth_candidates(
+            cutoff=probe_cutoff, limit=self._batch_limit
+        ):
+            outcome = self._jobs.enqueue_job(
+                job_id=self._new_id(),
+                tenant_id=tenant_id,
+                job_type=REAUTH_PROBE_JOB_TYPE,
+                payload_json=json.dumps({"connection_id": connection_id}),
+                now=now,
+                # One probe in flight per connection. A manual "sync now" on a
+                # needs_reauth connection uses the same key, so the two
+                # collapse rather than race.
+                idempotency_key=f"reauth_probe:{connection_id}",
+            )
+            if outcome.created:
+                probes += 1
+
         logger.info(
             "reconcile sweep completed",
-            extra={"stale": len(stale), "enqueued": enqueued},
+            extra={"stale": len(stale), "enqueued": enqueued, "reauth_probes": probes},
         )
 
 
-def _parse_payload(payload_json: str) -> dict[str, str]:
-    """Parse and validate the job payload."""
+def parse_connection_payload(payload_json: str) -> dict[str, str]:
+    """Parse and validate a connection-keyed job payload."""
     try:
         parsed = json.loads(payload_json)
     except ValueError as exc:
