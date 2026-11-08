@@ -83,6 +83,25 @@ class ConnectionRepositoryPort(Protocol):
         """
         ...
 
+    def reauth_candidates(self, *, cutoff: str, limit: int = ...) -> list[tuple[str, str, str]]:
+        """``needs_reauth`` connections whose status was last stamped before ``cutoff``.
+
+        Same shape as ``stale_connections``. The sweep queues a reauth probe
+        for each; every probe verdict re-stamps the status, which is what
+        spaces the probes.
+        """
+        ...
+
+    def record_sync_success(self, *, connection_id: str, now: datetime) -> bool:
+        """Stamp a successful fetch on the connection's health.
+
+        Also restores ``active`` from ``error`` and ``pending`` — a window the
+        vendor answered is proof the connection works — but never from
+        ``needs_reauth`` (only a refresh verdict may lift that) or ``revoked``
+        (the user's decision). False when the connection is unknown.
+        """
+        ...
+
 
 class OAuthStateRepositoryPort(Protocol):
     """Create and atomically consume OAuth authorize state rows."""
