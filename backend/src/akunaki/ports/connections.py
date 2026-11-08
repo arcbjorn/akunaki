@@ -93,12 +93,10 @@ class ConnectionRepositoryPort(Protocol):
         ...
 
     def record_sync_success(self, *, connection_id: str, now: datetime) -> bool:
-        """Stamp a successful fetch on the connection's health.
+        """Stamp a successful fetch; restore ``active`` from ``error`` or ``pending`` only.
 
-        Also restores ``active`` from ``error`` and ``pending`` — a window the
-        vendor answered is proof the connection works — but never from
-        ``needs_reauth`` (only a refresh verdict may lift that) or ``revoked``
-        (the user's decision). False when the connection is unknown.
+        Never lifts ``needs_reauth`` (a refresh verdict does) or ``revoked``.
+        False when the connection is unknown.
         """
         ...
 
