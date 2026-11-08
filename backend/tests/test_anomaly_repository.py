@@ -301,7 +301,7 @@ def test_discard_interval_removes_the_active_row_only(factory: sessionmaker[Sess
     )
     _open_low_hrv(repo, anomaly_id="a2", day="2026-07-30")
 
-    repo.discard_interval(tenant_id="tenant-1", feature_code="low_hrv", now=T0)
+    repo.discard_interval(tenant_id="tenant-1", feature_code="low_hrv")
 
     with factory() as session:
         ids = [row.id for row in session.scalars(select(AnomalyRow)).all()]
