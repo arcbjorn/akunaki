@@ -735,10 +735,12 @@ Every feature, baseline, score, factor, anomaly, and recommendation points at a 
 | `tenant_id` | TEXT | |
 | `feature_code` | TEXT | |
 | `started_on`, `ended_on` | TEXT NULL | local dates |
+| `tracked_through` | TEXT NULL | last local day whose signal advanced the row; the tracker ignores older days and re-reads equal ones (recomputes do not arrive in calendar order) |
 | `severity` | TEXT | |
 | `z_like` | REAL NULL | |
 | `formula_version` | TEXT | |
 | `is_active` | INTEGER | |
+| `consecutive_clear_days` | INTEGER | engine bookkeeping for the 2-day clear rule |
 | `derivation_run_id` | TEXT FK | |
 | versioning | | |
 
