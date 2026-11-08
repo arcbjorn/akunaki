@@ -32,6 +32,21 @@ from akunaki.domain.secrets import SealedSecret
 _RESTORED_BY_SUCCESS = (ConnectionStatus.ERROR.value, ConnectionStatus.PENDING.value)
 
 
+def _stamp_success(session: Session, *, connection_id: str, tenant_id: str, now_s: str) -> None:
+    """Record a success on the health row, creating it for a connection that has none."""
+    stamped = session.execute(
+        update(ConnectionHealth)
+        .where(ConnectionHealth.connection_id == connection_id)
+        .values(last_success_at=now_s, consecutive_failures=0, last_error_class=None)
+    )
+    if affected_rows(stamped) == 0:
+        session.add(
+            ConnectionHealth(
+                connection_id=connection_id, tenant_id=tenant_id, last_success_at=now_s
+            )
+        )
+
+
 class ConnectionRepository:
     """Persist provider connections and their envelope-encrypted secrets."""
 
@@ -164,26 +179,15 @@ class ConnectionRepository:
             )
             if affected_rows(result) != 1:
                 return False
-            # A transition to ACTIVE marks a successful sync; record it (and
-            # clear the failure streak) so the reconciliation sweep can tell a
-            # fresh connection from a stale one.
+            # A transition to ACTIVE counts as a success: record it (and clear
+            # the failure streak) so the sweep can tell fresh from stale.
             if status is ConnectionStatus.ACTIVE:
                 tenant_id = session.execute(
                     select(Connection.tenant_id).where(Connection.id == connection_id)
                 ).scalar_one()
-                updated = session.execute(
-                    update(ConnectionHealth)
-                    .where(ConnectionHealth.connection_id == connection_id)
-                    .values(last_success_at=now_s, consecutive_failures=0, last_error_class=None)
+                _stamp_success(
+                    session, connection_id=connection_id, tenant_id=tenant_id, now_s=now_s
                 )
-                if affected_rows(updated) == 0:
-                    session.add(
-                        ConnectionHealth(
-                            connection_id=connection_id,
-                            tenant_id=tenant_id,
-                            last_success_at=now_s,
-                        )
-                    )
             elif error_class is not None:
                 session.merge(
                     ConnectionHealth(
@@ -277,19 +281,16 @@ class ConnectionRepository:
     def record_sync_success(self, *, connection_id: str, now: datetime) -> bool:
         """Stamp a successful fetch and restore ``active`` where a sync can earn it.
 
-        Called after **every** window that fetched and committed, not only the
-        initial backfill. Until 2026-11-08 only the initial sync wrote
-        ``last_success_at`` (through ``mark_status(ACTIVE)``), so every
-        connection read as last-synced on its link day for as long as it lived,
-        and one dead-lettered fetch left ``status = error`` until the next
-        re-link while thousands of later windows succeeded.
+        Called after **every** committed window. Until 2026-11-08 only the
+        initial sync stamped ``last_success_at``, so every connection read as
+        last-synced on its link day, and one dead-lettered fetch left
+        ``status = error`` for good while later windows kept succeeding.
 
-        ``error`` and ``pending`` are restored to ``active``: a window the
-        vendor answered is proof the connection works. ``needs_reauth`` is not
-        — a secondary stream can succeed on a token the primary stream's grant
-        refuses, so only a refresh verdict (the reauth probe) may lift it. And
-        ``revoked`` is the user's decision, never undone by data arriving.
-        Returns False when the connection is unknown.
+        ``error`` and ``pending`` are restored: a window the vendor answered is
+        proof the connection works. ``needs_reauth`` is not — a secondary
+        stream can succeed on a token the primary's grant refuses, so only a
+        refresh verdict (the reauth probe) lifts it — and ``revoked`` is the
+        user's decision. Returns False when the connection is unknown.
         """
         if not connection_id:
             msg = "connection_id must be non-empty"
@@ -310,19 +311,7 @@ class ConnectionRepository:
                 )
                 .values(status=ConnectionStatus.ACTIVE.value, updated_at=now_s)
             )
-            stamped = session.execute(
-                update(ConnectionHealth)
-                .where(ConnectionHealth.connection_id == connection_id)
-                .values(last_success_at=now_s, consecutive_failures=0, last_error_class=None)
-            )
-            if affected_rows(stamped) == 0:
-                session.add(
-                    ConnectionHealth(
-                        connection_id=connection_id,
-                        tenant_id=tenant_id,
-                        last_success_at=now_s,
-                    )
-                )
+            _stamp_success(session, connection_id=connection_id, tenant_id=tenant_id, now_s=now_s)
             return True
 
     def connection_statuses(self, *, tenant_id: str) -> list[ConnectionSummary]:
