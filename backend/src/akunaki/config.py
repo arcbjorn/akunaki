@@ -152,6 +152,19 @@ class Settings(BaseSettings):
             "history the vendor no longer has."
         ),
     )
+    sync_staleness_minutes: int = Field(
+        default=360,
+        ge=1,
+        le=10080,
+        description=(
+            "How long after a successful sync the reconcile sweep leaves a "
+            "connection alone, in minutes. The sweep runs every 30 minutes and "
+            "re-fetches only connections whose last success is older than this, "
+            "so with no webhooks wired it is the cadence of scheduled syncs. "
+            "Default six hours; a deployment that relies on the sweep as its "
+            "only data path sets it below the sweep interval."
+        ),
+    )
     metrics_enabled: bool = Field(
         default=False,
         description=(
