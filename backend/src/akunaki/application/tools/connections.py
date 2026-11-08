@@ -27,6 +27,7 @@ confirmation bound to that exact call.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -134,11 +135,20 @@ class SyncInput(BaseModel):
 
 
 class SyncOutput(BaseModel):
-    """The queued sync."""
+    """The queued job."""
 
     job_id: str
     created: bool = Field(
-        description="False when an identical sync was already in flight (deduped).",
+        description="False when an identical job was already in flight (deduped).",
+    )
+    kind: Literal["sync", "reauth_probe"] = Field(
+        default="sync",
+        description=(
+            "`sync` refetches now. `reauth_probe` means the connection needs "
+            "re-authorization: the job asks the provider whether the stored grant "
+            "still works and, if it does, restores the connection and queues its "
+            "syncs itself; if not, the user must re-link."
+        ),
     )
 
 
@@ -169,9 +179,13 @@ def sync_connection_tool(service: SyncRequestService) -> Tool[SyncInput, SyncOut
             msg = "connection not found"
             raise LookupError(msg)
         if outcome is SyncRequestRejection.NOT_SYNCABLE:
-            msg = "connection cannot sync until it is re-linked"
+            msg = "connection is revoked; link it again to sync"
             raise ValueError(msg)
-        return SyncOutput(job_id=outcome.job_id, created=outcome.created)
+        return SyncOutput(
+            job_id=outcome.job_id,
+            created=outcome.created,
+            kind="reauth_probe" if outcome.probe else "sync",
+        )
 
     return Tool(
         name="connections.sync",
