@@ -24,6 +24,7 @@ from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.job_repository import JobRepository
 from akunaki.adapters.db.models import Job, Tenant
 from akunaki.adapters.wiring.registry import build_registry, sync_configs
+from akunaki.application.reauth_handlers import REAUTH_PROBE_JOB_TYPE
 from akunaki.application.score_handlers import SCORE_RECOMPUTE_JOB_TYPE
 from akunaki.application.sync_handlers import (
     DEFAULT_LOOKBACK_DAYS,
@@ -31,6 +32,7 @@ from akunaki.application.sync_handlers import (
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
     RECONCILE_SWEEP_JOB_TYPE,
+    ReconcileSweepHandler,
     streams_for_provider,
 )
 from akunaki.application.worker_runtime import JobWorker, WorkerConfig
@@ -87,8 +89,28 @@ def test_registry_has_every_product_job_type(db_url: str, factory: sessionmaker[
         NORMALIZE_JOB_TYPE,
         SCORE_RECOMPUTE_JOB_TYPE,
         RECONCILE_SWEEP_JOB_TYPE,
+        REAUTH_PROBE_JOB_TYPE,
     ):
         assert registry.get(job_type) is not None
+
+
+def test_the_configured_staleness_reaches_the_sweep(
+    db_url: str, factory: sessionmaker[Session]
+) -> None:
+    """``AKUNAKI_SYNC_STALENESS_MINUTES`` is the cadence of scheduled syncs.
+
+    With no webhooks wired the sweep is the only data path, so a deployment
+    sets this below the sweep's 30-minute tick to be refetched every tick.
+    """
+    settings = Settings(
+        database_url=db_url,
+        secret_keks=f"v1:{KEK_B64}",
+        active_kek_version="v1",
+        sync_staleness_minutes=20,
+    )
+    sweep = build_registry(settings, factory).get(RECONCILE_SWEEP_JOB_TYPE)
+    assert isinstance(sweep, ReconcileSweepHandler)
+    assert sweep._staleness == timedelta(minutes=20)
 
 
 def test_the_configured_lookback_reaches_every_stream(db_url: str) -> None:
