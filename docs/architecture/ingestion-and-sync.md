@@ -131,7 +131,8 @@ Common flow:
 1. API creates `connections` row `pending`, persists `oauth_states` with **`state_hash`**, **envelope-encrypted PKCE verifier**, **exact redirect URI**, `expires_at` (single-use).
 2. User returns with code; API validates hashed state, expiry, unconsumed; decrypts verifier; checks exact redirect; exchanges tokens; encrypts into `connection_secrets` (tokens are **not** stored as plaintext columns on `connections`); marks state `consumed_at`.
 3. Enqueue `connection.initial_sync` with idempotency key.
-4. On refresh failure with invalid_grant: `needs_reauth` + user-visible finding.
+4. Access tokens are refreshed **proactively** from their stored expiry before a fetch. A 401 is then judged by how the refused token was obtained: a freshly refreshed token refused, a refresh answered `invalid_grant`, or nothing to refresh with → `needs_reauth` + user-visible finding; a refresh that merely failed to complete (transport, 5xx, client misconfiguration) → `error` and a retry that refreshes again; a token not yet due but refused → refresh now and let that verdict decide.
+5. `needs_reauth` is **re-checked**, not terminal: the reconcile sweep queues a `connection.reauth_probe` every 6 h for each parked connection (and a manual "sync now" on one queues the same probe). The probe refreshes the token; if the provider still issues one, the tokens are persisted, the connection returns to `active`, and its streams are enqueued. `invalid_grant` leaves it parked and re-stamps `updated_at` so the next probe waits a full interval. Until 2026-11-08 one transport error on a refresh parked a working connection for good.
 
 ---
 
@@ -177,7 +178,7 @@ Separate **exact vendor transport** from **logical records**:
 
 | Layer | Tables (see [data-model.md](data-model.md)) |
 |-------|-----------------------------------------------|
-| Transport | `sync_runs`, `raw_payload` pages (exact body + redacted metadata; **every** response retained) |
+| Transport | `sync_runs` (every fetch), `raw_payload` pages (exact body + redacted metadata; one row per **distinct** body per connection and stream) |
 | Logical raw | `raw_objects`, immutable append-only `raw_revisions` (vendor record id, observed/effective/received timestamps, content hash, **schema_version**, deletion state—**no** `normalizer_version` on raw) linked to payload page + optional sync run |
 | Progress | `sync_cursors` |
 | Webhook | `webhook_inbox` |
@@ -187,18 +188,18 @@ Separate **exact vendor transport** from **logical records**:
 
 After a successful fetch page (or multi-page transaction boundary defined per connector):
 
-1. In **one transaction**: write **new** `raw_payload` page(s) always (same hash still inserts a transport row); append `raw_objects` / `raw_revisions` only when logical content is new; advance `sync_cursors`; insert normalization **outbox** rows (or jobs) for new revision ids; mark `sync_run` progress.
+1. In **one transaction**: write the `raw_payload` page unless an identical body (same `content_hash`) is already stored for this connection and stream, in which case that row is reused — the fetch itself is recorded by `sync_runs`; append `raw_objects` / `raw_revisions` only when logical content is new; advance `sync_cursors`; insert normalization **outbox** rows (or jobs) for new revision ids; mark `sync_run` progress.
 2. Commit.
-3. If the process crashes **before** commit: cursors unchanged → safe retry of the same window; logical content-hash check prevents duplicate **revisions** (transport rows may still be re-written on retry after commit—application may also insert transport on each attempt that commits).
+3. If the process crashes **before** commit: cursors unchanged → safe retry of the same window; the content-hash checks prevent duplicate **revisions** and duplicate transport rows alike.
 4. If the process crashes **after** commit but before normalize completes: outbox/jobs remain → normalize retries idempotently by `raw_revision_id`.
 
 ### Overlap windows
 
-Each incremental fetch uses `window_start = cursor - overlap` (36h for sleep, 2h for intraday) to absorb late vendor finalization. Logical revision skip when `content_hash` already present for that object; transport pages always retained.
+Each incremental fetch uses `window_start = cursor - overlap` (36h for sleep, 2h for intraday) to absorb late vendor finalization. Logical revision skip when `content_hash` already present for that object; an identical transport page reuses its stored row.
 
 ### At-least-once and idempotent ingestion
 
-1. Fetch may be retried → **new** `raw_payload` row (retain every response); same logical `content_hash` → **no new** `raw_revisions` (or no-op).
+1. Fetch may be retried → a new `sync_runs` row always; a `raw_payload` row only for a body not already stored for the connection and stream; same logical `content_hash` → **no new** `raw_revisions` (or no-op). A resource that returns its whole retention set on every call (Polar `/v3/exercises`) therefore costs one transport row per distinct list, not one per tick.
 2. New logical hash → append `raw_revisions`, update current pointer.
 3. Normalize job keyed by `raw_revision_id`; set `normalizer_version` on produced **facts**, not on immutable raw revisions.
 4. Fact write creates new fact version if values or lineage change; never update in place.
@@ -220,7 +221,13 @@ Aligned with [repository-and-services.md](repository-and-services.md): exponenti
 
 ### Connection health
 
-Updated on every terminal sync attempt: success timestamp, error class (no bodies), consecutive failures, scope degradation flags, last verified webhook time.
+Updated on every terminal sync attempt: success timestamp, error class (no bodies), consecutive failures, scope degradation flags, last verified webhook time. **Every** successfully committed window stamps `last_success_at` and restores `active` from `error` or `pending` — not only the initial backfill, which until 2026-11-08 was the sole writer, leaving every connection "last synced" on its link day. A success never lifts `needs_reauth` (only a refresh verdict does) or `revoked`.
+
+The reconcile sweep runs every 30 minutes and refetches connections whose `last_success_at` is older than `AKUNAKI_SYNC_STALENESS_MINUTES` (default 360). With no webhooks wired that setting *is* the sync cadence; a deployment that relies on the sweep sets it below the tick.
+
+### Retention of operational history
+
+The hourly retention sweep also deletes settled jobs (`succeeded`, `cancelled`) after 30 days and failed or dead-lettered ones after 90, each with its attempts, lease, and dead-letter rows; and sync runs after 90 days unless a payload or revision still cites them. A job still `ready` or `leased` is never touched. Before this (2026-11-08) both tables grew by ~700 rows a day with nothing deleting them.
 
 ---
 
