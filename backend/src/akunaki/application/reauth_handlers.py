@@ -4,9 +4,8 @@
 2026-11-08 it was also set when a stale access token was refused after a
 refresh that had merely failed to complete — and nothing ever re-checked: the
 reconcile sweep skipped the status and manual syncs were refused, so one
-transport error parked a working connection for good. On 2026-11-04 that
-happened to a Google connection whose refresh token worked two seconds later
-on a sibling stream.
+transport error parked a working connection for good (Google, 2026-11-04; the
+refresh token worked two seconds later on a sibling stream).
 
 The probe asks the one question that settles it — *does the refresh token
 still buy an access token?* — and acts on the answer:
@@ -30,9 +29,9 @@ import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 
-from akunaki.application.sync_handlers import parse_connection_payload, streams_for_provider
+from akunaki.application.sync_handlers import enqueue_stream_syncs, parse_connection_payload
 from akunaki.domain.connections import ConnectionStatus
-from akunaki.domain.jobs import INCREMENTAL_SYNC_JOB_TYPE, REAUTH_PROBE_JOB_TYPE, JobClaim
+from akunaki.domain.jobs import REAUTH_PROBE_JOB_TYPE, JobClaim
 from akunaki.domain.retry import PermanentJobError
 from akunaki.domain.secrets import SecretDecryptionError
 from akunaki.domain.tokens import TokenExchangeFailure, merge_refreshed_tokens
@@ -68,41 +67,35 @@ class ReauthProbeHandler:
 
     def __call__(self, claim: JobClaim) -> None:
         """Execute one probe."""
-        payload = parse_connection_payload(claim.payload_json)
-        connection_id = payload["connection_id"]
+        connection_id = parse_connection_payload(claim.payload_json)["connection_id"]
         now = self._clock()
-
         connection = self._connections.get_connection(connection_id=connection_id)
         if connection is None:
             msg = f"connection {connection_id!r} not found"
             raise PermanentJobError(msg)
+        provider = connection.provider.value
+        extra = {"connection_id": connection_id, "provider": provider}
+
         if connection.status is not ConnectionStatus.NEEDS_REAUTH:
             # Lifted in the meantime — a re-link, an earlier probe. Nothing to do.
-            logger.info(
-                "reauth probe skipped: connection does not need reauth",
-                extra={"connection_id": connection_id, "status": connection.status.value},
-            )
+            logger.info("reauth probe skipped: connection does not need reauth", extra=extra)
             return
-        provider = connection.provider.value
         client = self._oauth_clients.get(provider)
         if client is None:
-            logger.warning(
-                "reauth probe impossible: no OAuth client for provider",
-                extra={"connection_id": connection_id, "provider": provider},
-            )
+            logger.warning("reauth probe impossible: no OAuth client for provider", extra=extra)
             return
-        refresh_token, stored = self._stored_refresh_token(connection_id)
-        if refresh_token is None:
+        stored = self._open_tokens(connection_id)
+        if stored is None:
+            return
+        refresh_token = stored.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            logger.info("reauth probe impossible: no refresh token; re-consent only", extra=extra)
             return
 
         try:
             result = client.refresh(refresh_token=refresh_token, now=now)
         except Exception:
-            logger.warning(
-                "reauth probe raised; no verdict",
-                extra={"connection_id": connection_id, "provider": provider},
-                exc_info=True,
-            )
+            logger.warning("reauth probe raised; no verdict", extra=extra, exc_info=True)
             self._restamp(connection_id, now=now, error_class="probe_failed")
             return
 
@@ -121,49 +114,46 @@ class ReauthProbeHandler:
                 # has just invalidated the stored one, so the connection is no
                 # longer known to be recoverable; leave the status honest.
                 logger.exception(
-                    "reauth probe refreshed the token but could not persist it",
-                    extra={"connection_id": connection_id, "provider": provider},
+                    "reauth probe refreshed the token but could not persist it", extra=extra
                 )
                 return
             self._connections.mark_status(
-                connection_id=connection_id,
-                status=ConnectionStatus.ACTIVE,
-                now=now,
+                connection_id=connection_id, status=ConnectionStatus.ACTIVE, now=now
             )
-            enqueued = self._enqueue_streams(
-                connection_id=connection_id,
-                tenant_id=connection.tenant_id,
-                provider=provider,
-                now=now,
-            )
+            try:
+                enqueued = enqueue_stream_syncs(
+                    self._jobs,
+                    new_id=self._new_id,
+                    connection_id=connection_id,
+                    tenant_id=connection.tenant_id,
+                    provider=provider,
+                    now=now,
+                )
+            except KeyError:
+                enqueued = 0
             logger.info(
-                "connection recovered by token refresh",
-                extra={"connection_id": connection_id, "provider": provider, "enqueued": enqueued},
+                "connection recovered by token refresh", extra={**extra, "enqueued": enqueued}
             )
             return
 
         failure = result.failure
         self._restamp(connection_id, now=now, error_class=str(failure) if failure else "unknown")
         if failure is TokenExchangeFailure.INVALID_GRANT:
-            logger.info(
-                "reauth probe: grant still refused; re-consent required",
-                extra={"connection_id": connection_id, "provider": provider},
+            logger.info("reauth probe: grant still refused; re-consent required", extra=extra)
+        else:
+            logger.warning(
+                "reauth probe reached no verdict", extra={**extra, "failure": str(failure)}
             )
-            return
-        logger.warning(
-            "reauth probe reached no verdict",
-            extra={"connection_id": connection_id, "provider": provider, "failure": str(failure)},
-        )
 
-    def _stored_refresh_token(self, connection_id: str) -> tuple[str | None, dict[str, object]]:
-        """Open the sealed tokens and return the refresh token, or None with a reason logged."""
+    def _open_tokens(self, connection_id: str) -> dict[str, object] | None:
+        """Open the sealed token set, or None (logged) when there is nothing to open."""
         sealed = self._connections.get_sealed_secret(connection_id=connection_id)
         if sealed is None:
             logger.warning(
                 "reauth probe impossible: connection has no stored credentials",
                 extra={"connection_id": connection_id},
             )
-            return None, {}
+            return None
         try:
             opened = self._sealer.open(sealed, aad=connection_id.encode())
         except SecretDecryptionError:
@@ -171,16 +161,9 @@ class ReauthProbeHandler:
                 "reauth probe impossible: stored credentials could not be opened",
                 extra={"connection_id": connection_id},
             )
-            return None, {}
+            return None
         stored: dict[str, object] = json.loads(opened)
-        refresh_token = stored.get("refresh_token")
-        if not isinstance(refresh_token, str) or not refresh_token:
-            logger.info(
-                "reauth probe impossible: no refresh token; only re-consent can restore",
-                extra={"connection_id": connection_id},
-            )
-            return None, stored
-        return refresh_token, stored
+        return stored
 
     def _restamp(self, connection_id: str, *, now: datetime, error_class: str) -> None:
         """Keep ``needs_reauth`` but move ``updated_at`` so the next probe waits an interval."""
@@ -190,29 +173,3 @@ class ReauthProbeHandler:
             now=now,
             error_class=error_class,
         )
-
-    def _enqueue_streams(
-        self, *, connection_id: str, tenant_id: str, provider: str, now: datetime
-    ) -> int:
-        """Queue an incremental sync per stream, keyed exactly as the sweep keys its own."""
-        try:
-            streams = streams_for_provider(provider)
-        except KeyError:
-            logger.warning(
-                "recovered connection has no wired streams to sync",
-                extra={"connection_id": connection_id, "provider": provider},
-            )
-            return 0
-        enqueued = 0
-        for stream, _schema in streams:
-            outcome = self._jobs.enqueue_job(
-                job_id=self._new_id(),
-                tenant_id=tenant_id,
-                job_type=INCREMENTAL_SYNC_JOB_TYPE,
-                payload_json=json.dumps({"connection_id": connection_id, "stream": stream}),
-                now=now,
-                idempotency_key=f"reconcile:{connection_id}:{stream}",
-            )
-            if outcome.created:
-                enqueued += 1
-        return enqueued
