@@ -25,7 +25,14 @@ from akunaki.adapters.db.connection_repository import ConnectionRepository
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.ingestion_repository import IngestionRepository
 from akunaki.adapters.db.job_repository import JobRepository
-from akunaki.adapters.db.models import Connection, RawPayload, RawRevision, SyncCursor, Tenant
+from akunaki.adapters.db.models import (
+    Connection,
+    ConnectionHealth,
+    RawPayload,
+    RawRevision,
+    SyncCursor,
+    Tenant,
+)
 from akunaki.adapters.db.sync_run_repository import SyncRunRecord, SyncRunRepository
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.sync_handlers import (
@@ -318,9 +325,10 @@ def test_rerunning_the_same_sync_is_idempotent(factory: sessionmaker[Session]) -
         payloads = session.scalars(select(RawPayload)).all()
         revisions = session.scalars(select(RawRevision)).all()
 
-    # Every response retained...
-    assert len(payloads) == 2
-    # ...but the logical revision is deduped by content hash.
+    # An identical body shares one transport row (the fetch itself is on record
+    # in sync_runs)...
+    assert len(payloads) == 1
+    # ...and the logical revision is deduped by content hash.
     assert len(revisions) == 1
 
 
@@ -1098,3 +1106,198 @@ def test_an_unpersistable_refresh_still_uses_the_fresh_token(
     assert seen == ["Bearer fresh-access"]
     # The stored token is untouched, so the next sync simply refreshes again.
     assert _stored_tokens(factory)["access_token"] == "stale-access"
+
+
+# ---------------------------------------------------------------------------
+# A 401 is judged by how the refused token was obtained
+# ---------------------------------------------------------------------------
+
+
+def _refused(_request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(401, json={"error": "unauthorized"})
+
+
+def _fresh_tokens() -> TokenExchangeResult:
+    return TokenExchangeResult(
+        tokens=OAuthTokens(
+            access_token="fresh-access",
+            refresh_token=None,
+            expires_at="2026-07-19T13:00:00Z",
+            scopes=(),
+            token_type="bearer",
+        )
+    )
+
+
+def _connection_status(factory: sessionmaker[Session]) -> tuple[str, str | None]:
+    with factory() as session:
+        connection = session.get(Connection, "conn-1")
+        health = session.get(ConnectionHealth, "conn-1")
+    assert connection is not None
+    return connection.status, health.last_error_class if health is not None else None
+
+
+def test_a_401_after_a_refresh_that_could_not_complete_is_transient(
+    factory: sessionmaker[Session],
+) -> None:
+    """The Google parking of 2026-11-04, exactly.
+
+    The refresh hit a transport error, the stale token was used knowingly and
+    refused, and the connection was flipped to ``needs_reauth`` — a status
+    nothing re-checked — while the refresh token worked two seconds later on a
+    sibling stream. The 401 says nothing about the grant here: retry, and the
+    retry refreshes again.
+    """
+    _seed_expiring_connection(factory, expires_at="2026-07-18T00:00:00Z")  # due
+    oauth = _StubOAuthClient(TokenExchangeResult(failure=TokenExchangeFailure.TRANSPORT_ERROR))
+
+    worker = _run_job(factory, _refreshing_handler(factory, _refused, oauth))
+
+    assert worker.stats.retried == 1
+    assert worker.stats.dead_lettered == 0
+    assert _connection_status(factory) == (ConnectionStatus.ERROR.value, "token_refresh_failed")
+
+
+def test_a_401_after_the_provider_refused_the_grant_needs_reauth(
+    factory: sessionmaker[Session],
+) -> None:
+    """``invalid_grant`` is the provider's word that the refresh token is dead."""
+    _seed_expiring_connection(factory, expires_at="2026-07-18T00:00:00Z")
+    oauth = _StubOAuthClient(TokenExchangeResult(failure=TokenExchangeFailure.INVALID_GRANT))
+
+    worker = _run_job(factory, _refreshing_handler(factory, _refused, oauth))
+
+    assert worker.stats.dead_lettered == 1
+    assert worker.stats.retried == 0
+    assert _connection_status(factory) == (ConnectionStatus.NEEDS_REAUTH.value, "unauthorized")
+
+
+def test_a_401_on_a_freshly_refreshed_token_needs_reauth(factory: sessionmaker[Session]) -> None:
+    """A token the provider just issued and now refuses: the grant is what is wrong."""
+    _seed_expiring_connection(factory, expires_at="2026-07-18T00:00:00Z")
+    oauth = _StubOAuthClient(_fresh_tokens())
+
+    worker = _run_job(factory, _refreshing_handler(factory, _refused, oauth))
+
+    assert oauth.refreshed_with == ["the-refresh-token"]
+    assert worker.stats.dead_lettered == 1
+    assert _connection_status(factory)[0] == ConnectionStatus.NEEDS_REAUTH.value
+
+
+def test_a_401_on_a_token_not_due_refreshes_reactively_and_retries(
+    factory: sessionmaker[Session],
+) -> None:
+    """Revoked server-side, or a clock skew: the refresh verdict decides, not the 401.
+
+    A refresh that works proves the grant alive and only the access token bad,
+    so the new token is persisted and the retry simply fetches with it. The
+    connection never leaves ``active``.
+    """
+    _seed_expiring_connection(factory, expires_at="2026-08-01T00:00:00Z")  # not due
+    oauth = _StubOAuthClient(_fresh_tokens())
+
+    worker = _run_job(factory, _refreshing_handler(factory, _refused, oauth))
+
+    assert oauth.refreshed_with == ["the-refresh-token"]
+    assert worker.stats.retried == 1
+    assert worker.stats.dead_lettered == 0
+    assert _stored_tokens(factory)["access_token"] == "fresh-access"
+    assert _connection_status(factory)[0] == ConnectionStatus.ACTIVE.value
+
+
+def test_a_401_on_a_token_not_due_whose_refresh_is_refused_needs_reauth(
+    factory: sessionmaker[Session],
+) -> None:
+    _seed_expiring_connection(factory, expires_at="2026-08-01T00:00:00Z")
+    oauth = _StubOAuthClient(TokenExchangeResult(failure=TokenExchangeFailure.INVALID_GRANT))
+
+    worker = _run_job(factory, _refreshing_handler(factory, _refused, oauth))
+
+    assert oauth.refreshed_with == ["the-refresh-token"]
+    assert worker.stats.dead_lettered == 1
+    assert _connection_status(factory)[0] == ConnectionStatus.NEEDS_REAUTH.value
+
+
+def test_a_401_on_a_token_not_due_whose_refresh_fails_is_transient(
+    factory: sessionmaker[Session],
+) -> None:
+    _seed_expiring_connection(factory, expires_at="2026-08-01T00:00:00Z")
+    oauth = _StubOAuthClient(TokenExchangeResult(failure=TokenExchangeFailure.PROVIDER_ERROR))
+
+    worker = _run_job(factory, _refreshing_handler(factory, _refused, oauth))
+
+    assert worker.stats.retried == 1
+    assert _connection_status(factory) == (ConnectionStatus.ERROR.value, "token_refresh_failed")
+
+
+def test_a_401_with_nothing_to_refresh_with_needs_reauth(factory: sessionmaker[Session]) -> None:
+    """Polar issues long-lived tokens and no refresh token: a refusal is final."""
+    sealer = EnvelopeSealer(keys={"v1": KEK}, active_key_version="v1")
+    ConnectionRepository(factory).replace_sealed_secret(
+        connection_id="conn-1",
+        sealed_secret=sealer.seal(
+            json.dumps({"access_token": "long-lived"}).encode(), aad=b"conn-1"
+        ),
+        now=T0,
+    )
+    oauth = _StubOAuthClient(_fresh_tokens())
+
+    worker = _run_job(factory, _refreshing_handler(factory, _refused, oauth))
+
+    assert oauth.refreshed_with == []
+    assert worker.stats.dead_lettered == 1
+    assert _connection_status(factory)[0] == ConnectionStatus.NEEDS_REAUTH.value
+
+
+# ---------------------------------------------------------------------------
+# Identical transport pages share one row
+# ---------------------------------------------------------------------------
+
+
+def test_an_identical_page_reuses_the_transport_row(factory: sessionmaker[Session]) -> None:
+    """Polar's exercises list came back byte-identical every 30 minutes.
+
+    Each copy was stored: 3,055 rows and 116 MB of a 349 MB file by
+    2026-11-08, for a list that changed a few times a week. The fetch is on
+    record in ``sync_runs``; the bytes need storing once.
+    """
+    _run_job(factory, _handler(factory, _ok(PAGE_ONE)))
+    repeat = _handler(factory, _ok(PAGE_ONE))
+    repeat(
+        JobClaim(
+            job_id="job-2",
+            tenant_id="tenant-1",
+            role=JobRole.CORE,
+            job_type=INITIAL_SYNC_JOB_TYPE,
+            owner="worker-1",
+            fence_token=1,
+            leased_until=to_utc_rfc3339(T0 + timedelta(minutes=1)),
+            attempts=1,
+            max_attempts=3,
+            payload_json='{"connection_id":"conn-1"}',
+        )
+    )
+
+    with factory() as session:
+        assert len(session.scalars(select(RawPayload)).all()) == 1
+        assert len(session.scalars(select(RawRevision)).all()) == 1
+
+    # A different body is a different page and gets its own row.
+    changed = json.dumps({"data": [{"id": "s1", "score": 11}], "next_token": None})
+    other = _handler(factory, _ok(changed))
+    other(
+        JobClaim(
+            job_id="job-3",
+            tenant_id="tenant-1",
+            role=JobRole.CORE,
+            job_type=INITIAL_SYNC_JOB_TYPE,
+            owner="worker-1",
+            fence_token=1,
+            leased_until=to_utc_rfc3339(T0 + timedelta(minutes=1)),
+            attempts=1,
+            max_attempts=3,
+            payload_json='{"connection_id":"conn-1"}',
+        )
+    )
+    with factory() as session:
+        assert len(session.scalars(select(RawPayload)).all()) == 2
