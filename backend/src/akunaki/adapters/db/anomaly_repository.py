@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.models import Anomaly as AnomalyRow
@@ -42,7 +42,24 @@ class AnomalyRepository:
                 is_open=True,
                 severity=AnomalySeverity(row.severity),
                 consecutive_clear_days=row.consecutive_clear_days,
+                started_on=row.started_on,
+                tracked_through=row.tracked_through,
             )
+
+    def last_tracked_day(self, *, tenant_id: str, feature_code: str) -> str | None:
+        """The latest local day any of the feature's intervals was advanced by.
+
+        With no interval open this is the day the last one closed, which is
+        the frontier an out-of-order recompute must not move anything before.
+        """
+        with self._session_factory() as session:
+            latest = session.execute(
+                select(func.max(AnomalyRow.tracked_through)).where(
+                    AnomalyRow.tenant_id == tenant_id,
+                    AnomalyRow.feature_code == feature_code,
+                )
+            ).scalar_one_or_none()
+            return str(latest) if latest is not None else None
 
     def open_interval(
         self,
@@ -66,6 +83,7 @@ class AnomalyRepository:
                     feature_code=feature_code,
                     started_on=local_health_day,
                     ended_on=None,
+                    tracked_through=local_health_day,
                     severity=severity.value,
                     z_like=z_like,
                     formula_version=formula_version,
@@ -83,9 +101,10 @@ class AnomalyRepository:
         feature_code: str,
         severity: AnomalySeverity,
         consecutive_clear_days: int,
+        local_health_day: str,
         now: datetime,
     ) -> None:
-        """Update the active interval's severity and clear-day run."""
+        """Update the active interval's severity, clear-day run, and last day."""
         now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
         with self._session_factory() as session, session.begin():
             session.execute(
@@ -98,6 +117,7 @@ class AnomalyRepository:
                 .values(
                     severity=severity.value,
                     consecutive_clear_days=consecutive_clear_days,
+                    tracked_through=local_health_day,
                     updated_at=now_s,
                 )
             )
@@ -123,8 +143,26 @@ class AnomalyRepository:
                 .values(
                     is_active=0,
                     ended_on=local_health_day,
+                    tracked_through=local_health_day,
                     consecutive_clear_days=0,
                     updated_at=now_s,
+                )
+            )
+
+    def discard_interval(self, *, tenant_id: str, feature_code: str, now: datetime) -> None:
+        """Delete the active interval outright.
+
+        For an interval that opened on a day which, re-read once its facts were
+        complete, is not anomalous: it never was one, so closing it would leave
+        a zero-length anomaly in the history the user is shown.
+        """
+        require_aware(now, field_name="now")
+        with self._session_factory() as session, session.begin():
+            session.execute(
+                delete(AnomalyRow).where(
+                    AnomalyRow.tenant_id == tenant_id,
+                    AnomalyRow.feature_code == feature_code,
+                    AnomalyRow.is_active == 1,
                 )
             )
 
