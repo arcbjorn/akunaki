@@ -442,15 +442,70 @@ def test_sync_on_another_tenants_connection_is_the_same_404(
         assert session.scalars(select(Job)).all() == []
 
 
-def test_sync_on_a_reauth_needing_connection_is_409(
+def test_sync_on_a_reauth_needing_connection_queues_a_probe(
     client: TestClient, factory: sessionmaker[Session]
 ) -> None:
-    """A connection that cannot sync says so, rather than queuing a doomed job."""
+    """A parked connection gets the one job that can un-park it, not a refusal.
+
+    Until 2026-11-08 this was a 409: ``needs_reauth`` was terminal from the
+    system's side, so a connection parked by a transient refresh failure stayed
+    parked until the user re-consented for nothing. The probe asks the provider
+    whether the stored grant still works and restores the connection if so.
+    """
     csrf = _login(client, factory)
     connection_id = _link_polar(client)
     with factory() as session, session.begin():
         session.execute(
             update(Connection).where(Connection.id == connection_id).values(status="needs_reauth")
+        )
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "reauth_probe"
+    assert body["created"] is True
+    # A probe, not a sync: the sync would only burn attempts on a refused token.
+    assert _sync_jobs(factory) == []
+    with factory() as session:
+        probe = session.scalars(select(Job).where(Job.job_type == "connection.reauth_probe")).one()
+    assert probe.idempotency_key == f"reauth_probe:{connection_id}"
+    assert connection_id in probe.payload_json
+
+
+def test_sync_on_an_errored_connection_is_allowed(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """The sweep retries ``error`` on its own; a manual request is not refused it."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    with factory() as session, session.begin():
+        session.execute(
+            update(Connection).where(Connection.id == connection_id).values(status="error")
+        )
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "sync"
+    assert len(_sync_jobs(factory)) == 1
+
+
+def test_sync_on_a_revoked_connection_is_409(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Only a new link can make a revoked connection sync; the route says so."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+    with factory() as session, session.begin():
+        session.execute(
+            update(Connection).where(Connection.id == connection_id).values(status="revoked")
         )
 
     response = client.post(
