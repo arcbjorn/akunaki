@@ -40,6 +40,32 @@ class TokenExchangeFailure(StrEnum):
         }
 
 
+class RefreshOutcome(StrEnum):
+    """What a pre-fetch token refresh did, so a later 401 can be read correctly.
+
+    A 401 on its own says only that the token in hand was refused. Whether the
+    *grant* is dead — the question that decides between a retry and demanding
+    re-consent — depends on where that token came from, which is what this
+    records.
+    """
+
+    NOT_DUE = "not_due"
+    """The stored token had time left; no refresh was attempted."""
+
+    UNAVAILABLE = "unavailable"
+    """Nothing to refresh with: no refresh token stored, or no OAuth client."""
+
+    REFRESHED = "refreshed"
+    """A new access token was obtained (and persisted when possible)."""
+
+    GRANT_REFUSED = "grant_refused"
+    """The provider answered ``invalid_grant``: the refresh token is dead."""
+
+    FAILED = "failed"
+    """The refresh could not complete — transport, 5xx, a misconfigured client,
+    a malformed body. Nothing is known about the grant."""
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthTokens:
     """Tokens returned by a provider's token endpoint.
