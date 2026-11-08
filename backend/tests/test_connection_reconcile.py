@@ -164,3 +164,123 @@ def test_stale_query_respects_limit(factory: sessionmaker[Session]) -> None:
         _link(repo, connection_id=f"c-{i}", tenant_id=f"tenant-{i}", now=T0 - timedelta(days=1))
     cutoff = to_utc_rfc3339(T0)
     assert len(repo.stale_connections(cutoff=cutoff, limit=3)) == 3
+
+
+# ---------------------------------------------------------------------------
+# Every successful window stamps health — not only the initial backfill
+# ---------------------------------------------------------------------------
+
+
+def test_record_sync_success_stamps_health_and_restores_error(
+    factory: sessionmaker[Session],
+) -> None:
+    """Until 2026-11-08 only the initial sync wrote ``last_success_at``.
+
+    Every connection then read as last-synced on its link day for as long as
+    it lived, and one dead-lettered fetch left ``status = error`` for good
+    while thousands of later windows succeeded.
+    """
+    repo = ConnectionRepository(factory)
+    _link(repo, connection_id="conn-1", tenant_id="tenant-0", now=T0)
+    repo.mark_status(
+        connection_id="conn-1",
+        status=ConnectionStatus.ERROR,
+        now=T0 + timedelta(hours=1),
+        error_class="provider_error",
+    )
+
+    synced_at = T0 + timedelta(hours=2)
+    assert repo.record_sync_success(connection_id="conn-1", now=synced_at) is True
+
+    connection = repo.get_connection(connection_id="conn-1")
+    assert connection is not None
+    assert connection.status is ConnectionStatus.ACTIVE
+    with factory() as session:
+        health = session.get(ConnectionHealth, "conn-1")
+    assert health is not None
+    assert health.last_success_at == to_utc_rfc3339(synced_at)
+    assert health.last_error_class is None
+    assert health.consecutive_failures == 0
+
+
+def test_record_sync_success_leaves_needs_reauth_and_revoked_alone(
+    factory: sessionmaker[Session],
+) -> None:
+    """A secondary stream can succeed on a token the primary's grant refuses.
+
+    Only a refresh verdict lifts ``needs_reauth``; nothing undoes ``revoked``.
+    The success is still stamped on health, since it did happen.
+    """
+    repo = ConnectionRepository(factory)
+    for connection_id, tenant_id, status in (
+        ("parked", "tenant-1", ConnectionStatus.NEEDS_REAUTH),
+        ("gone", "tenant-2", ConnectionStatus.REVOKED),
+    ):
+        _link(repo, connection_id=connection_id, tenant_id=tenant_id, now=T0)
+        repo.mark_status(connection_id=connection_id, status=status, now=T0)
+
+        assert repo.record_sync_success(connection_id=connection_id, now=T0 + timedelta(hours=1))
+
+        connection = repo.get_connection(connection_id=connection_id)
+        assert connection is not None
+        assert connection.status is status
+        with factory() as session:
+            health = session.get(ConnectionHealth, connection_id)
+        assert health is not None
+        assert health.last_success_at == to_utc_rfc3339(T0 + timedelta(hours=1))
+
+
+def test_record_sync_success_on_an_unknown_connection_is_false(
+    factory: sessionmaker[Session],
+) -> None:
+    assert ConnectionRepository(factory).record_sync_success(connection_id="nope", now=T0) is False
+
+
+def test_record_sync_success_makes_a_fresh_connection_not_stale(
+    factory: sessionmaker[Session],
+) -> None:
+    """The stamp is what keeps the sweep from refetching a connection every tick."""
+    repo = ConnectionRepository(factory)
+    _link(repo, connection_id="conn-1", tenant_id="tenant-3", now=T0 - timedelta(days=2))
+    cutoff = to_utc_rfc3339(T0 - timedelta(hours=6))
+    assert {cid for cid, _, _ in repo.stale_connections(cutoff=cutoff)} == {"conn-1"}
+
+    repo.record_sync_success(connection_id="conn-1", now=T0)
+
+    assert repo.stale_connections(cutoff=cutoff) == []
+
+
+# ---------------------------------------------------------------------------
+# Reauth candidates
+# ---------------------------------------------------------------------------
+
+
+def test_reauth_candidates_are_parked_connections_not_probed_recently(
+    factory: sessionmaker[Session],
+) -> None:
+    repo = ConnectionRepository(factory)
+    # Parked a day ago: due for a probe.
+    _link(repo, connection_id="due", tenant_id="tenant-4", now=T0 - timedelta(days=2))
+    repo.mark_status(
+        connection_id="due", status=ConnectionStatus.NEEDS_REAUTH, now=T0 - timedelta(days=1)
+    )
+    # Probed (re-stamped) an hour ago: wait for the interval.
+    _link(repo, connection_id="recent", tenant_id="tenant-5", now=T0 - timedelta(days=2))
+    repo.mark_status(
+        connection_id="recent", status=ConnectionStatus.NEEDS_REAUTH, now=T0 - timedelta(hours=1)
+    )
+    # Not parked at all.
+    _link(repo, connection_id="fine", tenant_id="tenant-6", now=T0 - timedelta(days=2))
+    _link(repo, connection_id="errored", tenant_id="tenant-7", now=T0 - timedelta(days=2))
+    repo.mark_status(
+        connection_id="errored",
+        status=ConnectionStatus.ERROR,
+        now=T0 - timedelta(days=1),
+        error_class="provider_error",
+    )
+
+    cutoff = to_utc_rfc3339(T0 - timedelta(hours=6))
+    candidates = repo.reauth_candidates(cutoff=cutoff)
+
+    assert candidates == [("due", "tenant-4", "oura")]
+    assert len(repo.reauth_candidates(cutoff=cutoff, limit=0)) == 0
