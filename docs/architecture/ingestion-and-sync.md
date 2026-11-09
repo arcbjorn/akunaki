@@ -193,6 +193,10 @@ After a successful fetch page (or multi-page transaction boundary defined per co
 3. If the process crashes **before** commit: cursors unchanged → safe retry of the same window; the content-hash checks prevent duplicate **revisions** and duplicate transport rows alike.
 4. If the process crashes **after** commit but before normalize completes: outbox/jobs remain → normalize retries idempotently by `raw_revision_id`.
 
+### Google Health streams
+
+Five v4 data types, in three scopes: `sleep` (sleep scope), `steps` and `active-minutes` (activity scope, read as daily roll-ups), and the daily heart summaries `daily-resting-heart-rate` and `daily-heart-rate-variability` (health-metrics scope). The two heart summaries are separate streams that normalize into the same overnight-vitals fact; the versioned write merges the halves as each lands, as it does for steps and active minutes. A vitals stream is skipped by the sweep while the connection's grant predates its scope, so adding the scope means re-linking, not a failing stream.
+
 ### Vendor window ceilings
 
 Google Health refuses a request wider than its per-type ceiling (14 days for active minutes, 90 otherwise). The connector clamps the window to the ceiling and, when it had to, hands back a synthetic `window:<end>` page token once the vendor's own pages run out; the next fetch resumes the walk from there, newest piece first. The handler's page loop needs no knowledge of this, and its page cap still bounds the walk.
