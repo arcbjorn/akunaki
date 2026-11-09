@@ -432,8 +432,11 @@ class InitialSyncHandler:
         connection_id = payload["connection_id"]
         now = self._clock()
 
-        # Backfill window: a fixed lookback ending now.
-        window_start = now - timedelta(days=self._config.lookback_days) - self._config.overlap
+        # Backfill window: a fixed lookback ending now. A manual backfill
+        # carries its own lookback in the payload; the link flow carries none
+        # and gets the configured default.
+        lookback_days = _lookback_days(payload, default=self._config.lookback_days)
+        window_start = now - timedelta(days=lookback_days) - self._config.overlap
 
         new_revisions = self.recorded_sync_window(
             claim=claim,
@@ -459,7 +462,7 @@ class InitialSyncHandler:
                     "connection_id": connection_id,
                     "provider": self._fetch.provider,
                     "stream": self._config.stream,
-                    "lookback_days": self._config.lookback_days,
+                    "lookback_days": lookback_days,
                     "hint": "verify the granted OAuth scopes cover this stream",
                 },
             )
@@ -1193,6 +1196,22 @@ def parse_connection_payload(payload_json: str) -> dict[str, str]:
         msg = "payload must contain connection_id"
         raise PermanentJobError(msg)
     return {str(k): v for k, v in parsed.items()}
+
+
+def _lookback_days(payload: dict[str, str], *, default: int) -> int:
+    """The payload's ``lookback_days`` override, or ``default`` when absent."""
+    raw = payload.get("lookback_days")
+    if raw is None:
+        return default
+    try:
+        days = int(raw)
+    except (TypeError, ValueError) as exc:
+        msg = "lookback_days must be an integer"
+        raise PermanentJobError(msg) from exc
+    if days < 1:
+        msg = "lookback_days must be >= 1"
+        raise PermanentJobError(msg)
+    return days
 
 
 def _id_stream(new_id: Callable[[], str]) -> Iterator[str]:
