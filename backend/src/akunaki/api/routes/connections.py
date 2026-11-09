@@ -46,6 +46,7 @@ from akunaki.api.security import CurrentSession
 from akunaki.application.backfill_request import BackfillRequestService
 from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.oauth_linking import LinkRejection, OAuthLinkingService
+from akunaki.application.sync_handlers import GOOGLE_HEALTH_METRICS_SCOPE
 from akunaki.application.sync_request import SyncKind, SyncRequestRejection, SyncRequestService
 from akunaki.config import ConnectorOAuthConfig, Settings
 from akunaki.domain.audit import ActorType, AuditAction
@@ -540,15 +541,18 @@ DEFAULT_SCOPES: dict[str, tuple[str, ...]] = {
     # endpoint ("Some requested scopes were invalid"). Both strings below were
     # verified against the live authorize endpoint on 2026-08-13.
     #
-    # Two scopes, because they gate different data types: sleep covers the
-    # `sleep` type, while `steps` / `active-minutes` (the daily-activity facts
-    # feeding the low-activity anomaly) sit behind activity_and_fitness. An
-    # under-scoped token fails these loudly with 403 PERMISSION_DENIED rather
-    # than returning an empty page, so a missing scope is not mistaken for an
-    # account that has no data.
+    # Three scopes, because they gate different data types: sleep covers the
+    # `sleep` type, `steps` / `active-minutes` (the daily-activity facts
+    # feeding the low-activity anomaly) sit behind activity_and_fitness, and
+    # the daily resting-HR / HRV summaries (overnight vitals) behind
+    # health_metrics_and_measurements. An under-scoped token fails these
+    # loudly with 403 PERMISSION_DENIED rather than returning an empty page,
+    # so a missing scope is not mistaken for an account that has no data; the
+    # sweep skips a vitals stream whose grant predates its scope.
     "google_health": (
         "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
         "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+        GOOGLE_HEALTH_METRICS_SCOPE,
     ),
 }
 
