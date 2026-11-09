@@ -12,6 +12,7 @@ import json
 from datetime import UTC, datetime
 
 from akunaki.application.sync_request import (
+    SyncKind,
     SyncRequestOutcome,
     SyncRequestRejection,
     SyncRequestService,
@@ -19,6 +20,7 @@ from akunaki.application.sync_request import (
 from akunaki.domain.connections import ConnectionStatus, LinkedConnection, Provider
 from akunaki.domain.jobs import (
     INCREMENTAL_SYNC_JOB_TYPE,
+    INITIAL_SYNC_JOB_TYPE,
     REAUTH_PROBE_JOB_TYPE,
     EnqueuedJob,
     JobRole,
@@ -86,7 +88,7 @@ def test_an_errored_connection_gets_a_sync() -> None:
     outcome, jobs = _request(ConnectionStatus.ERROR)
 
     assert isinstance(outcome, SyncRequestOutcome)
-    assert outcome.probe is False
+    assert outcome.kind is SyncKind.SYNC
     assert [kind for kind, _, _ in jobs.enqueued] == [INCREMENTAL_SYNC_JOB_TYPE]
 
 
@@ -95,7 +97,7 @@ def test_a_needs_reauth_connection_gets_a_probe_keyed_like_the_sweeps() -> None:
     outcome, jobs = _request(ConnectionStatus.NEEDS_REAUTH)
 
     assert isinstance(outcome, SyncRequestOutcome)
-    assert outcome.probe is True
+    assert outcome.kind is SyncKind.REAUTH_PROBE
     assert outcome.job_id == "job-1"
     job_type, payload_json, key = jobs.enqueued[0]
     assert job_type == REAUTH_PROBE_JOB_TYPE
@@ -114,7 +116,43 @@ def test_an_active_connection_still_gets_a_plain_sync() -> None:
     outcome, jobs = _request(ConnectionStatus.ACTIVE)
 
     assert isinstance(outcome, SyncRequestOutcome)
-    assert outcome.probe is False
+    assert outcome.kind is SyncKind.SYNC
     job_type, _, key = jobs.enqueued[0]
     assert job_type == INCREMENTAL_SYNC_JOB_TYPE
     assert key == "manual_sync:conn-1:k1"
+
+
+def test_a_backfill_queues_one_initial_sync_per_stream_with_the_lookback() -> None:
+    jobs = _FakeJobs()
+    service = SyncRequestService(
+        connections=_FakeConnections(ConnectionStatus.ACTIVE), jobs=jobs, new_id=lambda: "job-1"
+    )
+
+    outcome = service.request_sync(
+        tenant_id="tenant-1", connection_id="conn-1", idempotency_key="k1", now=T0, backfill_days=60
+    )
+
+    assert isinstance(outcome, SyncRequestOutcome)
+    assert outcome.kind is SyncKind.BACKFILL
+    assert outcome.created is True
+    # Google Health has three streams; each gets its own job and key.
+    assert {job_type for job_type, _, _ in jobs.enqueued} == {INITIAL_SYNC_JOB_TYPE}
+    assert len(jobs.enqueued) == 3
+    for _job_type, payload_json, key in jobs.enqueued:
+        payload = json.loads(payload_json)
+        assert payload["lookback_days"] == 60
+        assert key == f"backfill:conn-1:{payload['stream']}:k1"
+
+
+def test_a_backfill_on_a_revoked_connection_is_still_refused() -> None:
+    jobs = _FakeJobs()
+    service = SyncRequestService(
+        connections=_FakeConnections(ConnectionStatus.REVOKED), jobs=jobs, new_id=lambda: "job-1"
+    )
+
+    outcome = service.request_sync(
+        tenant_id="tenant-1", connection_id="conn-1", idempotency_key="k1", now=T0, backfill_days=60
+    )
+
+    assert outcome is SyncRequestRejection.NOT_SYNCABLE
+    assert jobs.enqueued == []
