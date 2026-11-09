@@ -52,6 +52,7 @@ from akunaki.domain.vitals_normalizer import (
 )
 from akunaki.domain.vitals_normalizer import (
     VitalsFact,
+    merged_vitals_fact,
 )
 from akunaki.domain.workout_normalizer import (
     ENTITY_TYPE as WORKOUT_ENTITY_TYPE,
@@ -238,6 +239,9 @@ class FactRepository:
         if not fact_record_id or not tenant_id:
             msg = "fact_record_id and tenant_id must be non-empty"
             raise ValueError(msg)
+        # Oura and Google Health both write vitals now, and the sleep
+        # precedence ranks them by this column (see ``_daily_vital``).
+        provider = _require_provider(schema_version)
 
         now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
 
@@ -249,6 +253,11 @@ class FactRepository:
                     FactRecord.is_current == 1,
                 )
             ).scalar_one_or_none()
+
+            # Google Health reports resting HR and HRV on separate streams, so
+            # a day's vitals land in halves; carry the absent half forward from
+            # the version being superseded, exactly as daily activity does.
+            fact = _merge_vitals_signals(fact, current, session)
 
             if current is not None and current.content_hash == fact.content_hash:
                 return FactWriteOutcome(
@@ -278,7 +287,7 @@ class FactRepository:
                     id=fact_record_id,
                     tenant_id=tenant_id,
                     connection_id=connection_id,
-                    provider="oura",
+                    provider=provider,
                     entity_type=VITALS_ENTITY_TYPE,
                     vendor_record_id=fact.vendor_record_id,
                     origin=None,
@@ -1299,6 +1308,30 @@ def _authoritative_per_day(by_day: dict[str, dict[str, float]]) -> dict[str, flo
         if chosen is not None:
             result[day] = per_provider[chosen]
     return result
+
+
+def _merge_vitals_signals(
+    fact: VitalsFact,
+    current: FactRecord | None,
+    session: Session,
+) -> VitalsFact:
+    """Fill a fact's absent vitals from the version it supersedes.
+
+    Returns ``fact`` unchanged when there is no prior version or nothing to
+    carry forward, so a first write and a full-signal write are untouched.
+    """
+    if current is None:
+        return fact
+    detail = session.get(OvernightVitals, current.id)
+    if detail is None:
+        return fact
+    return merged_vitals_fact(
+        fact,
+        hrv_ms=detail.hrv_ms,
+        resting_hr_bpm=detail.resting_hr_bpm,
+        temperature_deviation_c=detail.temperature_deviation_c,
+        respiratory_rate_bpm=detail.respiratory_rate_bpm,
+    )
 
 
 def _merge_activity_signals(
