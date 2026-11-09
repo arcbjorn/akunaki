@@ -29,28 +29,23 @@ def test_polar_supplies_workouts_only() -> None:
     assert capabilities_for("polar").capabilities == (Capability.WORKOUTS,)
 
 
-def test_google_health_supplies_sleep_without_vitals() -> None:
-    """The v4 backfill fetches sleep; no vitals stream is wired."""
-    assert capabilities_for("google_health").capabilities == (Capability.SLEEP,)
+def test_google_health_supplies_sleep_and_overnight_vitals() -> None:
+    """The v4 backfill fetches band sleep plus the daily resting-HR and HRV summaries."""
+    assert capabilities_for("google_health").capabilities == (
+        Capability.SLEEP,
+        Capability.OVERNIGHT_VITALS,
+    )
 
 
-def test_only_oura_can_reach_the_recovery_gate_alone() -> None:
+def test_a_sleep_and_vitals_provider_reaches_the_recovery_gate_alone() -> None:
     """The gate needs sleep adherence plus HRV or resting HR.
 
-    Stated per provider so a user linking Polar or Google Health alone learns
-    up front why no score appears, instead of reading ``insufficient`` forever.
+    Stated per provider so a user linking Polar alone learns up front why no
+    score appears, instead of reading ``insufficient`` forever.
     """
     assert capabilities_for("oura").supports_recovery_score is True
+    assert capabilities_for("google_health").supports_recovery_score is True
     assert capabilities_for("polar").supports_recovery_score is False
-    assert capabilities_for("google_health").supports_recovery_score is False
-
-
-def test_sleep_alone_does_not_claim_a_recovery_score() -> None:
-    """Sleep without overnight vitals fails the gate's second half."""
-    described = capabilities_for("google_health")
-
-    assert Capability.SLEEP in described.capabilities
-    assert described.supports_recovery_score is False
 
 
 def test_an_unknown_provider_raises() -> None:
