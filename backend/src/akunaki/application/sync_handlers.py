@@ -37,6 +37,7 @@ from akunaki.domain.activity_normalizer import (
 from akunaki.domain.connections import ConnectionStatus
 from akunaki.domain.fetch import FetchFailure
 from akunaki.domain.google_sleep_normalizer import normalize_google_sleep_payload
+from akunaki.domain.google_vitals_normalizer import normalize_google_vitals_payload
 from akunaki.domain.jobs import (
     INCREMENTAL_SYNC_JOB_TYPE,
     INITIAL_SYNC_JOB_TYPE,
@@ -88,6 +89,7 @@ logger = logging.getLogger("akunaki.sync_handlers")
 # Re-exported from domain so callers can register handlers without reaching
 # into akunaki.domain.jobs for a job-type string.
 __all__ = [
+    "GOOGLE_HEALTH_METRICS_SCOPE",
     "INCREMENTAL_SYNC_JOB_TYPE",
     "INITIAL_SYNC_JOB_TYPE",
     "NORMALIZE_JOB_TYPE",
@@ -236,8 +238,22 @@ _PROVIDER_ALL_STREAMS: dict[str, tuple[tuple[str, str], ...]] = {
         # which the versioned write merges as each lands.
         ("steps", "google_health_activity.v4"),
         ("active_minutes", "google_health_activity.v4"),
+        # Overnight vitals from a band: resting HR and HRV are separate daily
+        # data types, so separate streams; both normalize into the same
+        # overnight-vitals fact, which the versioned write merges as each
+        # lands. Behind a scope the first two Google scopes do not cover.
+        ("resting_heart_rate", "google_health_vitals.v4"),
+        ("heart_rate_variability", "google_health_vitals.v4"),
     ),
 }
+
+# The Google Health scope the heart-summary data types sit behind. Sleep and
+# activity have their own scopes (requested at link time, see the API's
+# ``DEFAULT_SCOPES``); a grant made before this scope was requested lacks it,
+# so the vitals streams are gated on it until the user re-links.
+GOOGLE_HEALTH_METRICS_SCOPE = (
+    "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly"
+)
 
 
 # The OAuth scope each Oura stream needs beyond ``daily``. Oura publishes no
@@ -245,8 +261,9 @@ _PROVIDER_ALL_STREAMS: dict[str, tuple[tuple[str, str], ...]] = {
 # endpoint), so this was read off the vendor's own 401 bodies on 2026-09-06 —
 # "Token is not authorized access workout scope." — against a grant holding
 # only ``daily``. A stream absent here is served by ``daily``. Polar's single
-# ``accesslink.read_all`` and Google's two scopes are requested in full at link
-# time, so nothing is gated for them.
+# ``accesslink.read_all`` is requested in full at link time, so nothing is
+# gated for it. Google records granted scopes as full URLs, so its gate
+# compares the URL.
 _OURA_STREAM_SCOPES: dict[str, str] = {
     "workout": "workout",
     "session": "session",
@@ -255,7 +272,14 @@ _OURA_STREAM_SCOPES: dict[str, str] = {
     "daily_cardiovascular_age": "heart_health",
     "vo2_max": "heart_health",
 }
-_PROVIDER_STREAM_SCOPES: dict[str, dict[str, str]] = {"oura": _OURA_STREAM_SCOPES}
+_GOOGLE_STREAM_SCOPES: dict[str, str] = {
+    "resting_heart_rate": GOOGLE_HEALTH_METRICS_SCOPE,
+    "heart_rate_variability": GOOGLE_HEALTH_METRICS_SCOPE,
+}
+_PROVIDER_STREAM_SCOPES: dict[str, dict[str, str]] = {
+    "oura": _OURA_STREAM_SCOPES,
+    "google_health": _GOOGLE_STREAM_SCOPES,
+}
 
 # Oura records a granted scope as ``extapi:daily``; the request form is ``daily``.
 _SCOPE_PREFIXES = ("extapi:",)
@@ -1410,6 +1434,12 @@ class NormalizeHandler:
             elif revision.schema_version.startswith("google_activity."):
                 written, affected_days = self._normalize_activity(claim, revision, now)
                 activity_bearing = True
+            elif revision.schema_version.startswith("google_health_vitals."):
+                # Before the bare ``google_health.`` branch, which would read
+                # a heart summary as a sleep page. Vitals change no selection
+                # (the sleep precedence already ranks them); the recompute
+                # below picks them up.
+                written, affected_days = self._normalize_google_vitals(claim, revision, now)
             elif revision.schema_version.startswith("google_health."):
                 written, affected_days = self._normalize_google_sleep(claim, revision, now)
                 sleep_bearing = True
@@ -1551,6 +1581,30 @@ class NormalizeHandler:
         written = 0
         for fact in facts:
             outcome = self._facts.write_sleep_fact(
+                fact_record_id=self._new_id(),
+                tenant_id=claim.tenant_id,
+                connection_id=revision.connection_id,
+                fact=fact,
+                raw_revision_id=revision.revision_id,
+                raw_payload_id=revision.raw_payload_id,
+                schema_version=revision.schema_version,
+                now=now,
+            )
+            if outcome.is_new_version:
+                written += 1
+        return written, {fact.local_health_day for fact in facts}
+
+    def _normalize_google_vitals(
+        self,
+        claim: JobClaim,
+        revision: RevisionBody,
+        now: datetime,
+    ) -> tuple[int, set[str]]:
+        """Normalize a Google Health daily heart-summary revision into vitals facts."""
+        facts = normalize_google_vitals_payload(revision.payload_text)
+        written = 0
+        for fact in facts:
+            outcome = self._facts.write_vitals_fact(
                 fact_record_id=self._new_id(),
                 tenant_id=claim.tenant_id,
                 connection_id=revision.connection_id,
