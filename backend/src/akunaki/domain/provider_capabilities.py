@@ -77,9 +77,12 @@ _CAPABILITIES: dict[str, tuple[Capability, ...]] = {
     # Polar backfills the AccessLink exercises list only. No sleep, no vitals —
     # this is the connection a user is most likely to misjudge.
     "polar": (Capability.WORKOUTS,),
-    # Google Health backfills v4 Fitbit-origin sleep. The connector fetches no
-    # vitals stream today, so it cannot satisfy the recovery gate alone.
-    "google_health": (Capability.SLEEP,),
+    # Google Health backfills v4 band-origin sleep plus the daily resting-HR
+    # and HRV summaries the vitals normalizer turns into overnight vitals, so
+    # a band alone can satisfy the recovery gate. The vitals streams sit
+    # behind a scope an older grant lacks; until the user re-links they are
+    # skipped, and the capability is what a current link provides.
+    "google_health": (Capability.SLEEP, Capability.OVERNIGHT_VITALS),
 }
 
 
