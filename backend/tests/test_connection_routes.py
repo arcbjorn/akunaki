@@ -497,6 +497,49 @@ def test_sync_on_an_errored_connection_is_allowed(
     assert len(_sync_jobs(factory)) == 1
 
 
+def test_sync_with_backfill_days_queues_a_wide_window_per_stream(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    """Days a parked connection missed are out of reach of an incremental sync."""
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync?backfill_days=60",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "backfill"
+    assert _sync_jobs(factory) == []
+    # The link itself queued the default backfill; these are the wide ones.
+    with factory() as session:
+        wide = session.scalars(
+            select(Job).where(
+                Job.job_type == "connection.initial_sync",
+                Job.payload_json.contains('"lookback_days": 60'),
+            )
+        ).all()
+    assert len(wide) == len(streams_for_provider("polar"))
+    assert {job.idempotency_key for job in wide} == {
+        f"backfill:{connection_id}:{stream}:k1" for stream, _ in streams_for_provider("polar")
+    }
+
+
+def test_an_out_of_range_backfill_is_422(
+    client: TestClient, factory: sessionmaker[Session]
+) -> None:
+    csrf = _login(client, factory)
+    connection_id = _link_polar(client)
+
+    response = client.post(
+        f"/v1/connections/{connection_id}/sync?backfill_days=0",
+        headers={CSRF_HEADER_NAME: csrf, "Idempotency-Key": "k1"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_sync_on_a_revoked_connection_is_409(
     client: TestClient, factory: sessionmaker[Session]
 ) -> None:
