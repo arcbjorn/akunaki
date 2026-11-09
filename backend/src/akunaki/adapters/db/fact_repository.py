@@ -74,6 +74,19 @@ class FactWriteOutcome:
     superseded_id: str | None = None
 
 
+def _require_provider(schema_version: str) -> str:
+    """Provider that owns ``schema_version``; a miss is a wiring gap, not data.
+
+    The column is NOT NULL, so the only alternatives are a guessed provider
+    (silently mis-ranked by the source policy) or failing here.
+    """
+    provider = provider_for_schema_version(schema_version)
+    if provider is None:
+        msg = f"no provider for schema version {schema_version!r}"
+        raise ValueError(msg)
+    return provider
+
+
 class FactRepository:
     """Persist versioned facts and their typed detail rows."""
 
@@ -96,6 +109,11 @@ class FactRepository:
         if not fact_record_id or not tenant_id:
             msg = "fact_record_id and tenant_id must be non-empty"
             raise ValueError(msg)
+        # Two connectors write sleep (Oura, and Google Health relaying a
+        # band). The source policy ranks candidates by this column, so a fixed
+        # label let relayed band sleep pose as ring data; see the activity
+        # writer for why the schema version is the honest answer.
+        provider = _require_provider(schema_version)
 
         now_s = to_utc_rfc3339(require_aware(now, field_name="now"))
 
@@ -141,7 +159,7 @@ class FactRepository:
                     id=fact_record_id,
                     tenant_id=tenant_id,
                     connection_id=connection_id,
-                    provider="oura",
+                    provider=provider,
                     entity_type=ENTITY_TYPE,
                     vendor_record_id=fact.vendor_record_id,
                     origin=None,
@@ -456,10 +474,7 @@ class FactRepository:
         # the only alternatives are a guessed provider (which would silently
         # mis-rank it in source selection) or failing here. A schema version with
         # no provider is a wiring gap in the connector, not a data condition.
-        provider = provider_for_schema_version(schema_version)
-        if provider is None:
-            msg = f"no provider for schema version {schema_version!r}"
-            raise ValueError(msg)
+        provider = _require_provider(schema_version)
 
         with self._session_factory() as session, session.begin():
             current = session.execute(
