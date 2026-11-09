@@ -305,3 +305,31 @@ def test_a_window_wider_than_the_ceiling_is_walked_in_pieces() -> None:
     assert token is None
     # A pageToken from the vendor is never confused with the walk's own token.
     assert all("pageToken" not in b for b in bodies)
+
+
+def test_daily_summaries_filter_on_a_civil_date_window() -> None:
+    """Resting-HR and HRV summaries are keyed by date, not by an instant."""
+    seen: list[httpx2.Request] = []
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json={"dataPoints": []})
+
+    result = _client(capture).fetch_page(
+        access_token="AT",
+        stream="resting_heart_rate",
+        window_start=WINDOW_START,
+        window_end=WINDOW_END,
+        page_token=None,
+        now=T0,
+    )
+
+    assert result.ok
+    [request] = seen
+    assert request.method == "GET"
+    assert request.url.path.endswith("/dataTypes/daily-resting-heart-rate/dataPoints")
+    # Half-open on dates: the bound after the window's last day keeps it inside.
+    assert request.url.params["filter"] == (
+        'daily_resting_heart_rate.date >= "2026-06-24"'
+        ' AND daily_resting_heart_rate.date < "2026-07-23"'
+    )
