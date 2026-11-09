@@ -27,12 +27,11 @@ confirmation bound to that exact call.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from akunaki.application.connections_surface import ConnectionsSurfaceService
-from akunaki.application.sync_request import SyncRequestRejection, SyncRequestService
+from akunaki.application.sync_request import SyncKind, SyncRequestRejection, SyncRequestService
 from akunaki.application.tool_registry import (
     ConfirmationPolicy,
     Sensitivity,
@@ -132,6 +131,16 @@ class SyncInput(BaseModel):
     """Which connection to refetch now."""
 
     connection_id: str = Field(min_length=1)
+    backfill_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=365,
+        description=(
+            "Refetch this many days per stream instead of an incremental sync. "
+            "Incremental windows are narrow, so days missed while a connection "
+            "was parked need this."
+        ),
+    )
 
 
 class SyncOutput(BaseModel):
@@ -141,12 +150,13 @@ class SyncOutput(BaseModel):
     created: bool = Field(
         description="False when an identical job was already in flight (deduped).",
     )
-    kind: Literal["sync", "reauth_probe"] = Field(
-        default="sync",
+    kind: SyncKind = Field(
+        default=SyncKind.SYNC,
         description=(
             "`reauth_probe` when the connection needs re-authorization: the job "
             "re-checks the stored grant and restores the connection if it still "
-            "works; otherwise the user must re-link."
+            "works; otherwise the user must re-link. `backfill` when "
+            "`backfill_days` was given."
         ),
     )
 
@@ -173,6 +183,7 @@ def sync_connection_tool(service: SyncRequestService) -> Tool[SyncInput, SyncOut
             # connection id alone collapses repeats while one is in flight.
             idempotency_key=context.user_id,
             now=datetime.now(UTC),
+            backfill_days=inputs.backfill_days,
         )
         if outcome is SyncRequestRejection.NOT_FOUND:
             msg = "connection not found"
@@ -183,7 +194,7 @@ def sync_connection_tool(service: SyncRequestService) -> Tool[SyncInput, SyncOut
         return SyncOutput(
             job_id=outcome.job_id,
             created=outcome.created,
-            kind="reauth_probe" if outcome.probe else "sync",
+            kind=outcome.kind,
         )
 
     return Tool(
