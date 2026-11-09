@@ -265,3 +265,43 @@ def test_sleep_never_filters_on_start_time() -> None:
     # The rejected member must not appear in any position.
     assert "start_time" not in filter_expr
     assert "startTime" not in filter_expr
+
+
+def test_a_window_wider_than_the_ceiling_is_walked_in_pieces() -> None:
+    """A 30-day active-minutes backfill reaches Google as three requests, newest first.
+
+    The vendor caps `active-minutes` at 14 days per request. Rather than
+    silently dropping the older 16 days, the client hands back a synthetic
+    page token that resumes the walk where the last piece began, so the
+    handler's ordinary page loop fetches the whole window.
+    """
+    bodies: list[dict[str, object]] = []
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(200, json={"rollupDataPoints": []})
+
+    client = _client(capture)
+    token: str | None = None
+    for _ in range(5):
+        result = client.fetch_page(
+            access_token="AT",
+            stream="active_minutes",
+            window_start=datetime(2026, 6, 22, tzinfo=UTC),
+            window_end=WINDOW_END,
+            page_token=token,
+            now=T0,
+        )
+        assert result.ok
+        assert result.envelope is not None
+        token = result.envelope.next_page_token
+        if token is None:
+            break
+
+    def day(body: dict[str, object], edge: str) -> int:
+        return body["range"][edge]["date"]["day"]  # type: ignore[index,no-any-return]
+
+    assert [(day(b, "start"), day(b, "end")) for b in bodies] == [(8, 22), (24, 8), (22, 24)]
+    assert token is None
+    # A pageToken from the vendor is never confused with the walk's own token.
+    assert all("pageToken" not in b for b in bodies)
