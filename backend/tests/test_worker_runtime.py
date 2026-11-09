@@ -370,6 +370,36 @@ def test_leader_runs_reaper_duties() -> None:
     assert worker.stats.dead_lettered_expired == 1
 
 
+def test_busy_store_skips_the_poll_instead_of_crashing() -> None:
+    class BusyRepo(FakeRepository):
+        def try_acquire_leader(
+            self, *, lease_name: str, owner: str, lease_ttl: timedelta, now: datetime
+        ) -> LeaderClaim | None:
+            msg = "database is locked"
+            raise ValueError(msg)
+
+    repo = BusyRepo(claims=[make_claim()])
+    worker = make_worker(repo)
+
+    assert worker.run_once() is False
+
+    assert worker.stats.store_busy == 1
+    assert worker.stats.claimed == 0
+    assert repo.completed == []
+
+
+def test_other_store_errors_still_propagate() -> None:
+    class BrokenRepo(FakeRepository):
+        def try_acquire_leader(
+            self, *, lease_name: str, owner: str, lease_ttl: timedelta, now: datetime
+        ) -> LeaderClaim | None:
+            msg = "disk gone"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="disk gone"):
+        make_worker(BrokenRepo()).run_once()
+
+
 def test_non_leader_never_reaps() -> None:
     # A passive standby must not requeue or dead-letter behind the active
     # worker's back.
