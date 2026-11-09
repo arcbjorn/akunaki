@@ -53,6 +53,11 @@ STREAM_DATA_TYPES = {
     "sleep": "sleep",
     "steps": "steps",
     "active_minutes": "active-minutes",
+    # Daily summaries a band derives from its overnight heart-rate samples;
+    # together they make the overnight-vitals fact. Behind the
+    # health_metrics_and_measurements scope.
+    "resting_heart_rate": "daily-resting-heart-rate",
+    "heart_rate_variability": "daily-heart-rate-variability",
 }
 # The filterable member for each stream's window.
 #
@@ -73,7 +78,14 @@ STREAM_FILTER_FIELDS = {
     "sleep": "sleep.interval.end_time",
     "steps": "steps.interval.start_time",
     "active_minutes": "active_minutes.interval.start_time",
+    # Daily summaries filter on their civil ``date`` (``YYYY-MM-DD``), not a
+    # timestamp; the member name follows the snake_case the other filters use.
+    "resting_heart_rate": "daily_resting_heart_rate.date",
+    "heart_rate_variability": "daily_heart_rate_variability.date",
 }
+
+# Filter members that take a civil date rather than an RFC 3339 instant.
+_DATE_MEMBER_SUFFIX = ".date"
 
 # Streams read through `dataPoints:dailyRollUp` (a POST) rather than the
 # `dataPoints` list GET. These data types are reported per **minute**, so the
@@ -97,6 +109,8 @@ STREAM_MAX_WINDOW_DAYS = {
     "sleep": 90,
     "steps": 90,
     "active_minutes": 14,
+    "resting_heart_rate": 90,
+    "heart_rate_variability": 90,
 }
 
 # A window wider than the ceiling is walked in pieces, newest first: when the
@@ -175,8 +189,15 @@ class GoogleHealthFetchClient:
 
         start_s = to_utc_rfc3339(start)
         end_s = to_utc_rfc3339(end)
-        # Half-open [start, end) window over the interval start time.
-        filter_expr = f'{filter_field} >= "{start_s}" AND {filter_field} < "{end_s}"'
+        if filter_field.endswith(_DATE_MEMBER_SUFFIX):
+            # Daily summaries are keyed by civil date. Half-open on dates, so
+            # the bound after the window's last day keeps that day inside it.
+            lo = start.date().isoformat()
+            hi = (end.date() + timedelta(days=1)).isoformat()
+            filter_expr = f'{filter_field} >= "{lo}" AND {filter_field} < "{hi}"'
+        else:
+            # Half-open [start, end) window over the interval start time.
+            filter_expr = f'{filter_field} >= "{start_s}" AND {filter_field} < "{end_s}"'
         params: dict[str, str] = {
             "filter": filter_expr,
             "pageSize": str(SLEEP_PAGE_SIZE),
