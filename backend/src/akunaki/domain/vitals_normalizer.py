@@ -154,47 +154,124 @@ def _normalize_record(record: dict[str, Any]) -> VitalsFact | None:
     if is_nap:
         return None
 
-    hrv_ms = _bounded(record.get("average_hrv"), low=0.0, high=_HRV_MAX_MS)
-    resting_hr_bpm = _bounded(record.get("lowest_heart_rate"), low=_RHR_MIN_BPM, high=_RHR_MAX_BPM)
-    temperature_deviation_c = _bounded(
-        _temperature_deviation(record), low=_TEMP_DEV_MIN_C, high=_TEMP_DEV_MAX_C
-    )
-    respiratory_rate_bpm = _bounded(
-        record.get("average_breath"), low=_RESP_MIN_BPM, high=_RESP_MAX_BPM
-    )
-    if (
-        hrv_ms is None
-        and resting_hr_bpm is None
-        and temperature_deviation_c is None
-        and respiratory_rate_bpm is None
-    ):
-        # No overnight signal on this record; nothing to persist.
-        return None
-
     offset_minutes = _offset_minutes(bedtime_end)
-    local_day = _wake_local_date(end, offset_minutes)
-    quality, confidence = _quality_for(
-        hrv=hrv_ms,
-        rhr=resting_hr_bpm,
-        temp=temperature_deviation_c,
-        resp=respiratory_rate_bpm,
-    )
-
-    fact = VitalsFact(
+    return build_vitals_fact(
         vendor_record_id=vendor_id,
         start_utc=to_utc_rfc3339(start),
         end_utc=to_utc_rfc3339(end),
-        local_health_day=local_day,
+        local_health_day=_wake_local_date(end, offset_minutes),
         source_offset_minutes=offset_minutes,
-        hrv_ms=hrv_ms,
-        resting_hr_bpm=resting_hr_bpm,
-        temperature_deviation_c=temperature_deviation_c,
-        respiratory_rate_bpm=respiratory_rate_bpm,
-        quality=quality,
-        confidence=confidence,
-        content_hash="",
+        hrv=record.get("average_hrv"),
+        resting_hr=record.get("lowest_heart_rate"),
+        temperature_deviation=_temperature_deviation(record),
+        respiratory_rate=record.get("average_breath"),
     )
-    return _with_content_hash(fact)
+
+
+def build_vitals_fact(
+    *,
+    vendor_record_id: str,
+    start_utc: str,
+    end_utc: str,
+    local_health_day: str,
+    source_offset_minutes: int | None,
+    hrv: object,
+    resting_hr: object,
+    temperature_deviation: object = None,
+    respiratory_rate: object = None,
+) -> VitalsFact | None:
+    """Bound, grade and hash one reading; None when it carries no signal.
+
+    Shared by every provider's vitals normalizer, so the sanity bounds and the
+    quality grade are one rule rather than one per connector. A value outside
+    its physiologic range is dropped, not stored; a reading left with no
+    signal at all yields no fact, since an empty row would violate the detail
+    table's "at least one" invariant and carry nothing.
+    """
+    hrv_ms = _bounded(hrv, low=0.0, high=_HRV_MAX_MS)
+    resting_hr_bpm = _bounded(resting_hr, low=_RHR_MIN_BPM, high=_RHR_MAX_BPM)
+    temperature_deviation_c = _bounded(
+        temperature_deviation, low=_TEMP_DEV_MIN_C, high=_TEMP_DEV_MAX_C
+    )
+    respiratory_rate_bpm = _bounded(respiratory_rate, low=_RESP_MIN_BPM, high=_RESP_MAX_BPM)
+    signals = (hrv_ms, resting_hr_bpm, temperature_deviation_c, respiratory_rate_bpm)
+    if all(value is None for value in signals):
+        return None
+    quality, confidence = _quality_for(
+        hrv=hrv_ms, rhr=resting_hr_bpm, temp=temperature_deviation_c, resp=respiratory_rate_bpm
+    )
+    return _with_content_hash(
+        VitalsFact(
+            vendor_record_id=vendor_record_id,
+            start_utc=start_utc,
+            end_utc=end_utc,
+            local_health_day=local_health_day,
+            source_offset_minutes=source_offset_minutes,
+            hrv_ms=hrv_ms,
+            resting_hr_bpm=resting_hr_bpm,
+            temperature_deviation_c=temperature_deviation_c,
+            respiratory_rate_bpm=respiratory_rate_bpm,
+            quality=quality,
+            confidence=confidence,
+            content_hash="",
+        )
+    )
+
+
+def merged_vitals_fact(
+    fact: VitalsFact,
+    *,
+    hrv_ms: float | None,
+    resting_hr_bpm: float | None,
+    temperature_deviation_c: float | None,
+    respiratory_rate_bpm: float | None,
+) -> VitalsFact:
+    """Return ``fact`` with absent signals filled in, and a matching hash.
+
+    A night's vitals can arrive on separate streams (Google Health reports
+    resting heart rate and HRV as different daily data types), so a newly
+    normalized fact may carry one signal and a null other. Filling the null
+    from the version being superseded keeps both measurements instead of the
+    later stream replacing the earlier one. A **present** value is never
+    replaced, and the hash is recomputed over the merged values so change
+    detection sees what is actually stored.
+    """
+    merged = (
+        fact.hrv_ms if fact.hrv_ms is not None else hrv_ms,
+        fact.resting_hr_bpm if fact.resting_hr_bpm is not None else resting_hr_bpm,
+        (
+            fact.temperature_deviation_c
+            if fact.temperature_deviation_c is not None
+            else temperature_deviation_c
+        ),
+        fact.respiratory_rate_bpm
+        if fact.respiratory_rate_bpm is not None
+        else respiratory_rate_bpm,
+    )
+    if merged == (
+        fact.hrv_ms,
+        fact.resting_hr_bpm,
+        fact.temperature_deviation_c,
+        fact.respiratory_rate_bpm,
+    ):
+        return fact
+    quality, confidence = _quality_for(hrv=merged[0], rhr=merged[1], temp=merged[2], resp=merged[3])
+    return _with_content_hash(
+        VitalsFact(
+            vendor_record_id=fact.vendor_record_id,
+            start_utc=fact.start_utc,
+            end_utc=fact.end_utc,
+            local_health_day=fact.local_health_day,
+            source_offset_minutes=fact.source_offset_minutes,
+            hrv_ms=merged[0],
+            resting_hr_bpm=merged[1],
+            temperature_deviation_c=merged[2],
+            respiratory_rate_bpm=merged[3],
+            quality=quality,
+            confidence=confidence,
+            content_hash="",
+        )
+    )
 
 
 def _temperature_deviation(record: dict[str, Any]) -> object:
