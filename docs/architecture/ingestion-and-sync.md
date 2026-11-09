@@ -167,7 +167,7 @@ Common flow:
 | **Initial backfill** | New connection; configurable lookback (e.g. 90 days) with overlap safety |
 | **Incremental** | Cursor-based or time-window; scheduled |
 | **Webhook-triggered** | Narrow window around event after inbox ack |
-| **Manual refresh** | User-initiated; rate-limited |
+| **Manual refresh** | User-initiated; rate-limited. With `backfill_days` it queues one initial sync per stream over that lookback instead — the only way to reach days a parked connection missed, since incremental windows are narrow (Google's is 14 days) |
 | **Scheduled reconciliation** | Gap fill independent of webhooks |
 | **Re-normalize** | Normalizer version bump; reuse raw payloads/revisions |
 | **Recompute** | Policy or formula version bump; reuse canonical inputs |
@@ -192,6 +192,10 @@ After a successful fetch page (or multi-page transaction boundary defined per co
 2. Commit.
 3. If the process crashes **before** commit: cursors unchanged → safe retry of the same window; the content-hash checks prevent duplicate **revisions** and duplicate transport rows alike.
 4. If the process crashes **after** commit but before normalize completes: outbox/jobs remain → normalize retries idempotently by `raw_revision_id`.
+
+### Vendor window ceilings
+
+Google Health refuses a request wider than its per-type ceiling (14 days for active minutes, 90 otherwise). The connector clamps the window to the ceiling and, when it had to, hands back a synthetic `window:<end>` page token once the vendor's own pages run out; the next fetch resumes the walk from there, newest piece first. The handler's page loop needs no knowledge of this, and its page cap still bounds the walk.
 
 ### Overlap windows
 
