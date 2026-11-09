@@ -112,6 +112,7 @@ def _write(
     fact: SleepFact,
     *,
     now: datetime = T0,
+    schema_version: str = "oura.v2",
 ) -> object:
     return FactRepository(factory).write_sleep_fact(
         fact_record_id=f"fact-{next(_IDS)}",
@@ -120,7 +121,7 @@ def _write(
         fact=fact,
         raw_revision_id=None,
         raw_payload_id=None,
-        schema_version="oura.v2",
+        schema_version=schema_version,
         now=now,
     )
 
@@ -145,6 +146,29 @@ def test_first_write_creates_version_one(factory: sessionmaker[Session]) -> None
     assert record.normalizer_version == NORMALIZER_VERSION
     assert record.local_health_day == "2026-07-19"
     assert detail.duration_min == 450.0
+
+
+def test_sleep_provider_comes_from_the_schema_version(
+    factory: sessionmaker[Session],
+) -> None:
+    _write(factory, _fact(id="ring"), schema_version="oura.v2")
+    _write(factory, _fact(id="band"), schema_version="google_health.v4")
+
+    with factory() as session:
+        rows = session.execute(
+            select(FactRecord.vendor_record_id, FactRecord.provider).where(
+                FactRecord.entity_type == ENTITY_TYPE
+            )
+        ).all()
+    assert {str(vendor_id): str(provider) for vendor_id, provider in rows} == {
+        "ring": "oura",
+        "band": "google_health",
+    }
+
+
+def test_unattributable_sleep_schema_is_rejected(factory: sessionmaker[Session]) -> None:
+    with pytest.raises(ValueError, match="no provider for schema version"):
+        _write(factory, _fact(), schema_version="mystery.v1")
 
 
 def test_detail_row_is_one_to_one_with_header(factory: sessionmaker[Session]) -> None:
