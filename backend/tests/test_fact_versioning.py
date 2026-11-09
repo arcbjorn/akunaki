@@ -24,6 +24,7 @@ from akunaki.adapters.db.models import (
     Connection,
     DailyActivity,
     FactRecord,
+    OvernightVitals,
     SleepSession,
     Tenant,
 )
@@ -37,6 +38,7 @@ from akunaki.domain.sleep_normalizer import (
     SleepFact,
     normalize_sleep_payload,
 )
+from akunaki.domain.vitals_normalizer import build_vitals_fact
 from conftest import upgrade_to_head
 
 T0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
@@ -682,3 +684,80 @@ def test_a_present_activity_signal_is_not_overwritten_by_an_older_one(
 
     assert detail is not None
     assert detail.steps == 9000
+
+
+# ---------------------------------------------------------------------------
+# Overnight vitals
+# ---------------------------------------------------------------------------
+
+
+def _write_vitals(
+    factory: sessionmaker[Session],
+    *,
+    hrv: float | None,
+    resting_hr: float | None,
+    schema_version: str = "google_health_vitals.v4",
+) -> None:
+    fact = build_vitals_fact(
+        vendor_record_id="google_vitals:2026-11-07",
+        start_utc="2026-11-07T00:00:00Z",
+        end_utc="2026-11-08T00:00:00Z",
+        local_health_day="2026-11-07",
+        source_offset_minutes=None,
+        hrv=hrv,
+        resting_hr=resting_hr,
+    )
+    assert fact is not None
+    FactRepository(factory).write_vitals_fact(
+        fact_record_id=f"vit-{next(_IDS)}",
+        tenant_id="tenant-1",
+        connection_id="conn-1",
+        fact=fact,
+        raw_revision_id=None,
+        raw_payload_id=None,
+        schema_version=schema_version,
+        now=T0,
+    )
+
+
+def _current_vitals(factory: sessionmaker[Session]) -> tuple[FactRecord, OvernightVitals]:
+    with factory() as session:
+        current = session.execute(
+            select(FactRecord).where(
+                FactRecord.entity_type == "overnight_vitals", FactRecord.is_current == 1
+            )
+        ).scalar_one()
+        detail = session.get(OvernightVitals, current.id)
+    assert detail is not None
+    return current, detail
+
+
+def test_vitals_halves_from_separate_streams_accumulate(factory: sessionmaker[Session]) -> None:
+    """Resting HR and HRV arrive on different Google streams for one night."""
+    _write_vitals(factory, hrv=None, resting_hr=52.0)
+    _write_vitals(factory, hrv=41.5, resting_hr=None)
+
+    current, detail = _current_vitals(factory)
+    assert (detail.hrv_ms, detail.resting_hr_bpm) == (41.5, 52.0)
+    # The merged night is graded as what it now holds: two signals.
+    assert current.quality == "high"
+    assert current.version_n == 2
+
+
+def test_a_present_vital_is_not_overwritten_by_an_older_half(
+    factory: sessionmaker[Session],
+) -> None:
+    _write_vitals(factory, hrv=41.5, resting_hr=52.0)
+    _write_vitals(factory, hrv=None, resting_hr=52.0)
+
+    current, detail = _current_vitals(factory)
+    # Nothing new was carried, so the write was a no-op on the same version.
+    assert (detail.hrv_ms, detail.resting_hr_bpm) == (41.5, 52.0)
+    assert current.version_n == 1
+
+
+def test_vitals_provider_comes_from_the_schema_version(factory: sessionmaker[Session]) -> None:
+    _write_vitals(factory, hrv=41.5, resting_hr=52.0)
+
+    current, _ = _current_vitals(factory)
+    assert current.provider == "google_health"
