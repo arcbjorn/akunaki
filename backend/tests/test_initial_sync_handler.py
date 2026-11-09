@@ -36,6 +36,7 @@ from akunaki.adapters.db.models import (
 from akunaki.adapters.db.sync_run_repository import SyncRunRecord, SyncRunRepository
 from akunaki.application.handlers import HandlerRegistry
 from akunaki.application.sync_handlers import (
+    DEFAULT_OVERLAP,
     INITIAL_SYNC_JOB_TYPE,
     NORMALIZE_JOB_TYPE,
     InitialSyncHandler,
@@ -230,6 +231,36 @@ def test_min_window_widens_a_short_initial_lookback(factory: sessionmaker[Sessio
     start_date = parse_qs(urlparse(captured[0]).query)["start_date"][0]
     # 14 days back from `now`, not the 3-day lookback the caller asked for.
     assert start_date == (T0 - timedelta(days=14)).date().isoformat()
+
+
+def test_payload_lookback_overrides_the_configured_default(
+    factory: sessionmaker[Session],
+) -> None:
+    """A manual backfill carries its own lookback; the link flow's default yields to it."""
+    captured: list[str] = []
+
+    def responder(request: httpx2.Request) -> httpx2.Response:
+        captured.append(str(request.url))
+        return httpx2.Response(200, text=PAGE_ONE, headers={"content-type": "application/json"})
+
+    _run_job(
+        factory,
+        _handler(factory, responder, config=SyncConfig(max_pages=5, lookback_days=3)),
+        payload='{"connection_id":"conn-1","lookback_days":60}',
+    )
+
+    start_date = parse_qs(urlparse(captured[0]).query)["start_date"][0]
+    assert start_date == (T0 - timedelta(days=60) - DEFAULT_OVERLAP).date().isoformat()
+
+
+def test_a_bad_payload_lookback_dead_letters(factory: sessionmaker[Session]) -> None:
+    worker = _run_job(
+        factory,
+        _handler(factory, _ok(PAGE_ONE)),
+        payload='{"connection_id":"conn-1","lookback_days":0}',
+    )
+
+    assert worker.stats.dead_lettered == 1
 
 
 def test_empty_backfill_warns_about_scopes(
