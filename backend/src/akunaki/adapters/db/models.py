@@ -527,6 +527,9 @@ class RawPayload(Base):
         CheckConstraint("length(content_hash) > 0", name="raw_payload_content_hash_nonempty"),
         Index("ix_raw_payload_connection_content_hash", "connection_id", "content_hash"),
         Index("ix_raw_payload_tenant_received_at", "tenant_id", "received_at"),
+        # Sync-run retention asks "is this run still cited?"; without this the
+        # answer is a scan of every page per run.
+        Index("ix_raw_payload_sync_run_id", "sync_run_id"),
     )
 
 
@@ -644,6 +647,7 @@ class RawRevision(Base):
         CheckConstraint("length(content_hash) > 0", name="raw_revision_content_hash_nonempty"),
         UniqueConstraint("raw_object_id", "revision_n", name="uq_raw_revisions_object_n"),
         Index("ix_raw_revisions_object_content_hash", "raw_object_id", "content_hash"),
+        Index("ix_raw_revisions_sync_run_id", "sync_run_id"),
     )
 
 
