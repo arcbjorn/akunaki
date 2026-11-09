@@ -33,6 +33,7 @@ from akunaki.domain.retry import (
     RetryPolicy,
     classify_exception,
     error_class_of,
+    is_lock_contention,
     redact_error_message,
 )
 from akunaki.domain.schedule import ScheduleSpec, due_schedules
@@ -102,6 +103,7 @@ class WorkerStats:
     idle_polls: int = 0
     scheduled: int = 0
     schedule_deduped: int = 0
+    store_busy: int = 0
 
 
 class JobWorker:
@@ -187,15 +189,30 @@ class JobWorker:
         Returns True when a job was claimed, so the caller can poll again
         immediately instead of idling while work remains.
         """
-        self._maybe_reap()
-
-        claim = self._repository.claim_next(
-            role=self._config.role,
-            owner=self._owner,
-            lease_ttl=self._config.lease_ttl,
-            now=self._clock(),
-            limit=self._config.claim_limit,
-        )
+        try:
+            self._maybe_reap()
+            claim = self._repository.claim_next(
+                role=self._config.role,
+                owner=self._owner,
+                lease_ttl=self._config.lease_ttl,
+                now=self._clock(),
+                limit=self._config.claim_limit,
+            )
+        except Exception as exc:
+            if not is_lock_contention(exc):
+                raise
+            # Another writer holds the file past the repository's retry budget
+            # (a long maintenance transaction, say). That is a busy store, not
+            # a broken worker: a job attempt hitting it is retried, so the loop
+            # must not die on it either — kubelet would restart the process
+            # into back-off and the tick would be lost. Skip this poll; the
+            # next one re-reads and the reaper re-arms after its interval.
+            self.stats.store_busy += 1
+            logger.warning(
+                "store busy; skipping this poll",
+                extra={"error_class": error_class_of(exc)},
+            )
+            return False
         if claim is None:
             return False
 
