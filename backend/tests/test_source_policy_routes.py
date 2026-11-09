@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from akunaki.adapters.db.engine import create_db_engine, create_session_factory
 from akunaki.adapters.db.fact_repository import FactRepository
-from akunaki.adapters.db.models import FactRecord, Tenant, User
+from akunaki.adapters.db.models import Tenant, User
 from akunaki.adapters.db.session_repository import SessionRepository
 from akunaki.adapters.db.source_selection_repository import SourceSelectionRepository
 from akunaki.api.app import create_app
@@ -121,14 +121,10 @@ def _seed_sleep(factory: sessionmaker[Session], *, provider: str, fact_id: str) 
         ),
         raw_revision_id=None,
         raw_payload_id=None,
-        schema_version="v1",
+        # The write path derives the provider from the schema version.
+        schema_version=f"{provider}.v1",
         now=T0,
     )
-    # The write path stamps provider from the normalizer; force the one we want.
-    with factory() as session, session.begin():
-        row = session.get(FactRecord, fact_id)
-        assert row is not None
-        row.provider = provider
 
 
 def _record_decision(factory: sessionmaker[Session], *, by_provider: dict[str, list[str]]) -> None:
@@ -296,7 +292,7 @@ def test_another_tenants_decision_is_not_readable(
         ),
         raw_revision_id=None,
         raw_payload_id=None,
-        schema_version="v1",
+        schema_version="oura.v2",
         now=T0,
     )
     decision = decide_sleep_selection({"oura": ["theirs"]})
