@@ -99,6 +99,13 @@ STREAM_MAX_WINDOW_DAYS = {
     "active_minutes": 14,
 }
 
+# A window wider than the ceiling is walked in pieces, newest first: when the
+# vendor's own pages run out and the request had been clamped, the "next page"
+# is a synthetic token naming where the next piece ends. The caller's page
+# loop needs no knowledge of this; it just keeps following tokens, and its
+# page cap still bounds the walk.
+_WINDOW_TOKEN = "window:"  # noqa: S105 - a cursor prefix, not a credential
+
 
 class GoogleHealthFetchClient:
     """Fetch Google Health v4 data-point pages for a stream and time window."""
@@ -150,16 +157,21 @@ class GoogleHealthFetchClient:
 
         start = require_aware(window_start, field_name="window_start")
         end = require_aware(window_end, field_name="window_end")
+        if page_token and page_token.startswith(_WINDOW_TOKEN):
+            # Resume the walk: this piece ends where the previous one began.
+            end = datetime.fromisoformat(page_token[len(_WINDOW_TOKEN) :])
+            page_token = None
         if end < start:
             msg = "window_end must not precede window_start"
             raise ValueError(msg)
-        # Clamp to the vendor's ceiling for this data type. Trimming the window
-        # costs older days on one call — which the next sync's own window
-        # covers — whereas exceeding it has the whole request refused, so the
-        # stream would ingest nothing at all.
+        # Clamp to the vendor's ceiling for this data type: exceeding it has
+        # the whole request refused, so the stream would ingest nothing at all.
+        # The days trimmed here are fetched by the next piece of the walk.
         max_days = STREAM_MAX_WINDOW_DAYS.get(stream)
-        if max_days is not None:
-            start = max(start, end - timedelta(days=max_days))
+        clamped = False
+        if max_days is not None and start < end - timedelta(days=max_days):
+            start = end - timedelta(days=max_days)
+            clamped = True
 
         start_s = to_utc_rfc3339(start)
         end_s = to_utc_rfc3339(end)
@@ -211,6 +223,8 @@ class GoogleHealthFetchClient:
             raw_next = parsed.get("nextPageToken")
             if isinstance(raw_next, str) and raw_next:
                 next_token = raw_next
+        if next_token is None and clamped:
+            next_token = _WINDOW_TOKEN + start_s
 
         return FetchResult(
             envelope=RawEnvelope(
