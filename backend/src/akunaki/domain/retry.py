@@ -60,13 +60,13 @@ def classify_exception(exc: BaseException) -> FailureKind:
         # would be dead-lettered on the first hit as a deployment bug, silently
         # losing that job's work while a retry moments later would succeed.
         # Matched on the message because the driver raises no dedicated type.
-        if _is_lock_contention(exc):
+        if is_lock_contention(exc):
             return FailureKind.TRANSIENT
         return FailureKind.PERMANENT
     return FailureKind.TRANSIENT
 
 
-def _is_lock_contention(exc: BaseException) -> bool:
+def is_lock_contention(exc: BaseException) -> bool:
     """Whether an exception is a database busy/locked signal.
 
     Deliberately narrow: only the driver's own contention wording counts, so a
