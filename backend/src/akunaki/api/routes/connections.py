@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -46,7 +46,7 @@ from akunaki.api.security import CurrentSession
 from akunaki.application.backfill_request import BackfillRequestService
 from akunaki.application.connections_surface import ConnectionsSurfaceService
 from akunaki.application.oauth_linking import LinkRejection, OAuthLinkingService
-from akunaki.application.sync_request import SyncRequestRejection, SyncRequestService
+from akunaki.application.sync_request import SyncKind, SyncRequestRejection, SyncRequestService
 from akunaki.config import ConnectorOAuthConfig, Settings
 from akunaki.domain.audit import ActorType, AuditAction
 from akunaki.domain.sessions import AuthenticatedSession
@@ -93,9 +93,10 @@ class SyncRequestedResponse(BaseModel):
     created: bool = Field(
         description="False when an identical job was already in flight (deduped).",
     )
-    kind: Literal["sync", "reauth_probe"] = Field(
-        default="sync",
+    kind: SyncKind = Field(
+        default=SyncKind.SYNC,
         description=(
+            "`backfill` when `backfill_days` was given. "
             "`reauth_probe` when the connection needs re-authorization: the job "
             "re-checks the stored grant and restores the connection if it still "
             "works; otherwise the user must re-link."
@@ -232,8 +233,19 @@ def request_sync(
             description="Collapses a retried sync request into one queued job.",
         ),
     ],
+    backfill_days: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            le=365,
+            description=(
+                "Refetch this many days per stream instead of an incremental "
+                "sync; for days missed while the connection was parked."
+            ),
+        ),
+    ] = None,
 ) -> SyncRequestedResponse:
-    """Enqueue an immediate incremental sync for one of the caller's connections.
+    """Enqueue an immediate incremental sync (or a backfill) for one of the caller's connections.
 
     CSRF-enforced (a state-changing method) and tenant-scoped from the session.
     Queues the same job the webhook and reconcile paths use, so a manual sync
@@ -251,6 +263,7 @@ def request_sync(
         connection_id=connection_id,
         idempotency_key=idempotency_key,
         now=datetime.now(UTC),
+        backfill_days=backfill_days,
     )
     audit = AuditRepository(session_factory)
     if outcome is SyncRequestRejection.NOT_FOUND:
@@ -276,7 +289,7 @@ def request_sync(
     return SyncRequestedResponse(
         job_id=outcome.job_id,
         created=outcome.created,
-        kind="reauth_probe" if outcome.probe else "sync",
+        kind=outcome.kind,
     )
 
 
