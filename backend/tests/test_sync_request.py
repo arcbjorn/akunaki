@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+from akunaki.application.sync_handlers import streams_for_provider
 from akunaki.application.sync_request import (
     SyncKind,
     SyncRequestOutcome,
@@ -135,9 +136,9 @@ def test_a_backfill_queues_one_initial_sync_per_stream_with_the_lookback() -> No
     assert isinstance(outcome, SyncRequestOutcome)
     assert outcome.kind is SyncKind.BACKFILL
     assert outcome.created is True
-    # Google Health has three streams; each gets its own job and key.
+    # Every Google Health stream gets its own job and key.
     assert {job_type for job_type, _, _ in jobs.enqueued} == {INITIAL_SYNC_JOB_TYPE}
-    assert len(jobs.enqueued) == 3
+    assert len(jobs.enqueued) == len(streams_for_provider("google_health"))
     for _job_type, payload_json, key in jobs.enqueued:
         payload = json.loads(payload_json)
         assert payload["lookback_days"] == 60
