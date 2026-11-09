@@ -261,3 +261,66 @@ def test_0031_repairs_anomaly_intervals_that_ended_before_they_started(
     finally:
         engine.dispose()
         clear_settings_cache()
+
+
+def test_0032_relabels_google_relayed_sleep_facts(
+    temp_db_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every sleep fact was stamped ``oura``; the ones Google Health relayed were not."""
+    monkeypatch.setenv("AKUNAKI_DATABASE_URL", temp_db_url)
+    clear_settings_cache()
+    cfg = _alembic_config(temp_db_url)
+    command.upgrade(cfg, "20261108_0031")
+
+    engine = create_engine(temp_db_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO tenants (id, created_at, status, primary_timezone, display_name)
+                    VALUES ('t1', '2026-11-09T00:00:00Z', 'active', 'UTC', 'T')
+                    """
+                )
+            )
+            for fact_id, entity_type, schema_version in (
+                ("band", "sleep_session", "google_health.v4"),
+                ("ring", "sleep_session", "oura.v2"),
+                ("hrv", "overnight_vitals", "oura.v2"),
+            ):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO fact_records (
+                            id, tenant_id, provider, entity_type, method, quality,
+                            confidence, schema_version, normalizer_version, fact_key,
+                            version_n, is_current, deletion_state, exclude_from_load,
+                            created_at
+                        ) VALUES (
+                            :id, 't1', 'oura', :entity_type, 'wearable', 'high',
+                            1.0, :schema_version, 'n1', :id,
+                            1, 1, 'active', 0,
+                            '2026-11-09T00:00:00Z'
+                        )
+                        """
+                    ),
+                    {"id": fact_id, "entity_type": entity_type, "schema_version": schema_version},
+                )
+
+        command.upgrade(cfg, "head")
+        with engine.begin() as conn:
+            rows = conn.execute(text("SELECT id, provider FROM fact_records ORDER BY id")).all()
+        assert [tuple(row) for row in rows] == [
+            ("band", "google_health"),
+            ("hrv", "oura"),
+            ("ring", "oura"),
+        ]
+
+        command.downgrade(cfg, "20261108_0031")
+        with engine.begin() as conn:
+            band = conn.execute(text("SELECT provider FROM fact_records WHERE id = 'band'")).one()
+        assert tuple(band) == ("oura",)
+    finally:
+        engine.dispose()
+        clear_settings_cache()
